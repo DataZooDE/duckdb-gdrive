@@ -1,0 +1,34 @@
+{
+  "not_found_get": {
+    "status": 404,
+    "body": "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"File not found: 1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.\",\n    \"errors\": [\n      {\n        \"message\": \"File not found: 1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.\",\n        \"domain\": \"global\",\n        \"reason\": \"notFound\",\n        \"location\": \"fileId\",\n        \"locationType\": \"parameter\"\n      }\n    ]\n  }\n}\n"
+  },
+  "not_found_media": {
+    "status": 404,
+    "body": "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"File not found: 1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.\",\n    \"errors\": [\n      {\n        \"message\": \"File not found: 1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.\",\n        \"domain\": \"global\",\n        \"reason\": \"notFound\",\n        \"location\": \"fileId\",\n        \"locationType\": \"parameter\"\n      }\n    ]\n  }\n}\n"
+  },
+  "unauthorized": {
+    "status": 401,
+    "body": "{\n  \"error\": {\n    \"code\": 401,\n    \"message\": \"Request had invalid authentication credentials. Expected OAuth 2 access token, login cookie or other valid authentication credential. See https://developers.google.com/identity/sign-in/web/devconsole-project.\",\n    \"errors\": [\n      {\n        \"message\": \"Invalid Credentials\",\n        \"domain\": \"global\",\n        \"reason\": \"authError\",\n        \"location\": \"Authorization\",\n        \"locationType\": \"header\"\n      }\n    ],\n    \"status\": \"UNAUTHENTICATED\"\n  }\n}\n"
+  },
+  "no_auth": {
+    "status": 401,
+    "body": "{\n  \"error\": {\n    \"code\": 401,\n    \"message\": \"Request is missing required authentication credential. Expected OAuth 2 access token, login cookie or other valid authentication credential. See https://developers.google.com/identity/sign-in/web/devconsole-project.\",\n    \"errors\": [\n      {\n        \"message\": \"Login Required.\",\n        \"domain\": \"global\",\n        \"reason\": \"required\",\n        \"location\": \"Authorization\",\n        \"locationType\": \"header\"\n      }\n    ],\n    \"status\": \"UNAUTHENTICATED\",\n    \"details\": [\n      {\n        \"@type\": \"type.googleapis.com/google.rpc.ErrorInfo\",\n        \"reason\": \"CREDENTIALS_MISSING\",\n        \"domain\": \"googleapis.com\",\n        \"metadata\": {\n          \"service\": \"drive.googleapis.com\",\n          \"method\": \"google.apps.drive.v3.DriveAbout.Get\"\n        }\n      }\n    ]\n  }\n}\n"
+  },
+  "bad_field": {
+    "status": 400,
+    "body": "{\n  \"error\": {\n    \"code\": 400,\n    \"message\": \"Invalid field selection nonexistentfield\",\n    \"errors\": [\n      {\n        \"message\": \"Invalid field selection nonexistentfield\",\n        \"domain\": \"global\",\n        \"reason\": \"invalidParameter\",\n        \"location\": \"fields\",\n        \"locationType\": \"parameter\"\n      }\n    ]\n  }\n}\n"
+  },
+  "bad_query": {
+    "status": 400,
+    "body": "{\n  \"error\": {\n    \"code\": 400,\n    \"message\": \"Invalid Value\",\n    \"errors\": [\n      {\n        \"message\": \"Invalid Value\",\n        \"domain\": \"global\",\n        \"reason\": \"invalid\",\n        \"location\": \"q\",\n        \"locationType\": \"parameter\"\n      }\n    ]\n  }\n}\n"
+  },
+  "storage_quota": {
+    "status": 403,
+    "body": "{\n  \"error\": {\n    \"code\": 403,\n    \"message\": \"Service Accounts do not have storage quota. Leverage shared drives (https://developers.google.com/workspace/drive/api/guides/about-shareddrives), or use OAuth delegation (http://support.google.com/a/answer/7281227) instead.\",\n    \"errors\": [\n      {\n        \"message\": \"Service Accounts do not have storage quota. Leverage shared drives (https://developers.google.com/workspace/drive/api/guides/about-shareddrives), or use OAuth delegation (http://support.google.com/a/answer/7281227) instead.\",\n        \"domain\": \"usageLimits\",\n        \"reason\": \"storageQuotaExceeded\"\n      }\n    ]\n  }\n}\n"
+  },
+  "export_non_native": {
+    "status": 404,
+    "body": "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"File not found: 1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.\",\n    \"errors\": [\n      {\n        \"message\": \"File not found: 1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.\",\n        \"domain\": \"global\",\n        \"reason\": \"notFound\",\n        \"location\": \"fileId\",\n        \"locationType\": \"parameter\"\n      }\n    ]\n  }\n}\n"
+  }
+}
