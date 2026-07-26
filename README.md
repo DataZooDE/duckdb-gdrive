@@ -23,6 +23,37 @@ Because DuckDB dispatches all file access through its virtual filesystem,
 anything built on that layer inherits the scheme for free — `read_parquet`,
 `read_csv`, `COPY`, `glob`, `ATTACH`, and table formats such as DuckLake.
 
+## DuckLake on Drive
+
+That last one is the interesting case, so it is **tested rather than assumed**
+(`test/sql/gdrive_ducklake.test.template`, live against real Drive):
+
+```sql
+INSTALL ducklake; LOAD ducklake;
+
+-- Catalog stays local; only the DATA lives on Drive.
+ATTACH 'ducklake:metadata.db' AS lake (DATA_PATH 'gdrive://lakehouse/');
+USE lake;
+
+CREATE TABLE t AS SELECT * FROM read_parquet('...');
+INSERT INTO t SELECT ...;         -- appends as new Parquet on Drive
+DELETE FROM t WHERE grp = 3;      -- writes delete-files alongside
+SELECT * FROM t AT (VERSION => 1);-- time travel still reads the old files
+```
+
+Verified: write, cold read-back with an exact checksum in a fresh process,
+a second transaction, deletes, and time travel — with the Parquet data and
+delete files visible through `glob('gdrive://lakehouse/**')`.
+
+**Keep the catalog off Drive.** `ducklake:` metadata wants atomic renames and
+Drive has none, which is the same reason a DuckDB database file must not live
+on `gdrive://`. Point `DATA_PATH` at Drive and leave the catalog on a local
+disk or a real database.
+
+Worth being blunt about the fit: this makes Drive a workable *storage layer*
+for an occasionally-queried lakehouse. It does not make Drive fast — see
+*Performance and quota*.
+
 > **Google Drive, not Google Cloud Storage.** If your data is in a `gs://`
 > bucket you want the `gcs` extension or `httpfs`. This is for files living in
 > Drive — the Sheets, CSV exports and Parquet drops that people actually keep
@@ -30,14 +61,25 @@ anything built on that layer inherits the scheme for free — `read_parquet`,
 
 ## Status
 
-Early, but the read path is real. **Verified against a live Google Drive
-account**: reads by file id and by path, multi-segment resolution, UTF-8 and
-spaced names, ranged Parquet reads, globbing, listing past Drive's 100-item
-page default, native Sheet export, and the duplicate-name error.
+Early, but read *and* write are real. **Verified against a live Google Drive
+account** (102 assertions across four live suites, plus 860 pure-logic ones):
 
-**Not yet verified: the write path** (`COPY … TO`), deletion, moves, and the
-performance target. Do not use this in production yet.
-See `docs/implementation-plan.md` for exactly what is verified and what is not.
+- reads by file id and by path, multi-segment resolution, UTF-8 and spaced
+  names, ranged Parquet reads, globbing, listing past Drive's 100-item page
+  default, native Sheet export, and the duplicate-name error;
+- writes (`COPY … TO`), overwrite, move, trash-vs-permanent delete, and the
+  storage-quota error a service account gets outside a Shared Drive;
+- hive-partitioned reads, and **byte-for-byte identity** between a local read
+  and the same file over `gdrive://`;
+- **DuckLake** end to end, including deletes and time travel.
+
+**Not yet verified: the performance target.** The `gdrive://` and local
+benchmark legs are measured, but the 3×-GCS gate has no GCS denominator yet,
+so REQ-NF-01 is unproven — see `docs/benchmark.md`, which says so plainly
+rather than quoting the half of the result that looks good.
+
+Not production-ready. `docs/implementation-plan.md` lists exactly what is
+verified and what is not.
 
 ## Addressing
 
