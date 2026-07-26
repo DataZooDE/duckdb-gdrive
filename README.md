@@ -13,7 +13,7 @@ CREATE SECRET gdrive (
     PROVIDER service_account,
     KEY_FILE '/etc/creds/sa.json',
     DRIVE_ID '0ABcDeFgHiJkLmNoPQ',
-    SCOPE 'https://www.googleapis.com/auth/drive.readonly'
+    DRIVE_SCOPE 'https://www.googleapis.com/auth/drive.readonly'
 );
 
 SELECT count(*) FROM 'gdrive://Finance/2026/actuals.parquet';
@@ -30,11 +30,14 @@ anything built on that layer inherits the scheme for free — `read_parquet`,
 
 ## Status
 
-Early. The build, the pure-logic layers (URI parsing, glob, error
-classification, RFC 7523 assertions) and the live test harness are done and
-tested. **The Drive-facing code is written but not yet verified against a live
-Drive account** — see `docs/implementation-plan.md` for exactly what is
-verified and what is not. Do not use this in production yet.
+Early, but the read path is real. **Verified against a live Google Drive
+account**: reads by file id and by path, multi-segment resolution, UTF-8 and
+spaced names, ranged Parquet reads, globbing, listing past Drive's 100-item
+page default, native Sheet export, and the duplicate-name error.
+
+**Not yet verified: the write path** (`COPY … TO`), deletion, moves, and the
+performance target. Do not use this in production yet.
+See `docs/implementation-plan.md` for exactly what is verified and what is not.
 
 ## Addressing
 
@@ -62,10 +65,29 @@ extension fails and names both file ids so you can use the `id:` form.
 | `config` | you already hold an access/refresh token |
 | `authorization_code` | interactive browser consent |
 
-**A service account needs a Shared Drive.** Service accounts have no personal
-Drive storage quota, so they cannot own files in a My Drive — Google returns
-`403 storageQuotaExceeded` on upload. Share a folder with the service account
-for read-only use, or use a Shared Drive for read/write.
+**A service account needs a Shared Drive to write.** Service accounts have no
+personal Drive storage quota, so they cannot own files in a My Drive — Google
+returns `403 storageQuotaExceeded` on upload. Share a folder with the service
+account for read-only use, or use a Shared Drive for read/write.
+
+### Binding a root
+
+| Option | When |
+|---|---|
+| `DRIVE_ID` | the root is a **Shared Drive** (its id starts `0A`) |
+| `ROOT_FOLDER_ID` | the root is an **ordinary folder**, shared with your identity |
+
+These are not interchangeable. Drive's API scopes a Shared Drive query with
+`corpora=drive`+`driveId`, and sending those for a plain folder returns
+`404 "Shared drive not found"` — which reads like a permissions problem and is
+nothing of the sort.
+
+> **`DRIVE_SCOPE`, not `SCOPE`.** `SCOPE` is a reserved DuckDB clause meaning
+> *"which paths may use this secret"*; DuckDB's parser consumes it before an
+> extension ever sees it. Writing `SCOPE 'https://www.googleapis.com/auth/drive'`
+> silently restricts the secret to paths beginning with that URL — which no
+> `gdrive://` path does — so the secret matches nothing and every query fails
+> with "no secret configured". The OAuth scope goes in `DRIVE_SCOPE`.
 
 Scopes default to the narrowest that works (`drive.readonly`). Tokens live in
 memory or in DuckDB secrets, are never written to disk by this extension, and
