@@ -94,6 +94,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+      # actions/checkout does not fetch submodule TAGS, and DuckDB derives its
+      # own version from `git describe --tags` inside duckdb/. Without them it
+      # falls back to a dummy "v0.0.1" and stamps every artifact built here
+      # for a DuckDB version that does not exist -- unloadable anywhere. The
+      # distribution pipeline checks DuckDB out properly and is unaffected;
+      # this is only about the artifact THIS workflow builds and then checks.
+      - name: Fetch duckdb tags (DuckDB versions itself from git describe)
+        run: git -C duckdb fetch --tags --force origin
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
       - name: Install vcpkg
@@ -138,6 +146,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+      # actions/checkout does not fetch submodule TAGS, and DuckDB derives its
+      # own version from `git describe --tags` inside duckdb/. Without them it
+      # falls back to a dummy "v0.0.1" and stamps every artifact built here
+      # for a DuckDB version that does not exist -- unloadable anywhere. The
+      # distribution pipeline checks DuckDB out properly and is unaffected;
+      # this is only about the artifact THIS workflow builds and then checks.
+      - name: Fetch duckdb tags (DuckDB versions itself from git describe)
+        run: git -C duckdb fetch --tags --force origin
       - uses: actions/setup-python@v5
         with: { python-version: '3.12' }
       - uses: astral-sh/setup-uv@v5
