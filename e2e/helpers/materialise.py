@@ -81,7 +81,11 @@ def render(text: str, subs: dict, drive: Drive, fixtures_id: str, source: str) -
 
 def main() -> int:
     try:
-        drive = Drive.from_env()
+        # Materialising CREATES a scratch folder and its heartbeat, so it
+        # writes -- and a service account cannot write outside a Shared Drive.
+        # Read-only tests still run as the service account; only this
+        # provisioning step needs the delegated user.
+        drive = Drive.from_env(prefer_user=True)
     except DriveConfigError as e:
         print(f"cannot materialise live tests: {e}", file=sys.stderr)
         return 2
