@@ -1,5 +1,58 @@
 # Implementation plan — `duckdb-gdrive`
 
+> ## RESUME HERE (2026-07-26, 19 commits, pushed to
+> ## github.com/DataZooDE/duckdb-gdrive)
+>
+> **The extension works against real Google Drive.** Live read 34/34, live
+> write 23/23, unit 162 cases / 860 assertions. Waves 0–3 are done.
+>
+> ```bash
+> export VCPKG_ROOT=/home/jr/.local/share/vcpkg
+> export VCPKG_TOOLCHAIN_PATH=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake
+> GEN=ninja make && make test                     # unit + credential-free SQL
+> set -a && . .env.gdrive && set +a
+> ./scripts/run_live_tests.sh                     # live read + write suites
+> ```
+>
+> **Remaining work, in priority order.** Only 1 of the 8 Definition-of-Done
+> criteria in §6 is fully met; these close the rest:
+>
+> 1. **Codex review #2 findings.** A read-path review was running when the
+>    session ended — output at `/tmp/.../tasks/bqs0u8f0c.output` if it
+>    survived, else re-run per §3.3. Triage into `docs/reviews/`.
+> 2. **CI green (criterion 5).** First-ever run started at commit `536a9bc`;
+>    `gh run list --repo DataZooDE/duckdb-gdrive`. Never yet been green —
+>    expect build-plumbing failures (vcpkg bootstrap, MSVC C++17 leg), not
+>    extension bugs.
+> 3. **`make bench` (criterion 2).** `wide.parquet` (~100 MB) is seeded.
+>    Needs the gs:// counterpart and a committed number in
+>    `docs/benchmark.md`. Gate: within 3× GCS.
+> 4. **Quota error (criterion 4).** 403/429 rate-limit is classified from
+>    documented shapes but has never been provoked live.
+> 5. **`check_no_credentials.sh` PEM branch (criterion 7).** KNOWN BROKEN: a
+>    planted PEM in `src/` does NOT trip it. The token-shaped branch IS
+>    verified. Fix before release.
+> 6. **Wave 6 — `erpl-web` migration (criterion 6).** Untouched. This is the
+>    debt D-2 took on: `datazoo-oauth2` exists at
+>    `/home/jr/Projects/datazoo/datazoo-oauth2` (35/35 green) but `erpl-web`
+>    still holds its own copy, so REQ-A-02 is violated and there are two
+>    OAuth implementations. **Gate: erpl-web's existing OAuth2 suites must
+>    pass UNCHANGED.**
+> 7. **Community-extensions PR (criterion 8).** Descriptor staged at
+>    `docs/community-extension-description.yml`; set `ref` to a release SHA
+>    whose live suite passed.
+>
+> **Gotchas that cost time before — do not rediscover:**
+> - `DRIVE_SCOPE`, never `SCOPE`. `SCOPE` is a reserved DuckDB clause meaning
+>   *which paths may use this secret*; using it for the OAuth scope makes the
+>   secret match nothing and every query fail with "no secret configured".
+> - `ROOT_FOLDER_ID` for a plain folder; `DRIVE_ID` **only** for a real Shared
+>   Drive. Mixing them yields `404 "Shared drive not found"`.
+> - Reads run as the service account; **writes need the delegated user** — a
+>   service account has no Drive storage quota.
+>
+> ---
+>
 > **Progress note (2026-07-26).** Wave 0 is complete; the pure-logic layers of
 > Waves 1 and 2 are done and green (`make unit_test`). Codex review #1 has run
 > and its findings are triaged in
