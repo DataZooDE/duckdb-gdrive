@@ -1,0 +1,91 @@
+PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+
+# Configuration of extension
+EXT_NAME=gdrive
+EXT_CONFIG=${PROJ_DIR}extension_config.cmake
+
+# Include the Makefile from extension-ci-tools
+include extension-ci-tools/makefiles/duckdb_extension.Makefile
+
+# ---------------------------------------------------------------------------
+# Catch2 unit tests -- pure logic, no DuckDB linkage, no network, no
+# credentials. Always runnable by anyone who can build. See
+# docs/implementation-plan.md section 1.
+# ---------------------------------------------------------------------------
+.PHONY: unit_test
+unit_test: release
+	@if [ ! -x build/release/test/gdrive_unit_tests ]; then \
+		echo "build/release/test/gdrive_unit_tests not found -- check Catch2 in vcpkg.json"; \
+		exit 1; \
+	fi
+	./build/release/test/gdrive_unit_tests --reporter console::out=-
+
+# ---------------------------------------------------------------------------
+# Live SQL tests against REAL Google Drive. There is no fake and no replay
+# (decision D-1). Without credentials these skip cleanly via `require-env`,
+# so `make test` stays green for a developer who has none.
+#
+# test_live is the same suite but FAILS LOUDLY when credentials are absent --
+# use it in CI where a silent skip would be a false green.
+# ---------------------------------------------------------------------------
+.PHONY: test_live
+test_live: release
+	@./scripts/run_live_tests.sh
+
+# ---------------------------------------------------------------------------
+# Fixture management against the CI Shared Drive.
+#   seed_fixtures  -- idempotent upload of the permanent read-only fixtures
+#   sweep_orphans  -- delete /scratch/run-* folders older than 24h (crashed
+#                     runs leak them)
+# ---------------------------------------------------------------------------
+.PHONY: seed_fixtures
+seed_fixtures:
+	@cd e2e && uv run python -m helpers.seed
+
+.PHONY: sweep_orphans
+sweep_orphans:
+	@cd e2e && uv run python -m helpers.sweep
+
+# ---------------------------------------------------------------------------
+# Python E2E harness: fixture provisioning/teardown, API-call-count
+# assertions, the headless interactive-OAuth flow, and write round trips --
+# the things SQLLogicTest cannot express. Lives outside test/ so DuckDB's
+# unittest scanner does not walk the venv.
+# ---------------------------------------------------------------------------
+.PHONY: e2e
+e2e: release
+	@cd e2e && uv sync --frozen && uv run pytest -v
+
+# ---------------------------------------------------------------------------
+# REQ-NF-01 benchmark: cold 100MB Parquet scan over gdrive:// vs gs:// vs
+# local. Gate is 3x GCS. Result is committed to docs/benchmark.md.
+# ---------------------------------------------------------------------------
+.PHONY: bench
+bench: release
+	@cd e2e && uv run python -m helpers.bench
+
+# ---------------------------------------------------------------------------
+# Static-linkage smoke test: the loadable extension may only dynamically link
+# platform standard libraries.
+# ---------------------------------------------------------------------------
+.PHONY: smoke_static
+smoke_static: release
+	@./scripts/check_static_linkage.sh \
+		build/release/extension/gdrive/gdrive.duckdb_extension
+
+# ---------------------------------------------------------------------------
+# Credential hygiene (REQ-NF-03). Fails if anything matching a Google key-file
+# pattern is tracked by git, or if a token-shaped string appears in sources.
+# .gitignore only protects people who never ran `git add -f`.
+# ---------------------------------------------------------------------------
+.PHONY: check_credentials
+check_credentials:
+	@./scripts/check_no_credentials.sh
+
+# ---------------------------------------------------------------------------
+# README verifier: extract every ```sql block from README.md and run it, so
+# the docs cannot drift from the code.
+# ---------------------------------------------------------------------------
+.PHONY: verify_readme
+verify_readme: release
+	@python3 scripts/verify_readme.py

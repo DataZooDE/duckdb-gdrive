@@ -1,0 +1,34 @@
+build
+.cache/
+.idea
+cmake-build-debug
+duckdb_unittest_tempdir/
+.DS_Store
+testext
+compile_commands.json
+.Rhistory
+scripts/__pycache__/
+
+# ---------------------------------------------------------------------------
+# Credentials. REQ-NF-03: no credential is ever committed. scripts/
+# check_no_credentials.sh enforces these same patterns in CI, because
+# .gitignore only helps people who have not already run `git add -f`.
+# ---------------------------------------------------------------------------
+.env.gdrive
+.env.gdrive.local
+# Google OAuth client JSON downloaded from console.cloud.google.com:
+# client_secret_<client_id>.apps.googleusercontent.com.json
+client_secret_*.json
+# GCP service-account JSON keys: <project>-<12 hex>.json, plus our convention.
+.gcp-key.json
+*-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f].json
+
+# Materialised live SQL tests (generated from *.test.template by
+# scripts/materialise_tests.py with the run's fixture ids substituted).
+test/sql/live/*.test
+
+# E2E harness (Python + uv)
+e2e/.venv/
+e2e/.pytest_cache/
+e2e/**/__pycache__/
+e2e/.uv-cache/

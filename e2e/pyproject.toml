@@ -1,0 +1,20 @@
+[project]
+name = "duckdb-gdrive-e2e"
+version = "0.1.0"
+description = "Live end-to-end harness for the duckdb-gdrive extension. Talks to real Google Drive; there is no fake and no replay (plan decision D-1)."
+requires-python = ">=3.11"
+dependencies = [
+    "duckdb>=1.5.0",
+    "google-auth>=2.30.0",
+    "requests>=2.32.0",
+    "pytest>=8.0.0",
+    "pytest-timeout>=2.3.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+timeout = 300
+markers = [
+    "live: requires real Google Drive credentials",
+    "slow: large-fixture tests (100MB scans)",
+]

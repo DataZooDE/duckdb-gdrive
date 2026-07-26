@@ -1,0 +1,10 @@
+# name: test/sql/gdrive_load.test
+# description: S-0.1 -- the extension loads and reports its version
+# group: [sql]
+
+require gdrive
+
+query I
+SELECT gdrive_version()
+----
+0.1.0
