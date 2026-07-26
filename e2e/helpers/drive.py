@@ -207,15 +207,15 @@ class Drive:
 
         if prefer_user:
             user_creds = _user_credentials()
-            if user_creds is not None:
-                d = cls(drive_id=drive_id, _creds=user_creds, _identity="user")
+            if user_creds is None:
+                raise DriveConfigError(
+                    "writing needs a delegated user token: a service account has no "
+                    "Drive storage quota and cannot create files outside a Shared "
+                    "Drive. Run:  uv run --with requests python scripts/oauth_consent.py"
+                )
+            d = cls(drive_id=drive_id, _creds=user_creds, _identity="user")
             d.is_shared_drive = d._detect_shared_drive()
             return d
-            raise DriveConfigError(
-                "writing needs a delegated user token: a service account has no "
-                "Drive storage quota and cannot create files outside a Shared "
-                "Drive. Run:  uv run --with requests python scripts/oauth_consent.py"
-            )
 
         creds = service_account.Credentials.from_service_account_file(
             str(_key_path()), scopes=SCOPES
@@ -236,8 +236,25 @@ class Drive:
         self.calls[kind] = self.calls.get(kind, 0) + 1
         headers = {**self._headers(), **kw.pop("headers", {})}
         params = {**SHARED_DRIVE_PARAMS, **kw.pop("params", {})}
-        resp = requests.request(method, url, headers=headers, params=params, timeout=60, **kw)
+        # A flat 60s covers every metadata call with room to spare, but it is
+        # far too short for the 100 MB benchmark fixture: the socket write
+        # timed out mid-body and seeding died with a bare ConnectionError that
+        # named neither the file nor the size. Callers moving bulk bytes pass
+        # their own budget; see upload().
+        timeout = kw.pop("timeout", 60)
+        resp = requests.request(method, url, headers=headers, params=params,
+                                timeout=timeout, **kw)
         return resp
+
+    @staticmethod
+    def _transfer_timeout(nbytes: int) -> int:
+        """Seconds to allow for moving `nbytes`, floor 60.
+
+        Assumes a pessimistic 1 MB/s -- slow enough to cover a bad hotel link
+        and a CI runner under load, while still bounding a genuinely wedged
+        connection rather than hanging forever.
+        """
+        return max(60, 60 + int(nbytes / 1e6))
 
     def _ok(self, resp: requests.Response, what: str) -> dict:
         if resp.status_code not in (200, 201, 204):
@@ -309,11 +326,16 @@ class Drive:
 
     def download(self, file_id: str, byte_range: tuple[int, int] | None = None) -> bytes:
         headers = {}
+        # A whole-file download has no declared size until the response
+        # arrives, and the benchmark fixture is 100 MB -- budget for the
+        # unranged case as if it were large, and for a ranged one by its span.
+        nbytes = (byte_range[1] - byte_range[0] + 1) if byte_range else 512_000_000
         if byte_range is not None:
             headers["Range"] = f"bytes={byte_range[0]}-{byte_range[1]}"
         resp = self._request(
             "GET", f"{DRIVE_V3}/files/{file_id}", "files.get.media",
             params={"alt": "media"}, headers=headers,
+            timeout=self._transfer_timeout(nbytes),
         )
         if resp.status_code not in (200, 206):
             raise RuntimeError(f"download failed: HTTP {resp.status_code}: {resp.text[:300]}")
@@ -367,6 +389,7 @@ class Drive:
         resp = self._request(
             "POST", f"{UPLOAD_V3}/files", "files.create.upload",
             params={"uploadType": "multipart"}, files=files,
+            timeout=self._transfer_timeout(len(content)),
         )
         return self._ok(resp, "upload")["id"]
 

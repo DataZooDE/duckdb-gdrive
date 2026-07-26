@@ -79,10 +79,7 @@ def _make_wide_parquet(target_mb: int = 100) -> bytes:
     """
     import duckdb
 
-    with tempfile.TemporaryDirectory() as td:
-        out = Path(td) / "wide.parquet"
-        con = duckdb.connect()
-        rows = target_mb * 200_000
+    def write(con, out: Path, rows: int) -> int:
         con.execute(f"""
             COPY (
                 SELECT i AS id,
@@ -94,7 +91,27 @@ def _make_wide_parquet(target_mb: int = 100) -> bytes:
                 FROM range({rows}) t(i)
             ) TO '{out}' (FORMAT parquet, COMPRESSION zstd)
         """)
+        return out.stat().st_size
+
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "wide.parquet"
+        con = duckdb.connect()
+        # Measure, then scale -- do NOT hardcode a rows-per-MB constant. The
+        # original guess (200_000 rows/MB) was off by roughly 9x and produced
+        # an 870 MB fixture that nothing noticed, because the only assertion
+        # anywhere was the word "~100MB" in a docstring. zstd's ratio on this
+        # data depends on the DuckDB version, so calibrating each time is the
+        # only way the number stays true.
+        target = target_mb * 1_000_000
+        rows = 2_000_000
+        size = write(con, out, rows)
+        for _ in range(3):
+            if abs(size - target) <= target * 0.15:
+                break
+            rows = max(1, int(rows * target / size))
+            size = write(con, out, rows)
         con.close()
+        print(f"    generated {size / 1e6:.1f} MB from {rows:,} rows")
         return out.read_bytes()
 
 
@@ -154,12 +171,29 @@ def seed(drive: Drive) -> dict:
     # --- the benchmark subject -------------------------------------------
     if os.environ.get("GDRIVE_SEED_SKIP_WIDE") != "1":
         existing = [f for f in drive.list_children(fixtures_root, name="wide.parquet")]
-        if not existing:
-            print("  wide.parquet: generating ~100MB (once) ...")
+        force = os.environ.get("GDRIVE_SEED_FORCE_WIDE") == "1"
+
+        # Unlike every other fixture, this one is upload-ONCE: it is ~100 MB
+        # and re-transferring it on each seed would dominate the run. The
+        # trade-off is that a wrong fixture is sticky, which is exactly what
+        # happened -- a generator bug produced 870 MB and the seeder happily
+        # reported "wide.parquet -> <id>" on every later run. So: state the
+        # size out loud, and say plainly how to replace it.
+        if existing and not force:
+            have_mb = int(existing[0].get("size", 0)) / 1e6
+            print(f"  wide.parquet: keeping existing {have_mb:.1f} MB copy "
+                  f"(GDRIVE_SEED_FORCE_WIDE=1 to regenerate)")
+            if not (85 <= have_mb <= 115):
+                print(f"  WARNING: benchmark fixture is {have_mb:.1f} MB, not ~100 MB. "
+                      f"REQ-NF-01 numbers taken against it are not comparable.")
+            ids["wide.parquet"] = existing[0]["id"]
+        else:
+            if force and existing:
+                print("  wide.parquet: GDRIVE_SEED_FORCE_WIDE=1, replacing")
+            print("  wide.parquet: generating ~100MB ...")
             _upload_if_changed(drive, fixtures_root, "wide.parquet",
                                _make_wide_parquet(), "application/octet-stream")
-        ids["wide.parquet"] = (existing[0]["id"] if existing
-                               else drive.resolve_path("fixtures/wide.parquet"))
+            ids["wide.parquet"] = drive.resolve_path("fixtures/wide.parquet")
         print(f"  wide.parquet -> {ids['wide.parquet']}")
     else:
         print("  wide.parquet: SKIPPED (GDRIVE_SEED_SKIP_WIDE=1)")

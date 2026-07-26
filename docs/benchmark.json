@@ -1,0 +1,38 @@
+{
+  "fixture": "fixtures/wide.parquet",
+  "file_id": "17AVQ4WlKaPE3hFxpuoljHLpe3nXI0qsQ",
+  "size_bytes": 87025665,
+  "repeats": 3,
+  "query": "SELECT count(*), sum(id), sum(h1::HUGEINT), min(s1), max(s1) FROM read_parquet('{uri}')",
+  "legs": [
+    {
+      "leg": "local",
+      "uri": "/tmp/tmpfwwjq4bv/wide.parquet",
+      "min_s": 0.1397472945973277,
+      "median_s": 0.18682255409657955,
+      "samples_s": [
+        0.187,
+        0.397,
+        0.14
+      ],
+      "result": "2000000|1999999000000|18442665268270631852892036|00000f7264c27ba6fea0c837ed6aa0aa|fffffe98d0963d27015c198262d97221"
+    },
+    {
+      "leg": "gdrive",
+      "uri": "gdrive://id:17AVQ4WlKaPE3hFxpuoljHLpe3nXI0qsQ",
+      "min_s": 4.5725436033681035,
+      "median_s": 4.6503607695922256,
+      "samples_s": [
+        4.718,
+        4.573,
+        4.65
+      ],
+      "result": "2000000|1999999000000|18442665268270631852892036|00000f7264c27ba6fea0c837ed6aa0aa|fffffe98d0963d27015c198262d97221"
+    }
+  ],
+  "gdrive_over_gs": null,
+  "gate": {
+    "limit": 3.0,
+    "verdict": "NOT EVALUATED"
+  }
+}
