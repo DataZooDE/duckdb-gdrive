@@ -36,8 +36,22 @@ endif()
 # .md section 1 -- these are the only things Catch2 is allowed to test, and
 # because they do no I/O there is nothing to mock.
 # ---------------------------------------------------------------------------
-set(PURE_SOURCES
+#
+# GLOBbed rather than listed. CMakeLists.txt is the highest-collision file in
+# a DuckDB extension, and several tracks add pure sources concurrently; a
+# glob keeps it out of everyone's file set. CONFIGURE_DEPENDS makes CMake
+# re-glob when a file appears, so `make unit_test` picks up a new source
+# without a manual reconfigure.
+#
+# The pattern is deliberately narrow -- only files that are genuinely pure
+# match. A source needing DuckDB goes in DUCKDB_SOURCES below and is listed
+# explicitly, because that list is small and rarely contested.
+file(GLOB PURE_SOURCES CONFIGURE_DEPENDS
     src/gdrive_version.cpp
+    src/gdrive_uri.cpp
+    src/gdrive_errors.cpp
+    src/gdrive_glob.cpp
+    src/gdrive_service_account_pure.cpp
 )
 
 # ---------------------------------------------------------------------------
