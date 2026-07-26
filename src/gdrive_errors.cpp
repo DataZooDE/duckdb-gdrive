@@ -150,13 +150,207 @@ GDriveErrorKind ClassifyFromStatus(int http_status) {
 // UNAUTHENTICATED path: classification runs on untrusted response bodies, so
 // this must not depend on Google's error text never changing shape.
 //
+// This is DEFENCE IN DEPTH, not the primary control. The primary control is
+// that credentials never enter the code paths that construct these strings
+// in the first place (they come only from Drive's own response body, which
+// should not contain them). This function exists because "should not" is not
+// "cannot": Drive is a third party, proxies/relays can echo back request
+// headers in diagnostic bodies, and classification runs on untrusted bytes.
+//
 // Heuristics, deliberately simple and over-inclusive (a false positive here
 // just means a slightly more generic message, which is the safe direction):
-//   - "Bearer <token>"                      -> "Bearer [redacted]"
+//   - "Bearer <token>", case-insensitive, any run of horizontal whitespace
+//     (space/tab, one or more) between the keyword and the token
+//                                          -> "Bearer [redacted]"
+//   - "Authorization: <scheme> <value>"    -> "Authorization: <scheme>
+//     (any scheme, e.g. "Basic")              [redacted]"
 //   - an OAuth access-token-shaped run      -> "[redacted]"
 //     starting "ya29." (Google's own prefix for user access tokens)
+//   - a Google refresh-token-shaped run     -> "[redacted]"
+//     starting "1//" (Google's own prefix for refresh tokens)
+//   - the value half of a JSON-ish or       -> "[redacted]"
+//     query-string key/value pair whose key
+//     is one of: access_token, refresh_token, private_key, client_secret,
+//     id_token. Handles `"key": "value"`, `key=value`, and `key value`.
+//     Deliberately excludes client_id -- it identifies the OAuth client, not
+//     a secret, and redacting it would make error messages strictly less
+//     useful for no security benefit.
 //   - a PEM block (BEGIN/END ... KEY)       -> "[redacted]"
+//
+// NOT attempted: generic detection of "base64-shaped blobs" as a blanket
+// rule. Nearly anything can look base64-shaped (file ids, hashes, ordinary
+// words), so a context-free rule would over-redact and silently degrade
+// unrelated diagnostics; the key- and scheme-anchored rules above catch the
+// realistic cases (JSON bodies, query strings, Authorization headers)
+// without that cost.
 // ---------------------------------------------------------------------------
+
+//! Case-insensitive substring search, ASCII-only (sufficient here: every
+//! needle used below is an ASCII keyword).
+size_t FindCaseInsensitive(const std::string &haystack, const std::string &needle_lower, size_t from) {
+	if (needle_lower.size() > haystack.size() || from > haystack.size() - needle_lower.size()) {
+		return std::string::npos;
+	}
+	for (size_t i = from; i + needle_lower.size() <= haystack.size(); ++i) {
+		bool match = true;
+		for (size_t j = 0; j < needle_lower.size(); ++j) {
+			if (std::tolower(static_cast<unsigned char>(haystack[i + j])) != needle_lower[j]) {
+				match = false;
+				break;
+			}
+		}
+		if (match) {
+			return i;
+		}
+	}
+	return std::string::npos;
+}
+
+bool IsIdentifierChar(char c) {
+	return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+}
+
+const std::string kRedacted = "[redacted]";
+
+//! Redact the token following a case-insensitive `keyword` (e.g. "bearer"),
+//! separated from it by one or more horizontal whitespace characters. If no
+//! whitespace immediately follows a match (e.g. the keyword is part of a
+//! longer word), that occurrence is left untouched and the search continues
+//! past it -- this is what keeps "bearerish" from being mangled.
+void RedactKeywordToken(std::string &out, const std::string &keyword_lower) {
+	size_t pos = 0;
+	while ((pos = FindCaseInsensitive(out, keyword_lower, pos)) != std::string::npos) {
+		size_t after_keyword = pos + keyword_lower.size();
+		size_t token_start = after_keyword;
+		while (token_start < out.size() && (out[token_start] == ' ' || out[token_start] == '\t')) {
+			++token_start;
+		}
+		if (token_start == after_keyword) {
+			pos = after_keyword;
+			continue;
+		}
+		size_t token_end = token_start;
+		while (token_end < out.size() && !std::isspace(static_cast<unsigned char>(out[token_end]))) {
+			++token_end;
+		}
+		if (token_end == token_start) {
+			pos = after_keyword;
+			continue;
+		}
+		out.replace(token_start, token_end - token_start, kRedacted);
+		pos = token_start + kRedacted.size();
+	}
+}
+
+//! Redact the run of token-shaped characters (alnum, '.', '-', '_', '/')
+//! immediately following a literal `prefix` (e.g. "ya29." or "1//").
+void RedactPrefixedRun(std::string &out, const std::string &prefix) {
+	size_t pos = 0;
+	while ((pos = out.find(prefix, pos)) != std::string::npos) {
+		size_t token_end = pos;
+		while (token_end < out.size() &&
+		       (std::isalnum(static_cast<unsigned char>(out[token_end])) || out[token_end] == '.' ||
+		        out[token_end] == '-' || out[token_end] == '_' || out[token_end] == '/')) {
+			++token_end;
+		}
+		out.replace(pos, token_end - pos, kRedacted);
+		pos += kRedacted.size();
+	}
+}
+
+//! Redact the value half of a `key`/value pair wherever `key` appears as a
+//! whole word (not as part of a longer identifier), covering the JSON
+//! (`"key": "value"`), query-string (`key=value`) and plain-text
+//! (`key value`) spellings uniformly. If `key` is not followed by a
+//! recognizable key/value delimiter, the occurrence is left alone -- this is
+//! what keeps a key name mentioned in prose from mangling unrelated text.
+void RedactKeyValue(std::string &out, const std::string &key_lower) {
+	size_t pos = 0;
+	while ((pos = FindCaseInsensitive(out, key_lower, pos)) != std::string::npos) {
+		size_t match_end = pos + key_lower.size();
+		// Word-boundary check: a real key is not preceded or followed by
+		// another identifier character (rules out "my_client_secretary").
+		bool boundary_before = (pos == 0) || !IsIdentifierChar(out[pos - 1]);
+		bool boundary_after = (match_end == out.size()) || !IsIdentifierChar(out[match_end]);
+		if (!boundary_before || !boundary_after) {
+			pos = match_end;
+			continue;
+		}
+
+		size_t i = match_end;
+		// Skip the key's own closing quote (if any), then ':' or '=', then
+		// whitespace, then the value's opening quote (if any).
+		while (i < out.size() && (out[i] == '"' || out[i] == '\'' || out[i] == ':' || out[i] == '=' ||
+		                          out[i] == ' ' || out[i] == '\t')) {
+			++i;
+		}
+		if (i == match_end) {
+			// No delimiter followed the key at all -- not a key/value
+			// occurrence (e.g. the bare word appears in prose).
+			pos = match_end;
+			continue;
+		}
+
+		size_t value_start = i;
+		size_t value_end = value_start;
+		while (value_end < out.size() && out[value_end] != '"' && out[value_end] != '\'' &&
+		       out[value_end] != ',' && out[value_end] != '}' && out[value_end] != '&' &&
+		       !std::isspace(static_cast<unsigned char>(out[value_end]))) {
+			++value_end;
+		}
+		if (value_end == value_start) {
+			pos = match_end;
+			continue;
+		}
+		out.replace(value_start, value_end - value_start, kRedacted);
+		pos = value_start + kRedacted.size();
+	}
+}
+
+//! Redact "Authorization: <scheme> <value>" wholesale (both HTTP-header and
+//! prose spellings), leaving only the scheme name (e.g. "Basic") for
+//! context. This is in addition to the standalone Bearer handling above
+//! because a non-Bearer scheme (Basic, Digest, ...) never contains the word
+//! "Bearer" for that rule to anchor on.
+void RedactAuthorizationHeader(std::string &out) {
+	size_t pos = 0;
+	const std::string needle_lower = "authorization";
+	while ((pos = FindCaseInsensitive(out, needle_lower, pos)) != std::string::npos) {
+		size_t i = pos + needle_lower.size();
+		while (i < out.size() && (out[i] == ':' || out[i] == ' ' || out[i] == '\t')) {
+			++i;
+		}
+		// Skip the scheme word (Bearer / Basic / Digest / ...), if present.
+		size_t scheme_end = i;
+		while (scheme_end < out.size() && !std::isspace(static_cast<unsigned char>(out[scheme_end]))) {
+			++scheme_end;
+		}
+		if (scheme_end == i) {
+			pos = i;
+			continue;
+		}
+		size_t value_start = scheme_end;
+		while (value_start < out.size() &&
+		       (out[value_start] == ' ' || out[value_start] == '\t')) {
+			++value_start;
+		}
+		if (value_start == scheme_end) {
+			pos = scheme_end;
+			continue;
+		}
+		size_t value_end = value_start;
+		while (value_end < out.size() && !std::isspace(static_cast<unsigned char>(out[value_end]))) {
+			++value_end;
+		}
+		if (value_end == value_start) {
+			pos = scheme_end;
+			continue;
+		}
+		out.replace(value_start, value_end - value_start, kRedacted);
+		pos = value_start + kRedacted.size();
+	}
+}
+
 std::string RedactCredentials(const std::string &input) {
 	std::string out = input;
 
@@ -175,38 +369,16 @@ std::string RedactCredentials(const std::string &input) {
 			size_t trailer = out.find("-----", end_marker + 8);
 			end_pos = (trailer == std::string::npos) ? out.size() : trailer + 5;
 		}
-		out.replace(begin_pos, end_pos - begin_pos, "[redacted]");
+		out.replace(begin_pos, end_pos - begin_pos, kRedacted);
 	}
 
-	// "Bearer <token>" -- redact the token, keep the word "Bearer" for context.
-	{
-		size_t pos = 0;
-		const std::string needle = "Bearer ";
-		while ((pos = out.find(needle, pos)) != std::string::npos) {
-			size_t token_start = pos + needle.size();
-			size_t token_end = token_start;
-			while (token_end < out.size() && !std::isspace(static_cast<unsigned char>(out[token_end]))) {
-				++token_end;
-			}
-			out.replace(token_start, token_end - token_start, "[redacted]");
-			pos = token_start + std::string("[redacted]").size();
-		}
-	}
+	RedactAuthorizationHeader(out);
+	RedactKeywordToken(out, "bearer");
+	RedactPrefixedRun(out, "ya29.");
+	RedactPrefixedRun(out, "1//");
 
-	// Google OAuth access-token-shaped runs, e.g. "ya29.a0ARrdaM-...".
-	{
-		size_t pos = 0;
-		const std::string needle = "ya29.";
-		while ((pos = out.find(needle, pos)) != std::string::npos) {
-			size_t token_end = pos;
-			while (token_end < out.size() &&
-			       (std::isalnum(static_cast<unsigned char>(out[token_end])) || out[token_end] == '.' ||
-			        out[token_end] == '-' || out[token_end] == '_')) {
-				++token_end;
-			}
-			out.replace(pos, token_end - pos, "[redacted]");
-			pos += std::string("[redacted]").size();
-		}
+	for (const char *key : {"access_token", "refresh_token", "private_key", "client_secret", "id_token"}) {
+		RedactKeyValue(out, key);
 	}
 
 	return out;

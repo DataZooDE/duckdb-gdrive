@@ -88,12 +88,25 @@ GDriveUriParse ParseGDriveUri(const std::string &uri) {
 
 	const std::string rest = uri.substr(SCHEME_LEN);
 
-	// The "id:" form is recognized only when it names the ENTIRE remaining
-	// path, i.e. there is no slash-separated segment after it: a file id
-	// addresses one file, not a traversable location. "gdrive://id:x/more"
-	// is therefore an ordinary path whose first segment happens to start
-	// with "id:", handled by the generic segment splitting below.
-	if (rest.compare(0, 3, "id:") == 0 && rest.find('/') == std::string::npos) {
+	// The "id:" form is special only in the LEADING position: a URI whose
+	// path begins with "id:" addresses a single file, not a traversable
+	// location, so it must be exactly "gdrive://id:<non-empty-id>" with no
+	// further segments. "gdrive://id:1a2b3c/more" is rejected outright
+	// rather than silently reinterpreted as an ordinary path whose first
+	// segment happens to be "id:1a2b3c" -- a user who writes that has almost
+	// certainly mistyped a file-id reference, and silently resolving
+	// whatever folder happens to be named "id:1a2b3c" is a worse failure
+	// mode than a clear, immediate error (codex review 2026-07-26, wave 0).
+	//
+	// A "id:"-prefixed segment deeper in the path (e.g. "gdrive://folder/
+	// id:weird") is unaffected: only the leading position is special, so
+	// that case falls through to the generic segment splitting below.
+	if (rest.compare(0, 3, "id:") == 0) {
+		if (rest.find('/') != std::string::npos) {
+			result.ok = false;
+			result.error = "the gdrive://id: form addresses a single file and cannot have path segments";
+			return result;
+		}
 		std::string file_id = rest.substr(3);
 		if (file_id.empty()) {
 			result.ok = false;

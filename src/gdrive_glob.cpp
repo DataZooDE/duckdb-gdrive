@@ -244,21 +244,68 @@ GlobSplit SplitGlob(const std::string &pattern) {
 	return result;
 }
 
-std::vector<std::string> ExpandBraces(const std::string &pattern) {
+namespace {
+
+// ---------------------------------------------------------------------------
+// REQ-NF (DoS hardening, codex review 2026-07-26 wave 0) -- brace expansion
+// is a cartesian product and, unbounded, a pattern like
+// "{a,b}{a,b}{a,b}..." (repeated ~20 times) allocates on the order of a
+// million strings before a single Drive API call happens. Two independent
+// caps close this:
+//
+//   - kMaxBracePatternLength: rejected before any recursion, so a pattern
+//     that is merely long (not necessarily explosive) cannot even start.
+//   - kMaxBraceExpansions: a budget shared (by reference) across the entire
+//     recursive expansion, covering both literal leaves and the cartesian
+//     product at each brace group. Whichever push -- leaf or combined --
+//     would exceed it aborts the walk immediately, so the total work done
+//     before giving up is O(kMaxBraceExpansions), never exponential. Because
+//     leaves are counted as they are produced as well as when combined into
+//     a product, the true output size actually achievable before hitting the
+//     cap is somewhat below kMaxBraceExpansions -- that is the safe
+//     direction (an earlier, stricter cutoff), not a correctness bug.
+//   - kMaxBraceDepth: recursion depth is bounded independently of the
+//     expansion count, because a pathologically *nested* pattern like
+//     "{{{{...}}}}" produces very few final strings (so the expansion-count
+//     budget alone would not catch it) but still recurses once per nesting
+//     level and could exhaust the call stack.
+//
+// Signalling convention: ExpandBraces's signature is fixed at
+// std::vector<std::string> and, being a pure function called from a context
+// that cannot throw across the pure/DuckDB boundary, has no channel for an
+// error separate from its return value. A normal (uncapped) expansion always
+// returns at least one element -- even a pattern with no braces at all
+// yields {pattern} -- so an EMPTY vector can never occur during ordinary
+// operation and is repurposed as the overflow signal. The caller (the Glob
+// implementation, DuckDB-side) MUST treat an empty result as "pattern
+// rejected: too large to expand safely", not as "zero matches".
+// ---------------------------------------------------------------------------
+constexpr size_t kMaxBracePatternLength = 4096;
+constexpr size_t kMaxBraceExpansions = 1024;
+constexpr int kMaxBraceDepth = 64;
+
+//! Returns false the instant `budget` would be exceeded or `depth` runs past
+//! kMaxBraceDepth. On false, `out` is left in an unspecified partial state --
+//! callers must propagate the failure rather than use it.
+bool ExpandBracesInto(const std::string &pattern, int depth, size_t &budget, std::vector<std::string> &out) {
+	if (depth > kMaxBraceDepth) {
+		return false;
+	}
+
 	// Find the first top-level (unnested) balanced brace group.
-	int depth = 0;
+	int brace_depth = 0;
 	size_t brace_start = std::string::npos;
 	size_t brace_end = std::string::npos;
 	for (size_t i = 0; i < pattern.size(); i++) {
 		if (pattern[i] == '{') {
-			if (depth == 0) {
+			if (brace_depth == 0) {
 				brace_start = i;
 			}
-			depth++;
+			brace_depth++;
 		} else if (pattern[i] == '}') {
-			if (depth > 0) {
-				depth--;
-				if (depth == 0 && brace_start != std::string::npos) {
+			if (brace_depth > 0) {
+				brace_depth--;
+				if (brace_depth == 0 && brace_start != std::string::npos) {
 					brace_end = i;
 					break;
 				}
@@ -269,7 +316,12 @@ std::vector<std::string> ExpandBraces(const std::string &pattern) {
 	if (brace_start == std::string::npos || brace_end == std::string::npos) {
 		// No top-level brace group found (including an unmatched '{' or a
 		// stray '}'): left as a literal, no expansion performed.
-		return {pattern};
+		if (budget == 0) {
+			return false;
+		}
+		budget--;
+		out.push_back(pattern);
+		return true;
 	}
 
 	std::string prefix = pattern.substr(0, brace_start);
@@ -293,15 +345,41 @@ std::vector<std::string> ExpandBraces(const std::string &pattern) {
 	}
 	alternatives.push_back(inner.substr(start));
 
-	auto suffix_expansions = ExpandBraces(suffix);
+	std::vector<std::string> suffix_expansions;
+	if (!ExpandBracesInto(suffix, depth + 1, budget, suffix_expansions)) {
+		return false;
+	}
 
-	std::vector<std::string> result;
 	for (auto &alt : alternatives) {
-		for (auto &alt_expanded : ExpandBraces(alt)) {
-			for (auto &suffix_expanded : suffix_expansions) {
-				result.push_back(prefix + alt_expanded + suffix_expanded);
+		std::vector<std::string> alt_expanded;
+		if (!ExpandBracesInto(alt, depth + 1, budget, alt_expanded)) {
+			return false;
+		}
+		for (auto &alt_str : alt_expanded) {
+			for (auto &suffix_str : suffix_expansions) {
+				if (budget == 0) {
+					return false;
+				}
+				budget--;
+				out.push_back(prefix + alt_str + suffix_str);
 			}
 		}
+	}
+	return true;
+}
+
+} // namespace
+
+std::vector<std::string> ExpandBraces(const std::string &pattern) {
+	if (pattern.size() > kMaxBracePatternLength) {
+		// See the overflow-signalling convention above: empty means
+		// rejected, not "matches nothing".
+		return {};
+	}
+	size_t budget = kMaxBraceExpansions;
+	std::vector<std::string> result;
+	if (!ExpandBracesInto(pattern, 0, budget, result)) {
+		return {};
 	}
 	return result;
 }

@@ -266,6 +266,66 @@ TEST_CASE("ExpandBraces: unmatched '}' is left literal", "[glob][braces]") {
 }
 
 // ---------------------------------------------------------------------------
+// ExpandBraces -- DoS hardening (codex review 2026-07-26, wave 0)
+//
+// Signalling convention under test: a normal expansion always returns at
+// least one element (even a brace-free literal yields {pattern}), so an
+// EMPTY vector is repurposed to signal "rejected: too large to expand
+// safely" and is never a legitimate "zero matches" result.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ExpandBraces: an overlong pattern is rejected before any expansion", "[glob][braces][dos]") {
+	std::string pattern(5000, 'a'); // no braces at all, just long
+	auto start = std::chrono::steady_clock::now();
+	auto result = ExpandBraces(pattern);
+	auto elapsed = std::chrono::steady_clock::now() - start;
+
+	REQUIRE(result.empty());
+	REQUIRE(elapsed < std::chrono::seconds(1));
+}
+
+TEST_CASE("ExpandBraces: repeated alternation groups are capped, not exponentially expanded", "[glob][braces][dos]") {
+	// "{a,b}" x 20 denotes 2^20 (~1M) concrete patterns if expanded in full.
+	std::string pattern;
+	for (int i = 0; i < 20; i++) {
+		pattern += "{a,b}";
+	}
+	REQUIRE(pattern.size() < 4096); // exercises the count cap, not the length cap
+
+	auto start = std::chrono::steady_clock::now();
+	auto result = ExpandBraces(pattern);
+	auto elapsed = std::chrono::steady_clock::now() - start;
+
+	// Rejected outright (empty), not silently truncated to some arbitrary
+	// prefix of the 2^20 possible results -- a silent truncation would drop
+	// real files from a glob's result set, which is worse than a clear error.
+	REQUIRE(result.empty());
+	REQUIRE(elapsed < std::chrono::seconds(1));
+}
+
+TEST_CASE("ExpandBraces: deeply nested (but not combinatorially explosive) braces are also capped",
+          "[glob][braces][dos]") {
+	// 200 levels of nesting: "{{{...{a}...}}}" -- very few final strings, but
+	// the recursion-depth cap must catch this independently of the
+	// expansion-count cap, or a deep-enough nesting could exhaust the stack.
+	std::string pattern = "a";
+	for (int i = 0; i < 200; i++) {
+		pattern = "{" + pattern + "}";
+	}
+
+	auto result = ExpandBraces(pattern);
+	REQUIRE(result.empty());
+}
+
+TEST_CASE("ExpandBraces: a pattern just under the caps still expands normally", "[glob][braces][dos]") {
+	// Sanity check that the caps do not clip ordinary, reasonably-sized
+	// patterns -- 4 groups of 2 alternatives is 16 combinations, nowhere
+	// near the 1024 budget.
+	auto result = ExpandBraces("{a,b}-{1,2}-{x,y}-{p,q}.csv");
+	REQUIRE(result.size() == 16);
+}
+
+// ---------------------------------------------------------------------------
 // UTF-8: byte-wise matching decision
 // ---------------------------------------------------------------------------
 

@@ -52,6 +52,27 @@ GlobSplit SplitGlob(const std::string &pattern);
 
 //! Expand {a,b}{c,d} alternations into the concrete patterns they denote.
 //! Returns the input unchanged when there is no alternation.
+//!
+//! ---------------------------------------------------------------------
+//! CALLER OBLIGATION: an EMPTY result means "pattern rejected", NOT "zero
+//! matches".
+//!
+//! Brace expansion is a cartesian product; unbounded, `{a,b}` repeated ~20
+//! times allocates on the order of a million strings before a single Drive
+//! API call happens. Expansion is therefore capped on pattern length, total
+//! expansions and recursion depth.
+//!
+//! A normal expansion always returns at least one element -- a pattern with
+//! no braces at all still yields {pattern} -- so an empty vector cannot arise
+//! from ordinary operation and is used as the overflow signal. The function
+//! is pure and cannot throw across the pure/DuckDB boundary, so it has no
+//! other channel.
+//!
+//! The Glob implementation MUST turn an empty result into an error naming the
+//! pattern. Treating it as "nothing matched" would silently drop every file
+//! the user asked for -- the exact failure this module exists to prevent, and
+//! invisible in production. Added after codex review #1.
+//! ---------------------------------------------------------------------
 std::vector<std::string> ExpandBraces(const std::string &pattern);
 
 } // namespace gdrive

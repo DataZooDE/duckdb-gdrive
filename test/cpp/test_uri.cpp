@@ -175,16 +175,32 @@ TEST_CASE("id: prefix deeper in the path is an ordinary segment, not FILE_ID", "
 	REQUIRE(r.uri.segments == std::vector<std::string>{"folder", "id:weird"});
 }
 
-TEST_CASE("id: prefix is only special when it is the entire path (single segment)", "[uri][parse][id_edge]") {
-	// "gdrive://id:1a2b3c/more" -- decision: id: is recognized only when it is
-	// the ENTIRE remaining path (no further slash-separated segments), since
-	// a file id addresses a single file, not a traversable location. A slash
-	// after "id:..." makes it an ordinary path whose first segment happens to
-	// start with "id:".
+TEST_CASE("id: prefix followed by a path segment is rejected, not silently reinterpreted", "[uri][parse][id_edge]") {
+	// "gdrive://id:1a2b3c/more" -- decision (codex review 2026-07-26, wave 0):
+	// a leading "id:" addresses a single file, not a traversable location, so
+	// the URI must be exactly "gdrive://id:<id>" with no further segments.
+	// Silently reinterpreting this as an ordinary path whose first segment
+	// happens to be "id:1a2b3c" would mask what is almost certainly a typo,
+	// and could silently resolve a real folder that happens to be named
+	// "id:1a2b3c" -- a worse outcome than a clear, immediate error.
 	auto r = ParseGDriveUri("gdrive://id:1a2b3c/more");
-	REQUIRE(r.ok);
-	REQUIRE(r.uri.kind == GDriveUriKind::PATH);
-	REQUIRE(r.uri.segments == std::vector<std::string>{"id:1a2b3c", "more"});
+	REQUIRE_FALSE(r.ok);
+	CAPTURE(r.error);
+	REQUIRE(r.error == "the gdrive://id: form addresses a single file and cannot have path segments");
+}
+
+TEST_CASE("id: prefix with a trailing slash and nothing else is also rejected", "[uri][parse][id_edge]") {
+	auto r = ParseGDriveUri("gdrive://id:1a2b3c/");
+	REQUIRE_FALSE(r.ok);
+	CAPTURE(r.error);
+	REQUIRE(r.error == "the gdrive://id: form addresses a single file and cannot have path segments");
+}
+
+TEST_CASE("id: prefix followed by multiple path segments is rejected", "[uri][parse][id_edge]") {
+	auto r = ParseGDriveUri("gdrive://id:1a2b3c/more/still-more.csv");
+	REQUIRE_FALSE(r.ok);
+	CAPTURE(r.error);
+	REQUIRE(r.error == "the gdrive://id: form addresses a single file and cannot have path segments");
 }
 
 // ---------------------------------------------------------------------------

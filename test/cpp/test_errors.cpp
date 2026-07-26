@@ -483,6 +483,125 @@ TEST_CASE("FormatUserMessage on the real captured unauthorized body carries no h
 }
 
 // ---------------------------------------------------------------------------
+// Adversarial bypasses found in codex review 2026-07-26 (wave 0), plus
+// further variants judged realistic for an untrusted Drive response body.
+// One test per bypass; each asserts the exact secret substring is absent.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("FormatUserMessage never leaks a Google refresh token (1// prefix)", "[errors][security]") {
+	GDriveError err;
+	err.kind = GDriveErrorKind::UNKNOWN;
+	err.http_status = 400;
+	err.message = "refresh token 1//0gREAL_SECRET rejected";
+
+	auto msg = FormatUserMessage(err, "gdrive://x");
+	REQUIRE(msg.find("1//0gREAL_SECRET") == std::string::npos);
+	REQUIRE(msg.find("REAL_SECRET") == std::string::npos);
+}
+
+TEST_CASE("FormatUserMessage redacts Bearer case-insensitively with a tab separator", "[errors][security]") {
+	GDriveError err;
+	err.kind = GDriveErrorKind::UNKNOWN;
+	err.http_status = 400;
+	err.message = "saw header bearer\tabc.def in request";
+
+	auto msg = FormatUserMessage(err, "gdrive://x");
+	REQUIRE(msg.find("abc.def") == std::string::npos);
+}
+
+TEST_CASE("FormatUserMessage redacts Bearer with multiple spaces, mixed case", "[errors][security]") {
+	GDriveError err;
+	err.kind = GDriveErrorKind::UNKNOWN;
+	err.http_status = 400;
+	err.message = "BEARER    superSecretToken123 was invalid";
+
+	auto msg = FormatUserMessage(err, "gdrive://x");
+	REQUIRE(msg.find("superSecretToken123") == std::string::npos);
+}
+
+TEST_CASE("FormatUserMessage redacts a JSON-ish access_token value", "[errors][security]") {
+	GDriveError err;
+	err.kind = GDriveErrorKind::UNKNOWN;
+	err.http_status = 400;
+	err.message = "upstream body was {\"access_token\": \"ya29-should-not-matter-SECRETVALUE\"}";
+
+	auto msg = FormatUserMessage(err, "gdrive://x");
+	REQUIRE(msg.find("SECRETVALUE") == std::string::npos);
+}
+
+TEST_CASE("FormatUserMessage redacts a JSON-ish refresh_token value even without the 1// prefix", "[errors][security]") {
+	GDriveError err;
+	err.kind = GDriveErrorKind::UNKNOWN;
+	err.http_status = 400;
+	err.message = "{\"refresh_token\":\"OPAQUE_REFRESH_SECRET\"}";
+
+	auto msg = FormatUserMessage(err, "gdrive://x");
+	REQUIRE(msg.find("OPAQUE_REFRESH_SECRET") == std::string::npos);
+}
+
+TEST_CASE("FormatUserMessage redacts a JSON-ish private_key value", "[errors][security]") {
+	GDriveError err;
+	err.kind = GDriveErrorKind::UNKNOWN;
+	err.http_status = 400;
+	err.message = "config had \"private_key\": \"c3VwZXJTZWNyZXRLZXlNYXRlcmlhbA==\" embedded";
+
+	auto msg = FormatUserMessage(err, "gdrive://x");
+	REQUIRE(msg.find("c3VwZXJTZWNyZXRLZXlNYXRlcmlhbA==") == std::string::npos);
+}
+
+TEST_CASE("FormatUserMessage redacts a JSON-ish client_secret value", "[errors][security]") {
+	GDriveError err;
+	err.kind = GDriveErrorKind::UNKNOWN;
+	err.http_status = 400;
+	err.message = "oauth exchange failed, client_secret=GOCSPX-superSecretValue rejected";
+
+	auto msg = FormatUserMessage(err, "gdrive://x");
+	REQUIRE(msg.find("GOCSPX-superSecretValue") == std::string::npos);
+}
+
+TEST_CASE("FormatUserMessage redacts a JSON-ish id_token value", "[errors][security]") {
+	GDriveError err;
+	err.kind = GDriveErrorKind::UNKNOWN;
+	err.http_status = 400;
+	err.message = "{\"id_token\": \"eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SECRET_SIG\"}";
+
+	auto msg = FormatUserMessage(err, "gdrive://x");
+	REQUIRE(msg.find("SECRET_SIG") == std::string::npos);
+}
+
+TEST_CASE("FormatUserMessage does NOT redact client_id -- it is not a secret", "[errors][security]") {
+	GDriveError err;
+	err.kind = GDriveErrorKind::UNKNOWN;
+	err.http_status = 400;
+	err.message = "client_id=123456-abcdef.apps.googleusercontent.com is unrecognised";
+
+	auto msg = FormatUserMessage(err, "gdrive://x");
+	REQUIRE(msg.find("123456-abcdef.apps.googleusercontent.com") != std::string::npos);
+}
+
+TEST_CASE("FormatUserMessage redacts an access_token in a URL query string", "[errors][security]") {
+	GDriveError err;
+	err.kind = GDriveErrorKind::UNKNOWN;
+	err.http_status = 400;
+	err.message = "request to https://example.com/callback?access_token=QUERY_STRING_SECRET&state=xyz failed";
+
+	auto msg = FormatUserMessage(err, "gdrive://x");
+	REQUIRE(msg.find("QUERY_STRING_SECRET") == std::string::npos);
+	// The unrelated 'state' query param must survive -- over-redaction is not free.
+	REQUIRE(msg.find("state=xyz") != std::string::npos);
+}
+
+TEST_CASE("FormatUserMessage redacts an Authorization: Basic header value", "[errors][security]") {
+	GDriveError err;
+	err.kind = GDriveErrorKind::UNKNOWN;
+	err.http_status = 400;
+	err.message = "rejected header Authorization: Basic dXNlcjpTZWNyZXRQYXNzd29yZA== from client";
+
+	auto msg = FormatUserMessage(err, "gdrive://x");
+	REQUIRE(msg.find("dXNlcjpTZWNyZXRQYXNzd29yZA==") == std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
 // FormatUserMessage must include `context` -- the user's gdrive:// path, not
 // only a file id they have never seen.
 // ---------------------------------------------------------------------------
