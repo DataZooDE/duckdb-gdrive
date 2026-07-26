@@ -23,7 +23,7 @@ CREATE SECRET gdrive_test (
     PROVIDER service_account,
     KEY_FILE '${SA_KEY_FILE}',
     DRIVE_ID '${DRIVE_ID}',
-    SCOPE 'https://www.googleapis.com/auth/drive'
+    DRIVE_SCOPE 'https://www.googleapis.com/auth/drive'
 );
 
 # ---------------------------------------------------------------------------

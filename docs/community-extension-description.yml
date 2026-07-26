@@ -38,7 +38,7 @@ docs:
         PROVIDER service_account,
         KEY_FILE '/etc/creds/sa.json',
         DRIVE_ID '0ABcDeFgHiJkLmNoPQ',
-        SCOPE 'https://www.googleapis.com/auth/drive.readonly'
+        DRIVE_SCOPE 'https://www.googleapis.com/auth/drive.readonly'
     );
 
     -- Query a file by path. Drive has no path addressing, so each segment

@@ -50,6 +50,19 @@ test_live: release
 #   sweep_orphans  -- delete /scratch/run-* folders older than 24h (crashed
 #                     runs leak them)
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# One-time interactive Google consent. Prints a URL, waits 5 minutes for the
+# loopback callback, stores the refresh token in .env.gdrive (0600).
+#
+# Needed because a service account has NO Drive storage quota and cannot
+# create the fixtures at all outside a Shared Drive. Seeding therefore runs
+# as a delegated user; the read tests still run as the service account
+# against the same folder.
+# ---------------------------------------------------------------------------
+.PHONY: oauth_consent
+oauth_consent:
+	@uv run --with requests python -u scripts/oauth_consent.py
+
 .PHONY: seed_fixtures
 seed_fixtures:
 	@cd e2e && uv run python -m helpers.seed

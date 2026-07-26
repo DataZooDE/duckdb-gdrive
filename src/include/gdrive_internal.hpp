@@ -101,6 +101,16 @@ std::string CanonicalPathOf(const GDriveUri &uri);
 DriveFileMeta ResolvePath(GDrivePathCache &cache, GDriveClient &client, const GDriveAuthContext &auth,
                           const GDriveUri &uri);
 
+//! Same resolution as ResolvePath, but returns false instead of throwing for
+//! the "no such file or directory" outcome specifically. Ambiguity (R-4),
+//! auth failures and other API errors still throw -- callers with "not
+//! found is an empty result, not an error" semantics (Glob, FileExists,
+//! DirectoryExists) must use this rather than a broad catch(...), which
+//! would silently turn an ambiguity or auth error into "no match" (exactly
+//! the failure mode REQ-F-08/R-2 exist to prevent, one layer up).
+bool TryResolvePath(GDrivePathCache &cache, GDriveClient &client, const GDriveAuthContext &auth, const GDriveUri &uri,
+                    DriveFileMeta &out);
+
 // ---------------------------------------------------------------------------
 // Mutation helpers (T3.C, gdrive_mutate.cpp). Kept as free functions rather
 // than GDriveFileSystem methods because gdrive_filesystem.hpp is frozen and

@@ -117,7 +117,7 @@ GDriveAuthContext BuildContextFromServiceAccount(const KeyValueSecret &kv, const
 		throw InvalidInputException("gdrive secret '%s' (PROVIDER service_account) is missing KEY_FILE.",
 		                             secret_name.c_str());
 	}
-	std::string scope = GetOrEmpty(kv, "scope");
+	std::string scope = GetOrEmpty(kv, "drive_scope");
 	if (scope.empty()) {
 		scope = SCOPE_DRIVE_READONLY; // REQ-NF-04
 	}
@@ -185,7 +185,7 @@ GDriveAuthContext BuildContextFromConfig(const KeyValueSecret &kv, const std::st
 		    secret_name.c_str(), secret_name.c_str());
 	}
 
-	std::string scope = GetOrEmpty(kv, "scope");
+	std::string scope = GetOrEmpty(kv, "drive_scope");
 	if (scope.empty()) {
 		scope = SCOPE_DRIVE_READONLY;
 	}

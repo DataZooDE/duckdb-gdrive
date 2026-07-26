@@ -104,6 +104,54 @@ def _key_path() -> Path:
     )
 
 
+def _user_credentials():
+    """Delegated-user credentials from the stored refresh token, or None.
+
+    Deliberately hand-rolled rather than google-auth's UserCredentials: the
+    harness must stay a thin, inspectable mirror of what the extension itself
+    does, so a divergence between them is visible rather than hidden behind
+    an SDK.
+    """
+    refresh = os.environ.get("GDRIVE_USER_REFRESH_TOKEN")
+    client_id = os.environ.get("GDRIVE_OAUTH_CLIENT_ID")
+    client_secret = os.environ.get("GDRIVE_OAUTH_CLIENT_SECRET")
+    if not (refresh and client_id and client_secret):
+        return None
+
+    resp = requests.post("https://oauth2.googleapis.com/token", data={
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "refresh_token": refresh,
+        "grant_type": "refresh_token",
+    }, timeout=60)
+    if resp.status_code != 200:
+        # Never echo the body: a token endpoint's error can quote the request.
+        raise DriveConfigError(
+            f"refreshing the delegated user token failed (HTTP {resp.status_code}). "
+            "Re-run scripts/oauth_consent.py."
+        )
+    return _StaticToken(resp.json()["access_token"])
+
+
+class _StaticToken:
+    """Minimal stand-in for a google-auth credential: a token and nothing else."""
+
+    def __init__(self, token: str):
+        self.token = token
+        self.valid = True
+
+    def refresh(self, _request) -> None:
+        return None
+
+
+def user_delegation_available() -> bool:
+    return bool(
+        os.environ.get("GDRIVE_USER_REFRESH_TOKEN")
+        and os.environ.get("GDRIVE_OAUTH_CLIENT_ID")
+        and os.environ.get("GDRIVE_OAUTH_CLIENT_SECRET")
+    )
+
+
 def credentials_available() -> bool:
     """True when the live suite can run. Used to skip rather than fail."""
     if not os.environ.get("GDRIVE_CI_DRIVE_ID"):
@@ -121,25 +169,53 @@ class Drive:
 
     drive_id: str
     _creds: object = field(default=None, repr=False)
+    #: "service_account" or "user" -- which identity this session acts as.
+    #: Surfaced because a 403 means very different things for each.
+    _identity: str = "service_account"
     #: Count of HTTP calls by kind. The harness asserts on this for the R-1
     #: metadata-amplification checks -- it is the ground truth against which
     #: the extension's own gdrive_stats() counter is validated.
     calls: dict = field(default_factory=dict)
 
     @classmethod
-    def from_env(cls) -> "Drive":
+    def from_env(cls, prefer_user: bool = False) -> "Drive":
+        """Authenticate, as the user when possible and needed.
+
+        Two identities, for a reason that is not a preference:
+
+        * The **service account** can read anything shared with it, but has no
+          Drive storage quota, so it cannot create a single fixture file
+          outside a Shared Drive (403 storageQuotaExceeded). Reads: fine.
+          Seeding: impossible.
+        * The **delegated user** (a stored refresh token from
+          scripts/oauth_consent.py) writes against their own quota.
+
+        So seeding runs as the user and the read tests run as the service
+        account, against the same folder. `prefer_user` selects which.
+        """
         drive_id = os.environ.get("GDRIVE_CI_DRIVE_ID")
         if not drive_id:
             raise DriveConfigError(
-                "GDRIVE_CI_DRIVE_ID is not set. A Shared Drive is required: a "
-                "service account has no personal Drive storage quota. See "
+                "GDRIVE_CI_DRIVE_ID is not set (a Shared Drive id, or a folder "
+                "id shared with the service account). See "
                 "scripts/setup_ci_drive.sh."
             )
+
+        if prefer_user:
+            user_creds = _user_credentials()
+            if user_creds is not None:
+                return cls(drive_id=drive_id, _creds=user_creds, _identity="user")
+            raise DriveConfigError(
+                "writing needs a delegated user token: a service account has no "
+                "Drive storage quota and cannot create files outside a Shared "
+                "Drive. Run:  uv run --with requests python scripts/oauth_consent.py"
+            )
+
         creds = service_account.Credentials.from_service_account_file(
             str(_key_path()), scopes=SCOPES
         )
         creds.refresh(gauth_requests.Request())
-        return cls(drive_id=drive_id, _creds=creds)
+        return cls(drive_id=drive_id, _creds=creds, _identity="service_account")
 
     # -- plumbing ----------------------------------------------------------
 

@@ -173,14 +173,14 @@ Resulting shape:
 CREATE SECRET gdrive_user (
     TYPE gdrive, PROVIDER authorization_code,
     CLIENT_ID '…', CLIENT_SECRET '…',
-    SCOPE 'https://www.googleapis.com/auth/drive.readonly'
+    DRIVE_SCOPE 'https://www.googleapis.com/auth/drive.readonly'
 );
 
 -- unattended: service account
 CREATE SECRET gdrive_sa (
     TYPE gdrive, PROVIDER service_account,
     KEY_FILE '/etc/creds/sa.json',
-    SCOPE 'https://www.googleapis.com/auth/drive.readonly'
+    DRIVE_SCOPE 'https://www.googleapis.com/auth/drive.readonly'
 );
 ```
 

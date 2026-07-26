@@ -70,8 +70,26 @@ bool HasNonEmptyOption(const CreateSecretInput &input, const char *key) {
 
 void ApplyDefaultScope(KeyValueSecret &result) {
 	// REQ-NF-04: default to the narrowest scope when unspecified.
-	if (result.secret_map.find("scope") == result.secret_map.end()) {
-		result.secret_map["scope"] = Value(std::string(SCOPE_DRIVE_READONLY));
+	//
+	// BUG FIX (live run 2026-07-26): this option is deliberately named
+	// "drive_scope", NOT "scope". DuckDB's CREATE SECRET grammar hard-codes
+	// "SCOPE" as a top-level clause (see transform_create_secret.cpp,
+	// PEGTransformerFactory::TransformCreateSecretStmt): any option literally
+	// named `scope` is diverted into CreateSecretInfo::scope -- the secret's
+	// PATH-matching prefix list used by SecretManager::LookupSecret -- and
+	// never reaches `input.options` at all. A user who wrote
+	// `CREATE SECRET g (TYPE gdrive, ..., SCOPE 'https://www.googleapis.com/
+	// auth/drive')` intending to request a wider-than-default OAuth scope
+	// instead silently rescoped the secret to only match paths starting with
+	// that literal URL string -- so it never matches any `gdrive://` path,
+	// LookupSecret reports no match, and every Drive call fails before a
+	// single HTTP request is made. Naming this option `drive_scope` sidesteps
+	// the collision entirely; "SCOPE '...'" continues to mean what it means
+	// for every other DuckDB secret type (a path-prefix restriction), which
+	// gdrive secrets keep the ability to use too, just not for the OAuth
+	// scope string.
+	if (result.secret_map.find("drive_scope") == result.secret_map.end()) {
+		result.secret_map["drive_scope"] = Value(std::string(SCOPE_DRIVE_READONLY));
 	}
 }
 
@@ -87,7 +105,7 @@ unique_ptr<BaseSecret> CreateConfigSecret(ClientContext &, CreateSecretInput &in
 	CopyOption(input, *result, "client_secret");
 	CopyOption(input, *result, "drive_id");
 	CopyOption(input, *result, "root_folder_id");
-	CopyOption(input, *result, "scope");
+	CopyOption(input, *result, "drive_scope");
 
 	if (!HasNonEmptyOption(input, "access_token") && !HasNonEmptyOption(input, "refresh_token")) {
 		throw InvalidInputException(
@@ -113,7 +131,7 @@ unique_ptr<BaseSecret> CreateServiceAccountSecret(ClientContext &, CreateSecretI
 	CopyOption(input, *result, "key_file");
 	CopyOption(input, *result, "drive_id");
 	CopyOption(input, *result, "root_folder_id");
-	CopyOption(input, *result, "scope");
+	CopyOption(input, *result, "drive_scope");
 
 	if (!HasNonEmptyOption(input, "key_file")) {
 		throw InvalidInputException(
@@ -147,7 +165,7 @@ unique_ptr<BaseSecret> CreateServiceAccountSecret(ClientContext &, CreateSecretI
 void RegisterCommonParameters(CreateSecretFunction &function) {
 	function.named_parameters["drive_id"] = LogicalType(LogicalTypeId::VARCHAR);
 	function.named_parameters["root_folder_id"] = LogicalType(LogicalTypeId::VARCHAR);
-	function.named_parameters["scope"] = LogicalType(LogicalTypeId::VARCHAR);
+	function.named_parameters["drive_scope"] = LogicalType(LogicalTypeId::VARCHAR);
 }
 
 } // namespace

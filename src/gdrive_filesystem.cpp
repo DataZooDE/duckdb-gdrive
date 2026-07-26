@@ -203,8 +203,15 @@ std::string CanonicalPathOf(const GDriveUri &uri) {
 	return canonical;
 }
 
-DriveFileMeta ResolvePath(GDrivePathCache &cache, GDriveClient &client, const GDriveAuthContext &auth,
-                          const GDriveUri &uri) {
+//! Engine behind ResolvePath. Returns false ONLY for the "no such file or
+//! directory" outcome -- everything else (ambiguity, auth, malformed
+//! response, transient API errors) throws. This distinction matters: Glob's
+//! not-found-is-empty-not-error semantics must swallow exactly the former
+//! and NEVER the latter -- silently turning an R-4 ambiguity or an auth
+//! failure into "zero matches" would be the same class of bug REQ-F-08 and
+//! R-2 exist to prevent, just one layer up.
+bool TryResolvePath(GDrivePathCache &cache, GDriveClient &client, const GDriveAuthContext &auth, const GDriveUri &uri,
+                    DriveFileMeta &out) {
 	std::string context_path = uri.ToString();
 
 	if (uri.kind == GDriveUriKind::FILE_ID) {
@@ -212,13 +219,15 @@ DriveFileMeta ResolvePath(GDrivePathCache &cache, GDriveClient &client, const GD
 		// files.get below is metadata lookup, not resolution.
 		auto resp = client.GetMetadata(uri.file_id);
 		if (!resp.ok) {
+			if (resp.error.kind == GDriveErrorKind::NOT_FOUND) {
+				return false;
+			}
 			ThrowGDriveError(resp.error, context_path);
 		}
-		DriveFileMeta meta;
-		if (!ParseFileMeta(resp.body, meta)) {
+		if (!ParseFileMeta(resp.body, out)) {
 			throw IOException("gdrive: malformed metadata response for '%s'", context_path);
 		}
-		return meta;
+		return true;
 	}
 
 	std::string parent_id = RootFolderFor(auth);
@@ -242,7 +251,7 @@ DriveFileMeta ResolvePath(GDrivePathCache &cache, GDriveClient &client, const GD
 
 		auto matches = ListByName(client, parent_id, segment, !is_last, context_path);
 		if (matches.empty()) {
-			throw IOException("gdrive: no such file or directory: '%s'", context_path);
+			return false;
 		}
 		if (matches.size() > 1) {
 			ThrowAmbiguous(matches, context_path);
@@ -258,11 +267,24 @@ DriveFileMeta ResolvePath(GDrivePathCache &cache, GDriveClient &client, const GD
 		// zero-segment parent path).
 		auto resp = client.GetMetadata(parent_id);
 		if (!resp.ok) {
+			if (resp.error.kind == GDriveErrorKind::NOT_FOUND) {
+				return false;
+			}
 			ThrowGDriveError(resp.error, context_path);
 		}
 		if (!ParseFileMeta(resp.body, meta)) {
 			throw IOException("gdrive: malformed metadata response for '%s'", context_path);
 		}
+	}
+	out = meta;
+	return true;
+}
+
+DriveFileMeta ResolvePath(GDrivePathCache &cache, GDriveClient &client, const GDriveAuthContext &auth,
+                          const GDriveUri &uri) {
+	DriveFileMeta meta;
+	if (!TryResolvePath(cache, client, auth, uri, meta)) {
+		throw IOException("gdrive: no such file or directory: '%s'", uri.ToString());
 	}
 	return meta;
 }
@@ -656,26 +678,43 @@ void GDriveFileSystem::RemoveFile(const string &filename, optional_ptr<FileOpene
 vector<OpenFileInfo> GDriveFileSystem::Glob(const string &path, FileOpener *opener) {
 	optional_ptr<FileOpener> op(opener);
 	auto &context = RequireClientContext(op, path);
+	// Deliberately NOT swallowed into "no matches": a missing secret is a
+	// configuration error, not an empty result, and reporting it as zero
+	// rows is exactly the misleading-failure pattern R-2/REQ-F-08 exist to
+	// prevent, one layer up from where those requirements originally target.
+	if (!HasAnyGDriveSecret(context)) {
+		throw IOException(
+		    "gdrive: no gdrive secret configured for '%s' -- run CREATE SECRET (TYPE gdrive, ...) first.", path);
+	}
 	auto parsed = ParseGDriveUri(path);
 	if (!parsed.ok) {
+		if (IsFileIdFallbackGlobProbe(path)) {
+			// DuckDB core's FALLBACK_GLOB directory-probe heuristic
+			// (FileSystem::GlobFileList) retries a literal path that
+			// resolved to zero matches by appending "/**/*.<ext>", on the
+			// generic assumption that the path might be a directory. A
+			// gdrive://id:<fileId> address is never a directory, so the
+			// honest answer here is "no matches" -- not M-5's typo
+			// rejection, which is reserved for shapes a user actually
+			// wrote by hand (see gdrive_uri.hpp's doc comment on this
+			// helper for exactly why the match must be this narrow).
+			return {};
+		}
 		throw IOException("gdrive: %s", parsed.error);
-	}
-	if (!HasAnyGDriveSecret(context)) {
-		return {};
 	}
 
 	// No metacharacters: resolve directly rather than listing a whole folder
 	// (that is the entire point of HasGlobMetacharacters -- one call instead
-	// of a listing). Glob semantics: not-found is an empty result, not an
-	// error.
+	// of a listing). Glob semantics: not-found is an empty result, but ONLY
+	// not-found -- ambiguity (R-4), auth failures and other API errors must
+	// still surface, so this uses TryResolvePath rather than a broad catch.
 	if (parsed.uri.kind == GDriveUriKind::FILE_ID || !HasGlobMetacharacters(path)) {
 		vector<OpenFileInfo> result;
-		try {
-			auto auth = GetAuthContext(context, path);
-			auto client = CreateGDriveClient(auth);
-			ResolvePath(cache, *client, auth, parsed.uri);
+		auto auth = GetAuthContext(context, path);
+		auto client = CreateGDriveClient(auth);
+		DriveFileMeta meta;
+		if (TryResolvePath(cache, *client, auth, parsed.uri, meta)) {
 			result.emplace_back(path);
-		} catch (const IOException &) {
 		}
 		return result;
 	}
@@ -708,12 +747,11 @@ vector<OpenFileInfo> GDriveFileSystem::Glob(const string &path, FileOpener *open
 			if (!prefix_parsed.ok) {
 				throw IOException("gdrive: %s", prefix_parsed.error);
 			}
-			try {
-				auto prefix_meta = ResolvePath(cache, *client, auth, prefix_parsed.uri);
-				parent_id = prefix_meta.id;
-			} catch (const IOException &) {
+			DriveFileMeta prefix_meta;
+			if (!TryResolvePath(cache, *client, auth, prefix_parsed.uri, prefix_meta)) {
 				continue; // the literal prefix doesn't exist: no matches under it
 			}
+			parent_id = prefix_meta.id;
 		}
 
 		// List (recursively when the tail spans segments) and match locally

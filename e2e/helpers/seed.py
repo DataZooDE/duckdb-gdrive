@@ -169,7 +169,10 @@ def seed(drive: Drive) -> dict:
 
 def main() -> int:
     try:
-        drive = Drive.from_env()
+        # Seeding WRITES, so it must run as the delegated user: a service
+        # account has no Drive storage quota and gets 403 on every upload
+        # outside a Shared Drive.
+        drive = Drive.from_env(prefer_user=True)
     except DriveConfigError as e:
         print(f"cannot seed: {e}", file=sys.stderr)
         return 2

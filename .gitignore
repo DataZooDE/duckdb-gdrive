@@ -32,3 +32,4 @@ e2e/.venv/
 e2e/.pytest_cache/
 e2e/**/__pycache__/
 e2e/.uv-cache/
+.oauth_consent_url.txt

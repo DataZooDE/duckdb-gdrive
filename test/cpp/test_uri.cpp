@@ -6,6 +6,7 @@
 using duckdb::gdrive::GDriveUri;
 using duckdb::gdrive::GDriveUriKind;
 using duckdb::gdrive::GDriveUriParse;
+using duckdb::gdrive::IsFileIdFallbackGlobProbe;
 using duckdb::gdrive::IsGDriveUri;
 using duckdb::gdrive::ParseGDriveUri;
 
@@ -254,4 +255,59 @@ TEST_CASE("ParentPath and FileName on the root", "[uri][parent_filename]") {
 	REQUIRE(r.ok);
 	REQUIRE(r.uri.ParentPath() == "gdrive://");
 	REQUIRE(r.uri.FileName().empty());
+}
+
+// ---------------------------------------------------------------------------
+// IsFileIdFallbackGlobProbe -- the narrow carve-out Glob() uses to recognise
+// DuckDB core's FALLBACK_GLOB directory-probe retry (bug found on the first
+// live run against real Drive, 2026-07-26): a nonexistent gdrive://id:<x>
+// resolves to zero matches, so core retries as if it were a directory by
+// appending "/**/*.<ext>" (FileSystem::GlobFileList, file_system.cpp). That
+// synthesized path fails ParseGDriveUri's deliberate id:+segments rejection
+// (M-5) even though no user ever typed it. This helper must match ONLY that
+// exact synthesized shape -- anything else (in particular a genuine user
+// typo) must keep surfacing M-5's rejection unchanged.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("IsFileIdFallbackGlobProbe recognises the exact core-synthesized shape",
+          "[uri][fallback_glob_probe]") {
+	REQUIRE(IsFileIdFallbackGlobProbe("gdrive://id:1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/**/*.csv"));
+	REQUIRE(IsFileIdFallbackGlobProbe("gdrive://id:abc/**/*.parquet"));
+	REQUIRE(IsFileIdFallbackGlobProbe("gdrive://id:abc/**/*.json"));
+	// core's JoinPath uses whatever extension FileGlobInput carries -- more
+	// than three letters, dots aside, must still match.
+	REQUIRE(IsFileIdFallbackGlobProbe("gdrive://id:abc/**/*.tar.gz"));
+}
+
+TEST_CASE("IsFileIdFallbackGlobProbe rejects a genuine user typo with one extra segment",
+          "[uri][fallback_glob_probe]") {
+	// This is exactly M-5's target case: a user wrote this by hand. It must
+	// NOT be recognised as the fallback-probe shape, so Glob() keeps
+	// surfacing ParseGDriveUri's rejection for it.
+	REQUIRE_FALSE(IsFileIdFallbackGlobProbe("gdrive://id:abc/oops"));
+	REQUIRE_FALSE(IsFileIdFallbackGlobProbe("gdrive://id:1a2b3c/more"));
+}
+
+TEST_CASE("IsFileIdFallbackGlobProbe rejects near misses of the synthesized shape",
+          "[uri][fallback_glob_probe]") {
+	// First segment must be the literal "**", not any other glob text.
+	REQUIRE_FALSE(IsFileIdFallbackGlobProbe("gdrive://id:abc/*/*.csv"));
+	// Second segment must start with "*.", not be a bare wildcard or a
+	// literal name.
+	REQUIRE_FALSE(IsFileIdFallbackGlobProbe("gdrive://id:abc/**/*"));
+	REQUIRE_FALSE(IsFileIdFallbackGlobProbe("gdrive://id:abc/**/file.csv"));
+	// No third, deeper segment.
+	REQUIRE_FALSE(IsFileIdFallbackGlobProbe("gdrive://id:abc/**/*.csv/extra"));
+	// Missing the "**" segment entirely (just one segment).
+	REQUIRE_FALSE(IsFileIdFallbackGlobProbe("gdrive://id:abc/*.csv"));
+	// Empty file id.
+	REQUIRE_FALSE(IsFileIdFallbackGlobProbe("gdrive://id:/**/*.csv"));
+}
+
+TEST_CASE("IsFileIdFallbackGlobProbe rejects non-id: URIs and non-gdrive strings",
+          "[uri][fallback_glob_probe]") {
+	REQUIRE_FALSE(IsFileIdFallbackGlobProbe("gdrive://Finance/**/*.csv"));
+	REQUIRE_FALSE(IsFileIdFallbackGlobProbe("gdrive://id:abc")); // no segments at all
+	REQUIRE_FALSE(IsFileIdFallbackGlobProbe("s3://id:abc/**/*.csv"));
+	REQUIRE_FALSE(IsFileIdFallbackGlobProbe(""));
 }

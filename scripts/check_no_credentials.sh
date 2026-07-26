@@ -59,6 +59,16 @@ token_patterns=(
 # key be committed under test/cpp/testdata/ and pass this check silently.
 ALLOWED_KEY_FILE="test/cpp/testdata/fake_sa_key.json"
 
+# Files permitted to contain PEM-SHAPED placeholders. Asserting that a
+# malformed key file yields the right error needs a fixture that LOOKS like a
+# key, so a flat ban would forbid testing the control this script enforces.
+# Allowlisted BY EXACT PATH, never by directory: a blanket test/ exemption
+# would let a real key be committed under test/ and pass silently.
+PEM_ALLOWED=(
+    "$ALLOWED_KEY_FILE"
+    "test/sql/gdrive_secret.test"
+)
+
 if [[ -f "$ALLOWED_KEY_FILE" ]]; then
     if ! grep -q '_comment' "$ALLOWED_KEY_FILE"; then
         echo "FAIL: $ALLOWED_KEY_FILE has no _comment marking it a throwaway." >&2
@@ -81,7 +91,11 @@ while IFS= read -r f; do
     esac
     [[ -f "$f" ]] || continue
 
-    if [[ "$f" != "$ALLOWED_KEY_FILE" ]]; then
+    pem_exempt=0
+    for allowed in "${PEM_ALLOWED[@]}"; do
+        [[ "$f" == "$allowed" ]] && pem_exempt=1
+    done
+    if [[ $pem_exempt -eq 0 ]]; then
         for cp in "${pem_patterns[@]}"; do
             if grep -qE "$cp" "$f" 2>/dev/null; then
                 echo "FAIL: $f contains private-key material (/$cp/)" >&2

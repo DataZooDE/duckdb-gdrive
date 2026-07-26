@@ -144,5 +144,40 @@ GDriveUriParse ParseGDriveUri(const std::string &uri) {
 	return result;
 }
 
+bool IsFileIdFallbackGlobProbe(const std::string &uri) {
+	if (!IsGDriveUri(uri)) {
+		return false;
+	}
+	const std::string rest = uri.substr(SCHEME_LEN);
+	if (rest.compare(0, 3, "id:") != 0) {
+		return false;
+	}
+
+	auto first_slash = rest.find('/');
+	if (first_slash == std::string::npos) {
+		return false;
+	}
+	if (first_slash == 3) {
+		return false; // empty file id: "id:/..." -- not this shape either
+	}
+
+	// Exactly two more segments after the id, no more, no fewer.
+	std::string remainder = rest.substr(first_slash + 1); // "**/*.<ext>" or garbage
+	auto second_slash = remainder.find('/');
+	if (second_slash == std::string::npos) {
+		return false;
+	}
+	std::string first_seg = remainder.substr(0, second_slash);
+	std::string second_seg = remainder.substr(second_slash + 1);
+	if (first_seg != "**") {
+		return false;
+	}
+	if (second_seg.empty() || second_seg.find('/') != std::string::npos) {
+		return false; // must be exactly one trailing segment, nothing deeper
+	}
+	// "*.<ext>", extension non-empty (JoinPath never produces a bare "*.").
+	return second_seg.size() > 2 && second_seg[0] == '*' && second_seg[1] == '.';
+}
+
 } // namespace gdrive
 } // namespace duckdb
