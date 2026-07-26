@@ -660,6 +660,19 @@ public:
 private:
 	enum class HttpMethod { GET, POST, PATCH, DELETE_ };
 
+	//! Is retrying this method after an AMBIGUOUS failure safe?
+	//!
+	//! RFC 9110 idempotency: GET and DELETE may be repeated with the same
+	//! end state. POST may not -- a repeated files.create makes a second
+	//! file. PATCH is idempotent in principle, but Drive's files.update is
+	//! used here both to move a file and to trash it, and a retry that races
+	//! another writer can reapply a stale intent, so it is excluded too.
+	//! Conservative on purpose: the cost of being wrong is a duplicate file
+	//! that R-4 then reports as an ambiguous path forever.
+	static bool IsIdempotent(HttpMethod method) {
+		return method == HttpMethod::GET || method == HttpMethod::DELETE_;
+	}
+
 	struct RawResult {
 		bool transport_ok = false;
 		int status = 0;
@@ -733,7 +746,26 @@ private:
 				// reaches ClassifyDriveError (there is no HTTP status or body
 				// to classify) -- treat it as TRANSIENT so it gets the same
 				// bounded retry treatment as a 5xx.
-				if (attempt < kMaxAttempts) {
+				//
+				// ...but ONLY for idempotent methods. A transport failure is
+				// ambiguous by definition: the request may have been fully
+				// processed and only the RESPONSE lost. Retrying a
+				// `POST files.create` in that state produces a SECOND file
+				// with the same name in the same parent.
+				//
+				// That is worse here than in most filesystems, because
+				// duplicate names in one folder are a hard error by design
+				// (R-4). A retry can therefore poison a path permanently, and
+				// the user sees "ambiguous" on a path they wrote exactly once
+				// -- with no way to tell which copy is theirs.
+				//
+				// A clear failure the caller can retry deliberately beats a
+				// silent duplicate. The real fix is Drive's resumable upload
+				// protocol, whose session URI makes a retry idempotent; that
+				// is tracked in docs/reviews/2026-07-26-codex-review-2-read-
+				// path.md, finding 1, and is a piece of work rather than a
+				// patch.
+				if (IsIdempotent(method) && attempt < kMaxAttempts) {
 					stats_.retries += 1;
 					RecordGlobalRetry();
 					SleepBackoff(attempt, 0);
@@ -743,7 +775,21 @@ private:
 				response.ok = false;
 				response.http_status = 0;
 				response.error.kind = GDriveErrorKind::TRANSIENT;
-				response.error.message = "network transport failure (no response from Drive)";
+				if (IsIdempotent(method)) {
+					response.error.message = "network transport failure (no response from Drive)";
+				} else {
+					// Say plainly that the outcome is unknown. "Failed" would
+					// imply nothing happened, and the user could safely retry
+					// -- but Drive may have committed the change and only the
+					// response was lost, in which case a manual retry creates
+					// the duplicate we just declined to create automatically.
+					response.error.message =
+					    "network transport failure with no response from Drive; the change may or may "
+					    "not have been applied. It was NOT retried automatically, because repeating a "
+					    "write whose outcome is unknown can create a second file with the same name "
+					    "(a path with duplicate names cannot be addressed). Check the destination "
+					    "before retrying.";
+				}
 				return response;
 			}
 

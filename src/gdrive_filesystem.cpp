@@ -586,45 +586,62 @@ std::string GDriveFileSystem::GetVersionTag(FileHandle &handle) {
 	return h.meta.head_revision_id;
 }
 
+// ---------------------------------------------------------------------------
+// Existence checks.
+//
+// Only NOT-FOUND may become `false`. An R-4 ambiguity, a 403, an expired
+// token or a malformed response must propagate.
+//
+// These used to `catch (...) { return false; }`, which meant a path with two
+// files of the same name -- and a path we simply had no permission to see --
+// both reported "does not exist". A caller using existence as a guard then
+// proceeds as though the path is free, which for a write is how you get a
+// third duplicate.
+//
+// TryResolvePath already draws exactly this line (see its comment: Glob's
+// not-found-is-empty semantics must swallow only not-found and NEVER an auth
+// failure). These functions simply were not using it. Same discipline, one
+// layer up.
+// ---------------------------------------------------------------------------
 bool GDriveFileSystem::FileExists(const string &filename, optional_ptr<FileOpener> opener) {
-	try {
-		auto &context = RequireClientContext(opener, filename);
-		if (!HasAnyGDriveSecret(context)) {
-			return false;
-		}
-		auto parsed = ParseGDriveUri(filename);
-		if (!parsed.ok) {
-			return false;
-		}
-		auto auth = GetAuthContext(context, filename);
-		auto client = CreateGDriveClient(auth);
-		auto meta = ResolvePath(cache, *client, auth, parsed.uri);
-		return !meta.IsFolder();
-	} catch (...) {
+	auto &context = RequireClientContext(opener, filename);
+	if (!HasAnyGDriveSecret(context)) {
+		// No gdrive secret at all: nothing to check against, and erroring here
+		// would break DuckDB probing a path it is merely considering.
 		return false;
 	}
+	auto parsed = ParseGDriveUri(filename);
+	if (!parsed.ok) {
+		return false;
+	}
+	auto auth = GetAuthContext(context, filename);
+	auto client = CreateGDriveClient(auth);
+	DriveFileMeta meta;
+	if (!TryResolvePath(cache, *client, auth, parsed.uri, meta)) {
+		return false; // genuinely absent -- the ONLY false-worthy outcome
+	}
+	return !meta.IsFolder();
 }
 
 bool GDriveFileSystem::DirectoryExists(const string &directory, optional_ptr<FileOpener> opener) {
-	try {
-		auto &context = RequireClientContext(opener, directory);
-		if (!HasAnyGDriveSecret(context)) {
-			return false;
-		}
-		auto parsed = ParseGDriveUri(directory);
-		if (!parsed.ok) {
-			return false;
-		}
-		if (parsed.uri.kind == GDriveUriKind::PATH && parsed.uri.segments.empty()) {
-			return true; // the configured root always "exists"
-		}
-		auto auth = GetAuthContext(context, directory);
-		auto client = CreateGDriveClient(auth);
-		auto meta = ResolvePath(cache, *client, auth, parsed.uri);
-		return meta.IsFolder();
-	} catch (...) {
+	auto &context = RequireClientContext(opener, directory);
+	if (!HasAnyGDriveSecret(context)) {
 		return false;
 	}
+	auto parsed = ParseGDriveUri(directory);
+	if (!parsed.ok) {
+		return false;
+	}
+	if (parsed.uri.kind == GDriveUriKind::PATH && parsed.uri.segments.empty()) {
+		return true; // the configured root always "exists"
+	}
+	auto auth = GetAuthContext(context, directory);
+	auto client = CreateGDriveClient(auth);
+	DriveFileMeta meta;
+	if (!TryResolvePath(cache, *client, auth, parsed.uri, meta)) {
+		return false;
+	}
+	return meta.IsFolder();
 }
 
 void GDriveFileSystem::CreateDirectory(const string &directory, optional_ptr<FileOpener> opener) {

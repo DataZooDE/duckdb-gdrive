@@ -16,12 +16,12 @@ nothing is worse than one that fails.*
 
 | # | Severity claimed | Verdict | Action |
 |---|---|---|---|
-| 1 | Critical — retries duplicate non-idempotent mutations | **Confirmed** | Open, see below |
+| 1 | Critical — retries duplicate non-idempotent mutations | **Confirmed** | **Mitigated**; full fix needs resumable uploads |
 | 2 | High — process-global token cache keyed by secret name | **Confirmed, demonstrated** | **Fixed** |
 | 3 | High — cached file id survives delete/recreate | **Confirmed, low impact** | Open, see below |
 | 4 | High — ranged read accepts 200 and copies from byte 0 | **Confirmed, demonstrated** | **Fixed** |
 | 5 | Medium — handle cursor mutated by positional reads | **Confirmed** | **Fixed** |
-| 6 | Medium — `FileExists` turns ambiguity/auth errors into false | **Confirmed** | Open, see below |
+| 6 | Medium — `FileExists` turns ambiguity/auth errors into false | **Confirmed** | **Fixed** |
 | 7 | Medium — range arithmetic can overflow | Confirmed, unreachable in practice | **Fixed** (cheap) |
 
 Nothing was rejected as wrong. One claim the review made *in our favour* was
@@ -96,7 +96,7 @@ clear one.
 
 ## Open, with reasoning
 
-### 1 — retries can duplicate a create (critical, not yet fixed)
+### 1 — retries can duplicate a create (mitigated, not fully fixed)
 
 `ExecuteWithRetry` retries on transport failure for **every** method,
 including `POST files.create`. If Drive commits a create and the response
@@ -107,12 +107,21 @@ This is worse here than in most filesystems, because duplicate names in one
 folder are a *hard error* by design (R-4): a retried write can poison the
 path permanently, and the user sees "ambiguous" on a path they wrote once.
 
-Not fixed yet because the correct fix is not "stop retrying" — that trades a
-rare duplicate for a common spurious failure. Drive supports resumable
-uploads, whose session URI makes a retry idempotent; that is the real answer
-and it is a piece of work, not a patch. **Until then, non-idempotent methods
-should not be retried on transport failure** — a clear error the user can
-retry themselves beats a silent duplicate. Tracked for Wave 4.
+**Mitigated:** transport-level failures are now retried only for idempotent
+methods (GET, DELETE). POST and PATCH return instead, with an error that says
+plainly the change *may or may not* have been applied and was deliberately not
+retried — because "failed" would imply nothing happened and invite the manual
+retry that creates the duplicate.
+
+Not *fixed*, because the real answer is Drive's resumable upload protocol,
+whose session URI makes a retry genuinely idempotent. That is a piece of work
+rather than a patch, and it also buys chunked recovery for large uploads.
+Tracked for Wave 4.
+
+The cost of the mitigation is honest: a write that hits a flaky network now
+surfaces an error where it previously might have succeeded on the second
+attempt. That is the right trade when the alternative is an unaddressable
+path — but it is a trade, not a free win.
 
 ### 3 — cached ids survive delete-and-recreate
 
@@ -124,16 +133,20 @@ Real, but the impact is a clear "not found" error rather than wrong data, and
 the recovery is obvious. The fix — re-resolve the path when a metadata
 refresh 404s — is small and belongs with the cache-invalidation work.
 
-### 6 — `FileExists` swallows ambiguity and auth failures
+### 6 — `FileExists` swallowed ambiguity and auth failures — FIXED
 
-`FileExists`/`DirectoryExists` catch all exceptions and return false, so a
-duplicate-name ambiguity (R-4) and a 403 both report "does not exist". A
-caller using existence as a guard proceeds as if the path is absent.
+`FileExists`/`DirectoryExists` caught all exceptions and returned false, so a
+duplicate-name ambiguity (R-4) and a 403 both reported "does not exist". A
+caller using existence as a guard then proceeds as though the path is free —
+which, for a write, is how a third duplicate gets created.
 
-This directly contradicts the care taken in `TryResolvePath`, which
-deliberately distinguishes not-found from everything else precisely so that
-*Glob* cannot turn an auth failure into "zero matches". The same discipline
-should apply one layer up: only not-found should become `false`.
+This contradicted the care already taken in `TryResolvePath`, which
+deliberately distinguishes not-found from everything else precisely so *Glob*
+cannot turn an auth failure into "zero matches". The functions simply were not
+using it. Now they do: only not-found becomes `false`.
+
+Verified live: an absent path still returns cleanly, while
+`gdrive://fixtures/dup/dup.csv` raises naming both file ids.
 
 ## Not expressible yet
 
