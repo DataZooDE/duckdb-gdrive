@@ -243,6 +243,23 @@ tests use the statically linked shell and never load the shipped artifact.
 `make check_stamp` and `make smoke_loadable` now catch this; the warning in
 the Build section above was already there and was not enough.
 
+**DuckDB versions ITSELF from `git describe --tags` inside `duckdb/`.**
+`actions/checkout` does not fetch submodule tags, so without an explicit
+`git -C duckdb fetch --tags` the build falls back to a dummy `v0.0.1` and
+stamps the artifact for a DuckDB that does not exist. Verified:
+
+```
+with tags:    v1.5.5-0-gd8cdaa33fd
+without tags: fatal: No names found, cannot describe anything.
+```
+
+The Checks workflow now fetches them. Release artifacts were never affected —
+the distribution pipeline checks DuckDB out properly.
+
+**Releasing:** follow `docs/RELEASE.md`. The community-extensions repo builds
+from a tagged commit and runs none of our live tests, so whatever is broken
+at tag time ships.
+
 ## Credential hygiene
 
 `make check_credentials` (also a CI job) fails on tracked files matching
