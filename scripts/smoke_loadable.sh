@@ -51,7 +51,17 @@ fi
 # ---------------------------------------------------------------------------
 KEY_FILE="${GDRIVE_CI_SA_KEY_FILE:-}"
 DECODED=""
-cleanup() { [[ -n "$DECODED" && -f "$DECODED" ]] && rm -f "$DECODED"; }
+# Must return 0. Under `set -e`, a trap handler whose LAST command fails
+# makes the script exit non-zero -- so `[[ cond ]] && rm` returned 1 whenever
+# there was nothing to clean up, and the no-credentials path "failed" while
+# printing a perfectly happy OK line. Caught by CI; I had checked this
+# script's OUTPUT locally and never its exit status.
+cleanup() {
+    if [[ -n "$DECODED" && -f "$DECODED" ]]; then
+        rm -f "$DECODED"
+    fi
+    return 0
+}
 trap cleanup EXIT INT TERM
 
 if [[ -z "$KEY_FILE" && -n "${GDRIVE_CI_SA_KEY_B64:-}" ]]; then
