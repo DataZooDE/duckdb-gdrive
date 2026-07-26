@@ -23,6 +23,12 @@ import hashlib
 FIXTURES_ROOT = "fixtures"
 SCRATCH_ROOT = "scratch"
 
+#: Liveness marker written inside every scratch folder. Drive does not advance
+#: a FOLDER's modifiedTime when its children change, so the sweeper would
+#: otherwise judge a busy run idle and delete it mid-test. The heartbeat file's
+#: own modifiedTime is the thing that actually moves.
+HEARTBEAT_NAME = ".heartbeat"
+
 SHEET_MIME = "application/vnd.google-apps.spreadsheet"
 DOC_MIME = "application/vnd.google-apps.document"
 

@@ -9,6 +9,7 @@ This is harness code, not a fake. Every call here hits real Google Drive.
 
 from __future__ import annotations
 
+import atexit
 import base64
 import json
 import os
@@ -38,12 +39,41 @@ class DriveConfigError(RuntimeError):
     """Credentials or Shared Drive not configured."""
 
 
+#: The one temp key this process materialised from base64, if any. Module-level
+#: so repeated _key_path() calls reuse it instead of scattering copies of a
+#: private key across /tmp -- the original bug here was that
+#: credentials_available() and Drive.from_env() each wrote their own, and
+#: neither deleted it.
+_materialised_key: "Path | None" = None
+
+
+def _cleanup_materialised_key() -> None:
+    global _materialised_key
+    if _materialised_key is not None:
+        try:
+            _materialised_key.unlink(missing_ok=True)
+        except OSError:
+            pass
+        _materialised_key = None
+
+
+atexit.register(_cleanup_materialised_key)
+
+
 def _key_path() -> Path:
     """Resolve the service-account key, preferring the file, then base64.
 
     The base64 form exists for CI, where the key arrives as a GitHub secret.
     It is written to a 0600 temp file because google-auth wants a path.
+
+    That temp file is created **once per process**, reused thereafter, and
+    removed by an atexit hook. Cleanup on a hard kill (SIGKILL, OOM) is not
+    possible from here and is therefore best-effort -- CI runners are
+    ephemeral, but a developer running this locally should know a decoded key
+    can survive a crash in their temp directory.
     """
+    global _materialised_key
+
     explicit = os.environ.get("GDRIVE_CI_SA_KEY_FILE")
     if explicit:
         p = Path(explicit).expanduser()
@@ -53,13 +83,20 @@ def _key_path() -> Path:
             return p
         raise DriveConfigError(f"GDRIVE_CI_SA_KEY_FILE points at a missing file: {p}")
 
+    if _materialised_key is not None and _materialised_key.exists():
+        return _materialised_key
+
     b64 = os.environ.get("GDRIVE_CI_SA_KEY_B64")
     if b64:
         fd, name = tempfile.mkstemp(suffix=".json", prefix="gdrive-ci-key-")
         os.fchmod(fd, 0o600)
         with os.fdopen(fd, "wb") as fh:
             fh.write(base64.b64decode(b64))
-        return Path(name)
+        _materialised_key = Path(name)
+        # Children (the duckdb CLI running live SQL tests) need the same path,
+        # and the SQL templates substitute ${SA_KEY_FILE} from this variable.
+        os.environ.setdefault("GDRIVE_CI_SA_KEY_FILE", name)
+        return _materialised_key
 
     raise DriveConfigError(
         "No service-account key. Set GDRIVE_CI_SA_KEY_FILE or GDRIVE_CI_SA_KEY_B64 "
@@ -264,8 +301,45 @@ class Drive:
             )
 
     def find_or_create_folder(self, name: str, parent_id: str | None = None) -> str:
+        """mkdir -p for one level, safe against a concurrent run doing the same.
+
+        Drive has no atomic create-if-absent, so two jobs can both see no
+        `/scratch`, both create one, and then silently diverge -- one run's
+        fixtures land in a folder the other never looks at. Returning
+        `existing[0]` would hide that indefinitely.
+
+        We cannot prevent the race, so we detect it: after creating, re-list
+        and require exactly one. Two folders with one name is harness
+        corruption and must be loud, because every later "file not found" is
+        then a lie.
+        """
         parent = parent_id or self.drive_id
-        existing = [f for f in self.list_children(parent, name=name) if f["mimeType"] == FOLDER_MIME]
-        if existing:
+
+        def folders() -> list[dict]:
+            return [f for f in self.list_children(parent, name=name)
+                    if f["mimeType"] == FOLDER_MIME]
+
+        existing = folders()
+        if len(existing) == 1:
             return existing[0]["id"]
-        return self.create_folder(name, parent)
+        if len(existing) > 1:
+            ids = ", ".join(f["id"] for f in existing)
+            raise RuntimeError(
+                f"{len(existing)} folders named {name!r} under {parent}: {ids}. "
+                "This is harness corruption, usually from two runs racing to create "
+                "it. Delete all but one by hand before continuing."
+            )
+
+        created = self.create_folder(name, parent)
+
+        # Re-check: another run may have created its own between our list and
+        # our create.
+        after = folders()
+        if len(after) > 1:
+            ids = ", ".join(f["id"] for f in after)
+            raise RuntimeError(
+                f"race creating folder {name!r} under {parent}: now {len(after)} "
+                f"exist ({ids}). Delete all but one by hand. Seeding and live "
+                "tests should not run concurrently."
+            )
+        return created

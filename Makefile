@@ -8,6 +8,18 @@ EXT_CONFIG=${PROJ_DIR}extension_config.cmake
 include extension-ci-tools/makefiles/duckdb_extension.Makefile
 
 # ---------------------------------------------------------------------------
+# extension-ci-tools defines `test: test_release`, which runs only the SQL
+# suite. That made `make test` green while the Catch2 pure-logic binary was
+# never executed -- precisely the false green the two-layer policy exists to
+# prevent, and worse because it was silent.
+#
+# Override so the headline target runs BOTH layers. test_live stays separate:
+# it needs credentials and must fail loudly without them.
+# ---------------------------------------------------------------------------
+.PHONY: test
+test: unit_test test_release
+
+# ---------------------------------------------------------------------------
 # Catch2 unit tests -- pure logic, no DuckDB linkage, no network, no
 # credentials. Always runnable by anyone who can build. See
 # docs/implementation-plan.md section 1.

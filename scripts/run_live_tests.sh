@@ -40,6 +40,35 @@ if [[ -z "${GDRIVE_CI_SA_KEY_FILE:-}" && -z "${GDRIVE_CI_SA_KEY_B64:-}" ]]; then
     exit 1
 fi
 
+# ---------------------------------------------------------------------------
+# CI supplies the key as base64 (a GitHub secret), but the SQL tests need a
+# PATH: the templates substitute ${SA_KEY_FILE} and each test `require-env`s
+# GDRIVE_CI_SA_KEY_FILE. Without this decode, a CI run with perfectly good
+# credentials fails or skips -- credentials present, nothing tested.
+#
+# Decode once here, into a 0600 file removed on exit by the trap below, and
+# export the path so both the materialiser and the duckdb CLI see it.
+# ---------------------------------------------------------------------------
+DECODED_KEY=""
+cleanup() {
+    if [[ -n "$DECODED_KEY" && -f "$DECODED_KEY" ]]; then
+        rm -f "$DECODED_KEY"
+    fi
+}
+trap cleanup EXIT INT TERM
+
+if [[ -z "${GDRIVE_CI_SA_KEY_FILE:-}" ]]; then
+    DECODED_KEY="$(mktemp -t gdrive-ci-key-XXXXXX.json)"
+    chmod 600 "$DECODED_KEY"
+    printf '%s' "$GDRIVE_CI_SA_KEY_B64" | base64 -d > "$DECODED_KEY"
+    if ! grep -q '"private_key"' "$DECODED_KEY"; then
+        echo "FAIL: GDRIVE_CI_SA_KEY_B64 did not decode to a service-account key." >&2
+        exit 1
+    fi
+    export GDRIVE_CI_SA_KEY_FILE="$DECODED_KEY"
+    echo "==> decoded service-account key from GDRIVE_CI_SA_KEY_B64"
+fi
+
 UNITTEST=build/release/test/unittest
 if [[ ! -x "$UNITTEST" ]]; then
     echo "FAIL: $UNITTEST not built. Run \`make\` first." >&2
@@ -52,8 +81,19 @@ echo "==> materialising live tests with real fixture ids"
 shopt -s nullglob
 tests=(test/sql/live/*.test)
 if [[ ${#tests[@]} -eq 0 ]]; then
-    echo "no live tests materialised (no *.test.template yet) -- nothing to run"
-    exit 0
+    # Passing here would be the exact false green this script exists to
+    # prevent: credentials present, suite "green", nothing tested. During
+    # early scaffolding (before any *.test.template exists) that is expected,
+    # so it is opt-out rather than an unconditional failure -- but it must be
+    # opt-out, never the default.
+    if [[ "${ALLOW_EMPTY_LIVE_SQL:-}" == "1" ]]; then
+        echo "WARNING: no live tests materialised; ALLOW_EMPTY_LIVE_SQL=1 so not failing."
+        exit 0
+    fi
+    echo "FAIL: no live tests materialised from test/sql/*.test.template." >&2
+    echo "Credentials are configured, so a pass here would mean nothing was tested." >&2
+    echo "Set ALLOW_EMPTY_LIVE_SQL=1 only while scaffolding." >&2
+    exit 1
 fi
 
 echo "==> running ${#tests[@]} live test file(s)"

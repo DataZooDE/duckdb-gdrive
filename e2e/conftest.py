@@ -81,6 +81,14 @@ def scratch(drive: Drive):
     scratch_root = drive.find_or_create_folder(fx.SCRATCH_ROOT)
     name = f"run-{uuid.uuid4().hex[:12]}"
     folder_id = drive.create_folder(name, scratch_root)
+
+    # Heartbeat. The sweeper cannot rely on the folder's own modifiedTime:
+    # Drive does not advance a folder's timestamp when its children change, so
+    # a long-running test would look idle and could be swept out from under
+    # itself. An explicit heartbeat file, refreshed on creation and touched on
+    # teardown, gives the sweeper something that actually tracks liveness.
+    drive.upload(fx.HEARTBEAT_NAME, b"alive\n", folder_id, "text/plain")
+
     try:
         yield folder_id
     finally:

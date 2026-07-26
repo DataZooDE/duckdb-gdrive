@@ -28,21 +28,53 @@ namespace gdrive {
 //     atomicity; Drive does not provide it. Documented, not papered over.
 // ---------------------------------------------------------------------------
 
-//! Resolves gdrive:// paths to Drive file ids, caching per connection.
+//! Resolves gdrive:// paths to Drive file ids.
 //!
 //! This is the core problem (HLD section 4). Drive has NO path addressing, so
 //! "a/b/c.parquet" costs one files.list per segment -- three round trips
 //! before a single byte is read. That is risk R-1 and the most likely thing
 //! to sink the project, so the cache is not an optimisation, it is the
 //! mitigation.
+//!
+//! ---------------------------------------------------------------------
+//! SECURITY: entries MUST be keyed by identity, not by path alone.
+//!
+//! The plan called this a "per-connection" cache, but the filesystem object
+//! is registered once as a subsystem on the DatabaseInstance and therefore
+//! outlives and spans every ClientContext. A cache keyed on the path string
+//! alone would let connection A, authenticated with a read-only secret
+//! against Shared Drive X, serve a resolved file id to connection B holding a
+//! different secret and a different root -- a cross-tenant leak that looks
+//! like a caching bug and reads like a permissions bug.
+//!
+//! CacheKey therefore includes the secret name, drive id and root folder, and
+//! a hit is only honoured when the *current* auth context matches. Found in
+//! codex review #1 (docs/reviews/2026-07-26-codex-review-1-wave0.md), before
+//! any of it was implemented.
+//! ---------------------------------------------------------------------
+struct CacheKey {
+	std::string secret_name;
+	std::string drive_id;
+	std::string root_folder_id;
+	std::string canonical_path;
+
+	bool operator==(const CacheKey &other) const;
+	//! Stable string form, used as the map key.
+	std::string ToString() const;
+};
+
 class GDrivePathCache {
 public:
 	//! Look up a fully-resolved path. Returns false on a miss.
-	bool TryGet(const std::string &key, DriveFileMeta &out);
-	void Put(const std::string &key, const DriveFileMeta &meta);
-	//! Drop `key` and everything beneath it. Called after any mutation, since
-	//! a rename or delete invalidates every descendant path.
-	void InvalidatePrefix(const std::string &key);
+	bool TryGet(const CacheKey &key, DriveFileMeta &out);
+	void Put(const CacheKey &key, const DriveFileMeta &meta);
+	//! Drop `key` and everything beneath it, within the SAME identity. A
+	//! rename or delete invalidates every descendant path, but must not
+	//! disturb another identity's entries.
+	void InvalidatePrefix(const CacheKey &key);
+	//! Drop everything belonging to one secret -- called when a secret is
+	//! dropped or re-created, since its ids may no longer be reachable.
+	void InvalidateSecret(const std::string &secret_name);
 	void Clear();
 	idx_t Size();
 
@@ -153,6 +185,20 @@ private:
 	//! silently picking one would make query results depend on Drive's
 	//! internal ordering -- a bug that reproduces only sometimes.
 	DriveFileMeta ResolveOrThrow(ClientContext &context, const GDriveUri &uri);
+
+	//! R-4 applies to LISTING too, not just resolution.
+	//!
+	//! Glob and ListFiles return paths, and two siblings sharing a name
+	//! produce two identical paths -- indistinguishable to the caller, and
+	//! ambiguous again when one is later opened. Deferring the error to open
+	//! time means a scan can half-succeed.
+	//!
+	//! Rule: when a listing contains duplicate sibling names, emit the
+	//! `gdrive://id:<fileId>` form for the affected entries so every returned
+	//! path addresses exactly one file. Unambiguous entries keep their
+	//! readable path form.
+	static std::string DisambiguatePath(const std::string &parent_path,
+	                                    const DriveFileMeta &meta, bool name_is_ambiguous);
 
 	GDrivePathCache cache;
 };

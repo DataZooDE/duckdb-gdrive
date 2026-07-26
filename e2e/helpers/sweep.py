@@ -22,6 +22,26 @@ from . import fixtures as fx
 DEFAULT_MAX_AGE_HOURS = 24
 
 
+def _parse_rfc3339(value: str) -> dt.datetime:
+    return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _liveness_time(drive: Drive, folder: dict) -> dt.datetime:
+    """Most recent sign of life for a scratch folder.
+
+    Prefers the heartbeat file's modifiedTime; falls back to the folder's own
+    when there is no heartbeat (a folder created before heartbeats existed, or
+    by a run that died between mkdir and the first write).
+    """
+    try:
+        beats = drive.list_children(folder["id"], name=fx.HEARTBEAT_NAME)
+    except Exception:
+        beats = []
+    if beats:
+        return _parse_rfc3339(beats[0]["modifiedTime"])
+    return _parse_rfc3339(folder["modifiedTime"])
+
+
 def sweep(drive: Drive, max_age_hours: int = DEFAULT_MAX_AGE_HOURS, dry_run: bool = False) -> int:
     roots = drive.list_children(drive.drive_id, name=fx.SCRATCH_ROOT)
     if not roots:
@@ -34,7 +54,14 @@ def sweep(drive: Drive, max_age_hours: int = DEFAULT_MAX_AGE_HOURS, dry_run: boo
     for child in drive.list_children(scratch):
         if child["mimeType"] != FOLDER_MIME or not child["name"].startswith("run-"):
             continue
-        modified = dt.datetime.fromisoformat(child["modifiedTime"].replace("Z", "+00:00"))
+
+        # Liveness comes from the heartbeat file, not the folder. Drive does
+        # NOT advance a folder's modifiedTime when its children change, so a
+        # folder belonging to a slow-but-active run looks exactly as stale as
+        # one abandoned yesterday. Deleting a live run's scratch mid-test
+        # produces a baffling failure in an unrelated job, so prefer the
+        # heartbeat and fall back to the folder only when it is absent.
+        modified = _liveness_time(drive, child)
         if modified >= cutoff:
             continue
         age = dt.datetime.now(dt.timezone.utc) - modified

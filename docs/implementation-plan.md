@@ -1,6 +1,17 @@
 # Implementation plan — `duckdb-gdrive`
 
-**Status:** Approved shape, ready to execute.
+> **Progress note (2026-07-26).** Wave 0 is complete; the pure-logic layers of
+> Waves 1 and 2 are done and green (`make unit_test`). Codex review #1 has run
+> and its findings are triaged in
+> `docs/reviews/2026-07-26-codex-review-1-wave0.md`.
+>
+> **Everything touching Drive is unverified**, because D-1 leaves no fake to
+> verify against and the CI Shared Drive (§2.1) does not exist yet. That single
+> manual step gates: the resolver, ranged reads, listing/pagination, export,
+> the write path, the benchmark, and every live SQL test. It is the critical
+> path — not a formality.
+
+**Status:** In progress.
 **Date:** 2026-07-26
 **Companions:** `brd.md` (why), `hld.md` (what). This document is the *how*.
 **Target:** DuckDB v1.5.3 stable + v1.4.4 LTS.
