@@ -23,12 +23,26 @@ std::string RootFolderFor(const GDriveAuthContext &auth) {
 
 //! Resolve the immediate parent folder named by a PATH-kind URI's
 //! ParentPath(), or the configured root when the path has no parent segment.
+//!
+//! BUG FIX (live run 2026-07-26): every call site passes `uri.ParentPath()`
+//! (or, transitively, this function's own `parent_path` parameter), and
+//! GDriveUri::ParentPath() already returns a FULL "gdrive://..." string
+//! (gdrive_uri.cpp), not a bare canonical path. Re-prepending GDRIVE_SCHEME
+//! here doubled it -- "gdrive://" + "gdrive://scratch/x" -> parsed as the
+//! single segment "gdrive:" followed by "scratch"/"x", which then 404'd with
+//! a mangled path in the error message. This is why MoveFile (the rename
+//! DuckDB's COPY writer performs when overwriting an existing gdrive:// file
+//! via a tmp file, see bind_copy.cpp's ResolveUseTmpFile) failed on every
+//! overwrite: a brand-new file's write path never calls this function at
+//! all (OpenFile walks/creates its own parent chain inline), but overwriting
+//! an EXISTING file switches DuckDB to write-tmp-then-MoveFile, and MoveFile
+//! resolves both parents through here.
 std::string ResolveParentId(GDriveClient &client, GDrivePathCache &cache, const GDriveAuthContext &auth,
                             const std::string &parent_path) {
 	if (parent_path.empty()) {
 		return RootFolderFor(auth);
 	}
-	auto parsed = ParseGDriveUri(std::string(GDRIVE_SCHEME) + parent_path);
+	auto parsed = ParseGDriveUri(parent_path);
 	if (!parsed.ok) {
 		throw IOException("gdrive: %s", parsed.error);
 	}
@@ -96,8 +110,24 @@ void MutateMoveFile(GDriveClient &client, GDrivePathCache &cache, const GDriveAu
 		CacheKey src_key {auth.secret_name, auth.drive_id, auth.root_folder_id, CanonicalPathOf(source_uri)};
 		cache.InvalidatePrefix(src_key);
 	}
-	CacheKey dst_key {auth.secret_name, auth.drive_id, auth.root_folder_id, target_uri.ParentPath()};
-	cache.InvalidatePrefix(dst_key);
+	// BUG FIX (live run 2026-07-26): this used to build the key from
+	// `target_uri.ParentPath()`, which -- like ResolveParentId's bug above
+	// -- is a FULL "gdrive://..." string, not the bare canonical path every
+	// other CacheKey in this file uses (CanonicalPathOf()). CacheKey's
+	// identity_prefix + canonical_path never matched any real cache entry
+	// (they are all keyed by bare paths), so this invalidation was a no-op:
+	// overwriting an existing gdrive:// file via COPY (which routes through
+	// write-tmp-then-MoveFile once the target exists, per DuckDB's
+	// ResolveUseTmpFile) moved the new content into place on Drive
+	// correctly, but a stale cached leaf entry for the destination's OLD
+	// file id/name kept being served back to readers, so the read-back
+	// after an overwrite silently returned the previous file's content.
+	// Invalidating the destination's own canonical path (exact leaf, plus
+	// any descendants) is what actually needs to go.
+	if (target_uri.kind == GDriveUriKind::PATH) {
+		CacheKey dst_key {auth.secret_name, auth.drive_id, auth.root_folder_id, CanonicalPathOf(target_uri)};
+		cache.InvalidatePrefix(dst_key);
+	}
 }
 
 void MutateCreateDirectory(GDriveClient &client, GDrivePathCache &cache, const GDriveAuthContext &auth,

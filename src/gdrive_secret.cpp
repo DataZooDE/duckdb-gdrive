@@ -113,6 +113,22 @@ unique_ptr<BaseSecret> CreateConfigSecret(ClientContext &, CreateSecretInput &in
 		    "  CREATE SECRET gdrive_tok (TYPE gdrive, PROVIDER config, ACCESS_TOKEN '...');");
 	}
 
+	// A bare ACCESS_TOKEN needs nothing else -- it is used as-is (pass-
+	// through), never refreshed. But a REFRESH_TOKEN with no ACCESS_TOKEN is
+	// useless without CLIENT_ID and CLIENT_SECRET to mint a fresh access
+	// token from it (Google's grant_type=refresh_token POST needs all
+	// three). Catching this at CREATE SECRET time, rather than on the first
+	// gdrive:// access, needs no network call and fails loudly at the point
+	// the user made the mistake.
+	if (!HasNonEmptyOption(input, "access_token") &&
+	    (!HasNonEmptyOption(input, "client_id") || !HasNonEmptyOption(input, "client_secret"))) {
+		throw InvalidInputException(
+		    "gdrive secret (PROVIDER config) has REFRESH_TOKEN but no ACCESS_TOKEN; refreshing needs CLIENT_ID and "
+		    "CLIENT_SECRET too (Google's token endpoint needs all three). Example:\n"
+		    "  CREATE SECRET gdrive_tok (TYPE gdrive, PROVIDER config, CLIENT_ID '...', CLIENT_SECRET '...', "
+		    "REFRESH_TOKEN '...');");
+	}
+
 	ApplyDefaultScope(*result);
 
 	result->redact_keys.insert("access_token");

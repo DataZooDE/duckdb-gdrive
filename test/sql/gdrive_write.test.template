@@ -12,13 +12,28 @@ require parquet
 
 require-env GDRIVE_CI_DRIVE_ID
 
-require-env GDRIVE_CI_SA_KEY_FILE
+require-env GDRIVE_OAUTH_CLIENT_ID
 
+require-env GDRIVE_OAUTH_CLIENT_SECRET
+
+require-env GDRIVE_USER_REFRESH_TOKEN
+
+# PROVIDER config with a refresh token, NOT service_account: a service
+# account has no Drive storage quota and cannot write outside a Shared Drive
+# (403 storageQuotaExceeded, verified live 2026-07-26). Writing needs a
+# delegated user, so this secret mints and refreshes its own access token via
+# grant_type=refresh_token against Google's token endpoint -- see
+# src/gdrive_auth.cpp's BuildContextFromConfig. Real credential values are
+# never in this template: they are substituted from the environment at
+# materialisation time (e2e/helpers/materialise.py), and the materialised
+# file lives in the gitignored test/sql/live/.
 statement ok
 CREATE SECRET gdrive_test (
     TYPE gdrive,
-    PROVIDER service_account,
-    KEY_FILE '${SA_KEY_FILE}',
+    PROVIDER config,
+    CLIENT_ID '${OAUTH_CLIENT_ID}',
+    CLIENT_SECRET '${OAUTH_CLIENT_SECRET}',
+    REFRESH_TOKEN '${USER_REFRESH_TOKEN}',
     ROOT_FOLDER_ID '${DRIVE_ID}',
     DRIVE_SCOPE 'https://www.googleapis.com/auth/drive'
 );

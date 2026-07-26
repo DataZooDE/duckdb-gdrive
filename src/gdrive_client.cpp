@@ -547,6 +547,19 @@ public:
 
 	DriveResponse Upload(const std::string &file_id, const std::string &parent_id, const std::string &name,
 	                     const std::string &content_type, const std::string &data) override {
+		// BUG FIX (live run 2026-07-26): `content_type` is a real MIME type
+		// for every caller EXCEPT MutateCreateDirectory, which passes Drive's
+		// pseudo-type "application/vnd.google-apps.folder" -- not a valid
+		// media type for uploaded bytes, because a folder has no bytes at
+		// all. Passing it as the *media part's* Content-Type (the old
+		// behaviour) makes Google reject the whole request with "Invalid
+		// MIME type provided for the uploaded content." even though the
+		// metadata part is perfectly well-formed. Folder creation needs no
+		// media part whatsoever -- Drive learns the type from metadata's
+		// "mimeType" field -- so it is sent as a plain JSON files.create,
+		// never as a multipart upload.
+		const bool is_folder_create = content_type == kFolderMimeType;
+
 		std::ostringstream metadata;
 		metadata << "{";
 		bool first = true;
@@ -563,8 +576,23 @@ public:
 				metadata << ",";
 			}
 			metadata << "\"parents\":[\"" << JsonEscape(parent_id) << "\"]";
+			first = false;
+		}
+		if (is_folder_create) {
+			if (!first) {
+				metadata << ",";
+			}
+			metadata << "\"mimeType\":\"" << JsonEscape(content_type) << "\"";
 		}
 		metadata << "}";
+
+		if (is_folder_create) {
+			// Plain files.create, no /upload/ prefix and no media part --
+			// there is nothing to upload.
+			std::string path = "/drive/v3/files?fields=" + UrlEncode(FileFieldsMask()) + "&" + AllDrivesParams();
+			return ExecuteWithRetry(HttpMethod::POST, path, {}, metadata.str(), "application/json; charset=UTF-8",
+			                        &DriveCallStats::files_create, {200});
+		}
 
 		std::string boundary = BuildMultipartBoundary();
 		std::string body = BuildMultipartBody(boundary, metadata.str(), content_type, data);

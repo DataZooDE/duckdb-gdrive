@@ -9,7 +9,16 @@ Placeholders are ``${NAME}``. Available names:
     ${DRIVE_ID}          the Shared Drive id
     ${FIXTURES_ID}       id of /fixtures
     ${SA_KEY_FILE}       path to the service-account key
+    ${OAUTH_CLIENT_ID}       delegated-user OAuth client id (GDRIVE_OAUTH_CLIENT_ID)
+    ${OAUTH_CLIENT_SECRET}   delegated-user OAuth client secret (GDRIVE_OAUTH_CLIENT_SECRET)
+    ${USER_REFRESH_TOKEN}    delegated-user refresh token (GDRIVE_USER_REFRESH_TOKEN)
     ${ID:some/path}      id of that path under /fixtures, resolved live
+
+Note on ${OAUTH_CLIENT_ID} / ${OAUTH_CLIENT_SECRET} / ${USER_REFRESH_TOKEN}: these
+carry real credential material, unlike the other placeholders. They are read
+straight from the environment at materialisation time and substituted only
+into files written under the gitignored test/sql/live/ -- never into anything
+tracked by git (scripts/check_no_credentials.sh enforces this).
 
 An unresolved placeholder is a hard error: substituting an empty string would
 produce a test that passes against the wrong thing.
@@ -43,6 +52,13 @@ def build_substitutions(drive: Drive) -> dict:
     if key_file and not Path(key_file).is_absolute():
         key_file = str((REPO_ROOT / key_file).resolve())
 
+    # Delegated-user credentials for the config/refresh-token secret that
+    # gdrive_write.test.template creates. Read straight from the environment
+    # (never from a file this repo tracks) -- see this module's docstring.
+    oauth_client_id = os.environ.get("GDRIVE_OAUTH_CLIENT_ID", "")
+    oauth_client_secret = os.environ.get("GDRIVE_OAUTH_CLIENT_SECRET", "")
+    user_refresh_token = os.environ.get("GDRIVE_USER_REFRESH_TOKEN", "")
+
     # Mutating SQL tests need somewhere to write. One scratch folder per
     # materialisation (i.e. per `make test_live` run), carrying a heartbeat so
     # the sweeper can tell a slow run from an abandoned one -- Drive does not
@@ -57,6 +73,9 @@ def build_substitutions(drive: Drive) -> dict:
         "DRIVE_ID": drive.drive_id,
         "FIXTURES_ID": found[0]["id"],
         "SA_KEY_FILE": key_file,
+        "OAUTH_CLIENT_ID": oauth_client_id,
+        "OAUTH_CLIENT_SECRET": oauth_client_secret,
+        "USER_REFRESH_TOKEN": user_refresh_token,
         "SCRATCH": scratch_name,
         "SCRATCH_ID": scratch_id,
     }
