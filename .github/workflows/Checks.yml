@@ -1,0 +1,109 @@
+#
+# Correctness gates that the reusable distribution workflow cannot host.
+#
+# The live suite runs against REAL Google Drive -- there is no fake and no
+# replay (plan decision D-1). That has a consequence worth stating plainly:
+# a pull request from a FORK cannot access repository secrets, so it runs the
+# credential-free layers only. `live` is skipped there, visibly, rather than
+# passing vacuously.
+#
+name: Checks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Nightly: full live suite + sweep the scratch folders that crashed runs
+    # leaked. 03:17 UTC, off the hour to dodge the scheduler stampede.
+    - cron: '17 3 * * *'
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Always runs. No credentials, no network. Anyone can reproduce this.
+  # ---------------------------------------------------------------------------
+  hygiene:
+    name: Credential hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No credentials tracked (REQ-NF-03)
+        run: ./scripts/check_no_credentials.sh
+
+  unit:
+    name: Pure-logic + credential-free SQL
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - name: Install vcpkg
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git "$HOME/vcpkg"
+          "$HOME/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          echo "VCPKG_ROOT=$HOME/vcpkg" >> "$GITHUB_ENV"
+          echo "VCPKG_TOOLCHAIN_PATH=$HOME/vcpkg/scripts/buildsystems/vcpkg.cmake" >> "$GITHUB_ENV"
+      - name: Build
+        run: GEN=ninja make
+      - name: Catch2 pure-logic tests
+        run: make unit_test
+      - name: SQL tests (live ones skip without credentials)
+        run: make test
+      - name: Static linkage allowlist
+        run: make smoke_static
+
+  # ---------------------------------------------------------------------------
+  # The real thing. Needs secrets, so it cannot run on fork PRs.
+  # ---------------------------------------------------------------------------
+  live:
+    name: Live tests against real Google Drive
+    runs-on: ubuntu-latest
+    # `secrets` is not available in job-level `if`, so gate on the event
+    # instead: fork PRs have a head repo different from the base repo.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - uses: astral-sh/setup-uv@v5
+      - name: Install vcpkg
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git "$HOME/vcpkg"
+          "$HOME/vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          echo "VCPKG_ROOT=$HOME/vcpkg" >> "$GITHUB_ENV"
+          echo "VCPKG_TOOLCHAIN_PATH=$HOME/vcpkg/scripts/buildsystems/vcpkg.cmake" >> "$GITHUB_ENV"
+      - name: Build
+        run: GEN=ninja make
+      - name: Live SQL tests
+        env:
+          GDRIVE_CI_SA_KEY_B64: ${{ secrets.GDRIVE_CI_SA_KEY_B64 }}
+          GDRIVE_CI_DRIVE_ID: ${{ secrets.GDRIVE_CI_DRIVE_ID }}
+        run: make test_live
+      - name: E2E harness
+        env:
+          GDRIVE_CI_SA_KEY_B64: ${{ secrets.GDRIVE_CI_SA_KEY_B64 }}
+          GDRIVE_CI_DRIVE_ID: ${{ secrets.GDRIVE_CI_DRIVE_ID }}
+        run: make e2e
+
+  # ---------------------------------------------------------------------------
+  # Crashed runs leak /scratch/run-* folders. Left alone they fill the Shared
+  # Drive and every later test fails for an unrelated reason.
+  # ---------------------------------------------------------------------------
+  sweep:
+    name: Sweep orphaned scratch folders
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - env:
+          GDRIVE_CI_SA_KEY_B64: ${{ secrets.GDRIVE_CI_SA_KEY_B64 }}
+          GDRIVE_CI_DRIVE_ID: ${{ secrets.GDRIVE_CI_DRIVE_ID }}
+        run: make sweep_orphans
