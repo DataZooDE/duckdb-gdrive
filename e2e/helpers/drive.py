@@ -393,16 +393,35 @@ class Drive:
         )
         return self._ok(resp, "upload")["id"]
 
-    def upload_native(self, name: str, csv_content: bytes, parent_id: str, target_mime: str) -> str:
+    #: Source content type to upload for each native target. Drive decides
+    #: what to convert INTO from the source type as much as from the target,
+    #: so uploading text/csv and asking for a Doc silently produces a SHEET.
+    #: That is not hypothetical -- the "Notes" fixture was a spreadsheet for
+    #: exactly this reason, and only the harness's mimeType assertion caught
+    #: it. Keep source and target in step.
+    _NATIVE_SOURCE_MIME = {
+        "application/vnd.google-apps.spreadsheet": "text/csv",
+        "application/vnd.google-apps.document": "text/plain",
+    }
+
+    def upload_native(self, name: str, content: bytes, parent_id: str, target_mime: str) -> str:
         """Upload and convert to a native Google format (Sheet / Doc).
 
         Needed for the REQ-F-07 fixtures: a native file has no bytes, so
         `alt=media` fails on it and `files.export` is the only way to read it.
         """
+        try:
+            source_mime = self._NATIVE_SOURCE_MIME[target_mime]
+        except KeyError:
+            raise ValueError(
+                f"no source mimeType known for native target {target_mime!r}; "
+                "add it to Drive._NATIVE_SOURCE_MIME rather than guessing -- "
+                "Drive will happily create the WRONG native type instead of failing"
+            ) from None
         meta = {"name": name, "parents": [parent_id], "mimeType": target_mime}
         files = {
             "metadata": ("metadata.json", json.dumps(meta), "application/json"),
-            "file": (name, csv_content, "text/csv"),
+            "file": (name, content, source_mime),
         }
         resp = self._request(
             "POST", f"{UPLOAD_V3}/files", "files.create.upload",

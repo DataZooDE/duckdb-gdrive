@@ -33,6 +33,19 @@ jobs:
       - name: No credentials tracked (REQ-NF-03)
         run: ./scripts/check_no_credentials.sh
 
+  # A submodule that has drifted off the shipped tag makes every local green
+  # meaningless: DuckDB's C++ API differs between versions, so code can
+  # compile for the developer and fail on all platforms. Cheap, so it runs
+  # before anything expensive.
+  pin:
+    name: duckdb submodule on the shipped tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - run: ./scripts/check_duckdb_pin.sh
+
   unit:
     name: Pure-logic + credential-free SQL
     runs-on: ubuntu-latest

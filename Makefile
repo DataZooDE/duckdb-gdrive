@@ -114,3 +114,11 @@ check_credentials:
 .PHONY: verify_readme
 verify_readme: release
 	@python3 scripts/verify_readme.py
+
+# ---------------------------------------------------------------------------
+# The duckdb submodule must sit on the tag we ship against. A drifted
+# submodule makes every local green meaningless -- see the script's header.
+# ---------------------------------------------------------------------------
+.PHONY: check_pin
+check_pin:
+	@./scripts/check_duckdb_pin.sh

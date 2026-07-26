@@ -28,14 +28,19 @@ def test_credentials_mint_a_token_and_reach_drive(drive):
     )
 
 
-def test_scratch_roundtrip(drive, scratch):
+def test_scratch_roundtrip(drive, writer, scratch):
     """Upload, read back byte-for-byte, and range-read -- inside a scratch folder.
 
     This is the exact capability the extension's read path needs, exercised
     through the harness first so a later failure is unambiguously the C++.
+
+    Written by `writer` (the delegated user) and read back by `drive` (the
+    service account) on purpose: that split IS the production arrangement,
+    and reading it back through the other identity proves the read path's
+    credentials really can see what was written.
     """
     payload = b"col\n" + b"".join(f"{i}\n".encode() for i in range(100))
-    file_id = drive.upload("roundtrip.csv", payload, scratch, "text/csv")
+    file_id = writer.upload("roundtrip.csv", payload, scratch, "text/csv")
 
     assert drive.download(file_id) == payload
 
@@ -48,8 +53,9 @@ def test_scratch_roundtrip(drive, scratch):
     assert meta["headRevisionId"], "no headRevisionId -- GetVersionTag would have nothing to return"
 
 
-def test_scratch_is_cleaned_up(drive):
+def test_scratch_is_cleaned_up(writer):
     """Teardown really deletes: a leaked folder per run would fill the Drive."""
+    drive = writer
     scratch_root = drive.find_or_create_folder(fx.SCRATCH_ROOT)
     before = {c["id"] for c in drive.list_children(scratch_root)}
 

@@ -431,7 +431,13 @@ GDriveAuthContext GetAuthContext(ClientContext &context, const std::string &path
 		throw InvalidInputException("gdrive secret '%s' is not a key-value secret", base.GetName().c_str());
 	}
 
-	const std::string secret_name = base.GetName().GetIdentifierName();
+	// BaseSecret::GetName() returns `const string &` on v1.5.3 and v1.4.4 --
+	// the versions this extension actually ships against. It became
+	// `const Identifier &` (with .GetIdentifierName()) only on DuckDB main,
+	// well after both. Calling the newer API compiled fine locally, because
+	// the duckdb submodule had drifted ~9600 commits past its pinned tag, and
+	// broke every release build. Keep this on the released API.
+	const std::string secret_name = base.GetName();
 
 	if (base.GetProvider() == "service_account") {
 		return BuildContextFromServiceAccount(*kv, secret_name);

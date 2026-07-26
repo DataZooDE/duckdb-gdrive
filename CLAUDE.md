@@ -31,6 +31,14 @@ GEN=ninja make                # release, the usual dev loop
 GEN=ninja make debug          # debug (ASAN, lldb)
 ```
 
+`make check_pin` (also a CI job) fails if the `duckdb` submodule has drifted
+off the shipped tag. This is not bookkeeping: the submodule once sat ~9,600
+commits past its tag on DuckDB main, every local build was green, and every
+release build was red -- `BaseSecret::GetName()` returns `const string &` on
+all released 1.4/1.5 versions and `const Identifier &` on main. Local builds
+target **latest stable**; CI additionally builds the **1.4 LTS** line, so a
+local green is necessary but not sufficient.
+
 Artifacts:
 
 - `build/release/duckdb` — shell with the extension statically linked
@@ -130,8 +138,8 @@ test/sql/                     SQLLogicTest; *.test.template gets fixture ids
                               substituted at run time into test/sql/live/
 e2e/                          uv + pytest harness: fixture provisioning,
                               API-call-count assertions, write round trips
-duckdb/                       submodule, v1.5.3
-extension-ci-tools/           submodule, v1.5.3
+duckdb/                       submodule, v1.5.5 (latest stable)
+extension-ci-tools/           submodule, v1.5-variegata (rolling 1.5 branch)
 ```
 
 ## Pure vs DuckDB source split

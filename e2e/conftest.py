@@ -36,7 +36,7 @@ def _load_dotenv() -> None:
 
 _load_dotenv()
 
-from helpers.drive import Drive, credentials_available  # noqa: E402
+from helpers.drive import Drive, credentials_available, user_delegation_available  # noqa: E402
 from helpers import fixtures as fx  # noqa: E402
 
 
@@ -52,6 +52,32 @@ def drive() -> Drive:
             "GDRIVE_CI_SA_KEY_FILE (see .env.gdrive.example)"
         )
     return Drive.from_env()
+
+
+@pytest.fixture(scope="session")
+def writer() -> Drive:
+    """A Drive session that can actually CREATE things.
+
+    The `drive` fixture above is the service account, deliberately: that is
+    the identity the extension's read path uses, so read assertions should
+    exercise it. But a service account has NO Drive storage quota and gets
+    403 storageQuotaExceeded on any upload outside a Shared Drive -- and our
+    fixture root is an ordinary folder. Folder *creation* still succeeds
+    (folders consume no quota), so a scratch fixture built on the service
+    account appears to work right up until the first byte is written.
+
+    That is exactly how this surfaced: the SQL suite was green and the pytest
+    harness failed in CI on `upload failed: HTTP 403`.
+
+    Writes therefore run as the delegated user, matching seeding and
+    materialisation (helpers/seed.py, helpers/materialise.py).
+    """
+    if not user_delegation_available():
+        pytest.skip(
+            "writing needs a delegated user token: a service account has no Drive "
+            "storage quota. Run `make oauth_consent`."
+        )
+    return Drive.from_env(prefer_user=True)
 
 
 @pytest.fixture(scope="session")
@@ -72,12 +98,16 @@ def fixtures_root(drive: Drive) -> str:
 
 
 @pytest.fixture
-def scratch(drive: Drive):
+def scratch(writer: Drive):
     """A per-test scratch folder, deleted on teardown.
 
     Per-test rather than per-session so a failing test cannot leave state that
     breaks the next one, and so concurrent CI runs never collide.
+
+    Built on `writer`, not `drive`: this creates files, and the service
+    account has no storage quota to create them with. See the writer fixture.
     """
+    drive = writer
     scratch_root = drive.find_or_create_folder(fx.SCRATCH_ROOT)
     name = f"run-{uuid.uuid4().hex[:12]}"
     folder_id = drive.create_folder(name, scratch_root)

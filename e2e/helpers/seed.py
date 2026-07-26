@@ -129,12 +129,20 @@ def seed(drive: Drive) -> dict:
         if kind == "binary":
             ids[path] = _upload_if_changed(drive, parent, name, content, mime)
         else:
-            # Native Sheet/Doc: no md5Checksum to compare against, so create
-            # only when absent.
+            # Native Sheet/Doc: no md5Checksum to compare against, so we
+            # cannot detect content drift -- but we CAN check the file is the
+            # right native type, and must. "Create only when absent" left a
+            # Doc fixture that was actually a Sheet (Drive converts from the
+            # SOURCE content type, so a text/csv body became a spreadsheet
+            # however the target was labelled) and every later run skipped it
+            # as present. Verify, and replace on mismatch.
             existing = drive.list_children(parent, name=name)
-            if existing:
+            if existing and existing[0].get("mimeType") == mime:
                 ids[path] = existing[0]["id"]
             else:
+                for stale in existing:
+                    print(f"    {path}: wrong type {stale.get('mimeType')!r}, replacing")
+                    drive.delete(stale["id"])
                 ids[path] = drive.upload_native(name, content, parent, mime)
         print(f"  {path} -> {ids[path]}")
 

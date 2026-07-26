@@ -10,12 +10,19 @@
 #     artifact that builds green and then fails to LOAD (symbol resolution in
 #     a side-module is deferred to load time, so CI would not catch it).
 #
-# Build matrix: current stable (v1.5.3) and the 1.4 LTS line. The LTS jobs
-# build DuckDB *source* v1.4.4 but with the v1.5.3 extension-ci-tools
-# workflow, because the @v1.4.4 workflow leaves the Windows compiler to
-# autodetect and current windows-latest images pick MinGW g++ -- which trips
-# the C++17 std::byte vs Win-SDK `byte` ambiguity and cannot link the
-# MSVC-built vcpkg OpenSSL. The v1.5.3 workflow pins MSVC `cl`.
+# Build matrix: current stable (v1.5.5) and the 1.4 LTS line (v1.4.5). Both
+# are built, because a community extension is installed against whichever
+# DuckDB the user is running and the C++ API differs between the lines.
+#
+# The ci-tools refs are the ROLLING branches -- v1.5-variegata and
+# v1.4-andium -- not per-patch tags, matching the sibling extensions
+# (erpl-web). A per-patch pin means the workflow silently ages out of step
+# with the toolchain fixes that land on the branch; the Windows compiler
+# selection below is exactly that kind of fix. The v1.4-andium branch pins
+# MSVC `cl`; the older per-patch v1.4.x workflows left the Windows compiler
+# to autodetect, and current windows-latest images pick MinGW g++ -- which
+# trips the C++17 std::byte vs Win-SDK `byte` ambiguity and cannot link the
+# MSVC-built vcpkg OpenSSL.
 #
 name: Main Extension Distribution Pipeline
 on:
@@ -33,19 +40,19 @@ concurrency:
 
 jobs:
   duckdb-stable-build:
-    name: Build extension binaries (v1.5.3)
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.5.3
+    name: Build extension binaries (v1.5.5)
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.5-variegata
     with:
-      duckdb_version: v1.5.3
-      ci_tools_version: v1.5.3
+      duckdb_version: v1.5.5
+      ci_tools_version: v1.5-variegata
       extension_name: gdrive
       exclude_archs: 'windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'
 
   duckdb-lts-build:
-    name: Build extension binaries (v1.4.4 LTS)
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.5.3
+    name: Build extension binaries (v1.4.5 LTS)
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.4-andium
     with:
-      duckdb_version: v1.4.4
-      ci_tools_version: v1.5.3
+      duckdb_version: v1.4.5
+      ci_tools_version: v1.4-andium
       extension_name: gdrive
       exclude_archs: 'windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'

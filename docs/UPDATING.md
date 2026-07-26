@@ -5,7 +5,8 @@ repository must be rebuilt for every DuckDB release. REQ-NF-06 records this as
 a standing cost for the life of the project, not a one-off — it is written
 down here so it is a routine rather than a rediscovery.
 
-Current targets: **stable v1.5.3** and the **1.4 LTS** line (source v1.4.4).
+Current targets: **stable v1.5.5** and the **1.4 LTS** line (source v1.4.5).
+Local development builds against stable only; CI builds both.
 
 ## The routine
 
@@ -41,7 +42,7 @@ Current targets: **stable v1.5.3** and the **1.4 LTS** line (source v1.4.4).
    `*Extended` hooks with `Supports*Extended()` opt-ins. **Overriding a method
    that is no longer virtual compiles cleanly and is then simply never
    called** — a silent behavioural regression that no compiler warns about.
-   The v1.5.3 `OpenFile` overload set has exactly this shape.
+   The v1.5.5 `OpenFile` overload set has exactly this shape.
 
 4. **Run every layer.**
 

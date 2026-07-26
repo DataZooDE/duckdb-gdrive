@@ -67,7 +67,7 @@
 **Status:** In progress.
 **Date:** 2026-07-26
 **Companions:** `brd.md` (why), `hld.md` (what). This document is the *how*.
-**Target:** DuckDB v1.5.3 stable + v1.4.4 LTS.
+**Target:** DuckDB v1.5.5 stable + v1.4.5 LTS. Local builds use stable; CI builds both.
 
 ---
 
