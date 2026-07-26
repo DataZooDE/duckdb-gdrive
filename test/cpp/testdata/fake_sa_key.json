@@ -1,0 +1,14 @@
+{
+  "_comment": "THROWAWAY test-only RSA key, generated for duckdb-gdrive unit tests. Grants access to nothing; not a real Google service account.",
+  "type": "service_account",
+  "project_id": "fake-project-id",
+  "private_key_id": "fakekeyid0123456789abcdef0123456789abcd",
+  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDHYVtsTJlXuHV9\nMSUMGrGxSuLWDNCcl8OHeBHuaCw7zis/UzIMn5MYFsYTrIFMXLRWVfKS0w6knJrx\nWoDZ9BZegPg51grTvjOYl1KbBmnAgeF4KEdRKaciZyaQoOIVFcI7aku5Bm1xbq9K\nHK7xa1XDkZJXQhgOyuoKjq2NBofOLz7gnmvLCyr9gabtVtBhDPG77eWfMND0h6dl\nb/MBLFQxgWj5PTEF4NbcOUeAj36Pf+Wg4YSCQENgxa4bzLs8Y2uZ5619adX6nL4H\n3G4NmkBAWrCpmQW/1ubDIuNHRcK+O7kFszQpD/vIPcowh/ReHN5tq2JdxyIqKLWq\nOYXDkw/dAgMBAAECggEAGzVahA9596IZCnIb86hq6l5lUT+jclM1oDWPAOFfc/Ph\nK/2e/WEDckydUE8AwBqAk62b8lRyEZ27eUdYASZRrSjddwsSJC43HVI9OCGqadZv\nnfWlMdrEz6mS9ja2U5lKDdCmL8RESDAKJMuARjrXE964QUcoQFCJmtI4td+Xxdeo\nCuCx1II7lirxHQ6BC6DpHf0T5xiRv+vUFy7oByhsjMCJcnbqDDNxPBKvSbpeE8pB\n3sXsRigMMDfo7mMUMXrGqjQ+IXLfIrr+Te/lKAD+aENZS5xB+i9VH9jqgs72YwFd\n+WCevZMwxaRDPsRhBCizakVi5Zw0vhTY2CDECVcAQwKBgQDknt9PF7DPGfa/Koae\nOlIDXYdldaEVoMznL5R+WIefUzDcz/fqjgMBeamuf1tXjuSu1b+lttc+kqZzcpsC\nX2Tp0crQk4WZPXV5TPzlpsPHs125esiwi+fnJViHIS6Dg37TD/PwJMYj6DUB6lA2\nzU18+glrf5/+v3AE6Ul3rQ/xrwKBgQDfQgam9rQqGZk1lw7SlfcBlBRS5xGA8sqm\ntLgy80DqtJQCR1gfuN9LktonOesCSZLv4/+QGsLuf9UH9YUsatA3s/bIg3IYmRVR\n9NEpLA3GePyifDZCyO18pDcmajPk6CoOmWcoPumkU+61fvnRgFSnDVXvDbHTlxnB\nzNBHDAU2MwKBgQC/e52X1kTdwWZciRbFch18+hpMTXCE9/CG9eAOzsGRHZGAcKO6\nDgXQd4E6SStNM76v/RGOj4zKuPO3IFdabmHMQU340oaEaeh5l5T+GGZEXiPzFTcA\nP74VaL80NwOJXVqdFvB+w549NuEm4IUc0WnEcnvvUK7GJLuDMY26MfZ3uwKBgDHB\nt1XSuciAOAMXjXglcA1sATOQx/fjJIMO19aTHC6y3CG94MgBHdLsAa6oW9YAq7zH\nJZfqPvOEjefeMjX6ADnJ5ABAO1d8FqJTW6I/bTqEkFluMXGk8jjLKHdpR/OGQolK\naxEvJEc5ZYQRrn+giD1K3ZIPjUhI7ragfPK4nRi9AoGBALEuhuweL7xpWUxIR6Ur\nawRCqS4oTx6kIo9hvGDk1GuomR7Q+uTTRRV2nQSD2hxyCL6yCfW/aKfuKNeGLUl/\nDeJwfINSwMwMlfHKrwkq2S/7Bvcqvm6wLsjpQvQuQlamXWMJd0GeFBly1gSgpDI6\nkNskasMNfSdo343BdGGvPb1w\n-----END PRIVATE KEY-----\n",
+  "client_email": "fake-sa@fake-project-id.iam.gserviceaccount.com",
+  "client_id": "123456789012345678901",
+  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+  "token_uri": "https://oauth2.googleapis.com/token",
+  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/fake-sa%40fake-project-id.iam.gserviceaccount.com",
+  "universe_domain": "googleapis.com"
+}

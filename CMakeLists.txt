@@ -15,6 +15,22 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include_directories(src/include)
 
+# ---------------------------------------------------------------------------
+# picojson stores parsed numbers as int64_t only when PICOJSON_USE_INT64 is
+# defined BEFORE picojson.h is first included in a translation unit; otherwise
+# every number is a double.
+#
+# That is an ODR trap, not a preference. jwt-cpp's
+# `traits/kazuho-picojson/defaults.h` defines it, so any TU including jwt-cpp
+# sees one set of picojson inline functions while a TU including
+# <picojson/picojson.h> directly sees a different set. Linking both into one
+# binary is undefined behaviour whose observable symptom -- whether a parsed
+# number is retrievable as int64_t or double -- depends on link order.
+#
+# Defining it for the whole project makes every TU agree. Applied here rather
+# than per-file so a future #include cannot silently reintroduce the split.
+add_compile_definitions(PICOJSON_USE_INT64)
+
 # DuckDB ships cpp-httplib (namespace `duckdb_httplib_openssl`) under its
 # third_party tree. Use it directly rather than adding a separate vcpkg dep --
 # same choice as ../erpl-web and ../quack-oauth. Pure-logic targets (the

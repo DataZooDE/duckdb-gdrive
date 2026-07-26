@@ -1,0 +1,149 @@
+# name: test/sql/gdrive_read.test.template
+# description: S-2.12..S-2.17 -- read path against REAL Google Drive
+# group: [live]
+#
+# Materialised into test/sql/live/gdrive_read.test by
+# e2e/helpers/materialise.py, which substitutes the fixture ids that only
+# exist at run time. Run via `make test_live`.
+#
+# There is no fake and no replay (decision D-1): every statement below is a
+# real HTTPS round trip to the Drive API.
+
+require gdrive
+
+require parquet
+
+require-env GDRIVE_CI_DRIVE_ID
+
+require-env GDRIVE_CI_SA_KEY_FILE
+
+statement ok
+CREATE SECRET gdrive_test (
+    TYPE gdrive,
+    PROVIDER service_account,
+    KEY_FILE '${SA_KEY_FILE}',
+    DRIVE_ID '${DRIVE_ID}',
+    SCOPE 'https://www.googleapis.com/auth/drive'
+);
+
+# ---------------------------------------------------------------------------
+# S-2.14 -- the first end-to-end green: a CSV read straight out of Drive.
+# ---------------------------------------------------------------------------
+query III
+SELECT id, name, amount FROM read_csv('gdrive://fixtures/small.csv') ORDER BY id
+----
+1	row-1	100
+2	row-2	200
+3	row-3	300
+4	row-4	400
+5	row-5	500
+
+# The id: form must reach the same bytes with zero resolution calls (S-2.9).
+query I
+SELECT count(*) FROM read_csv('gdrive://id:${ID:small.csv}')
+----
+5
+
+# ---------------------------------------------------------------------------
+# Nested paths: one files.list per segment, which is exactly what the cache
+# exists to amortise (R-1).
+# ---------------------------------------------------------------------------
+query II
+SELECT a, b FROM read_csv('gdrive://fixtures/nested/a/b/deep.csv') ORDER BY a
+----
+1	2
+3	4
+
+# ---------------------------------------------------------------------------
+# Names that break naive path handling. These are ordinary in Drive.
+# ---------------------------------------------------------------------------
+query I
+SELECT count(*) FROM read_csv('gdrive://fixtures/with space.csv')
+----
+5
+
+query I
+SELECT count(*) FROM read_csv('gdrive://fixtures/grüße.csv')
+----
+1
+
+# An empty file must read as zero rows, not error.
+statement ok
+SELECT * FROM read_csv('gdrive://fixtures/empty.csv', header=false, columns={'x':'VARCHAR'})
+
+# ---------------------------------------------------------------------------
+# S-2.15 -- ranged reads over a columnar file. A Parquet scan fetches the
+# footer and then individual column chunks, so this exercises Range handling
+# far harder than any CSV read does. BRD success criterion 1.
+# ---------------------------------------------------------------------------
+query I
+SELECT count(*) FROM read_parquet('gdrive://fixtures/parts/part-00.parquet')
+----
+10
+
+query I
+SELECT sum(v) FROM read_parquet('gdrive://fixtures/parts/part-00.parquet')
+----
+45
+
+# Projection pushdown: only one column's chunks should be fetched.
+query I
+SELECT max(i) FROM read_parquet('gdrive://fixtures/parts/part-03.parquet')
+----
+9
+
+# ---------------------------------------------------------------------------
+# S-2.18 -- glob. Drive's API cannot glob, so this is a folder listing plus
+# local matching.
+# ---------------------------------------------------------------------------
+query I
+SELECT count(*) FROM read_parquet('gdrive://fixtures/parts/*.parquet')
+----
+100
+
+query I
+SELECT count(DISTINCT part) FROM read_parquet('gdrive://fixtures/parts/part-*.parquet')
+----
+10
+
+# ---------------------------------------------------------------------------
+# S-2.17 -- pagination. The fixture folder holds 150 children, comfortably
+# past Drive's default page size of 100. A single-page implementation returns
+# 100 here and looks perfectly healthy.
+# ---------------------------------------------------------------------------
+query I
+SELECT count(*) FROM glob('gdrive://fixtures/many/*.csv')
+----
+150
+
+# ---------------------------------------------------------------------------
+# S-2.19 -- existence checks.
+# ---------------------------------------------------------------------------
+query I
+SELECT count(*) FROM glob('gdrive://fixtures/small.csv')
+----
+1
+
+query I
+SELECT count(*) FROM glob('gdrive://fixtures/does-not-exist.csv')
+----
+0
+
+# ---------------------------------------------------------------------------
+# S-2.4 -- errors must be actionable and must name the path the user wrote,
+# never only a file id they have never seen (REQ-F-08).
+# ---------------------------------------------------------------------------
+statement error
+SELECT * FROM read_csv('gdrive://fixtures/no-such-file.csv')
+----
+gdrive://fixtures/no-such-file.csv
+
+# ---------------------------------------------------------------------------
+# S-2.8 / R-4 -- Drive permits two files with one name in a folder. Picking
+# one silently would make results depend on Drive's internal ordering, so
+# this must be a hard error naming BOTH ids and pointing at the id: form.
+# ---------------------------------------------------------------------------
+statement error
+SELECT * FROM read_csv('gdrive://fixtures/dup/dup.csv')
+----
+id:

@@ -156,6 +156,14 @@ long comment in `extension_config.cmake`. Two separate failures (a
 weak/strong symbol clash on Linux/GCC, `error C7525` in bundled `fmt` on
 MSVC) both trace back to DuckDB caching `CMAKE_CXX_STANDARD=11`.
 
+**`PICOJSON_USE_INT64` must be defined project-wide** (it is, in
+`CMakeLists.txt`). picojson stores parsed numbers as `int64_t` only when that
+macro is set before its first include in a TU, else as `double`. jwt-cpp's
+`traits/kazuho-picojson/defaults.h` defines it; a direct
+`#include <picojson/picojson.h>` does not. Mixing both in one binary is an ODR
+violation whose symptom — whether `get<int64_t>()` works or throws — depends
+on link order. Do not "fix" this per-file.
+
 **Drive API calls must set `supportsAllDrives` and
 `includeItemsFromAllDrives`.** Without them the API behaves as if Shared
 Drives do not exist and returns "not found" for files that plainly do.
