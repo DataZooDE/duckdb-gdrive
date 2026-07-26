@@ -1,46 +1,56 @@
 # Implementation plan — `duckdb-gdrive`
 
-> ## RESUME HERE (2026-07-26, 19 commits, pushed to
+> ## RESUME HERE (2026-07-26, 25 commits, pushed to
 > ## github.com/DataZooDE/duckdb-gdrive)
 >
-> **The extension works against real Google Drive.** Live read 34/34, live
-> write 23/23, unit 162 cases / 860 assertions. Waves 0–3 are done.
+> **The extension works against real Google Drive**, built and tested against
+> **DuckDB v1.5.5** (latest stable). Live read 34/34, live write 27/27, e2e
+> 8/8, unit 162 cases / 860 assertions. Waves 0–3 done, Wave 4 nearly.
 >
 > ```bash
 > export VCPKG_ROOT=/home/jr/.local/share/vcpkg
 > export VCPKG_TOOLCHAIN_PATH=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake
+> make check_pin                                  # submodule on the shipped tag
 > GEN=ninja make && make test                     # unit + credential-free SQL
 > set -a && . .env.gdrive && set +a
-> ./scripts/run_live_tests.sh                     # live read + write suites
+> ./scripts/run_live_tests.sh && make e2e         # live suites
 > ```
 >
-> **Remaining work, in priority order.** Only 1 of the 8 Definition-of-Done
-> criteria in §6 is fully met; these close the rest:
+> **Versions.** Local + CI stable build **v1.5.5** (ci-tools
+> `@v1.5-variegata`); CI additionally builds **v1.4.5 LTS** (ci-tools
+> `@v1.4-andium`). Rolling ci-tools branches, matching erpl-web. A local
+> green is necessary but NOT sufficient — the API differs between lines.
 >
-> 1. **Codex review #2 findings.** A read-path review was running when the
->    session ended — output at `/tmp/.../tasks/bqs0u8f0c.output` if it
->    survived, else re-run per §3.3. Triage into `docs/reviews/`.
-> 2. **CI green (criterion 5).** First-ever run started at commit `536a9bc`;
->    `gh run list --repo DataZooDE/duckdb-gdrive`. Never yet been green —
->    expect build-plumbing failures (vcpkg bootstrap, MSVC C++17 leg), not
->    extension bugs.
-> 3. **`make bench` (criterion 2).** `wide.parquet` (~100 MB) is seeded.
->    Needs the gs:// counterpart and a committed number in
->    `docs/benchmark.md`. Gate: within 3× GCS.
-> 4. **Quota error (criterion 4).** 403/429 rate-limit is classified from
->    documented shapes but has never been provoked live.
-> 5. **`check_no_credentials.sh` PEM branch (criterion 7).** KNOWN BROKEN: a
->    planted PEM in `src/` does NOT trip it. The token-shaped branch IS
->    verified. Fix before release.
-> 6. **Wave 6 — `erpl-web` migration (criterion 6).** Untouched. This is the
->    debt D-2 took on: `datazoo-oauth2` exists at
->    `/home/jr/Projects/datazoo/datazoo-oauth2` (35/35 green) but `erpl-web`
->    still holds its own copy, so REQ-A-02 is violated and there are two
->    OAuth implementations. **Gate: erpl-web's existing OAuth2 suites must
->    pass UNCHANGED.**
-> 7. **Community-extensions PR (criterion 8).** Descriptor staged at
+> **Remaining work, in priority order:**
+>
+> 1. **`gs://` benchmark leg (criterion 2).** `make bench` works and reports
+>    gdrive 5.90 s vs local 0.13 s, but exits non-zero with the 3× gate
+>    **NOT EVALUATED** — there is no GCS denominator. **Blocked on the user:**
+>    `gcloud auth login` (reauth fails non-interactively), then create a
+>    bucket and upload the same `wide.parquet`. Exact commands in
+>    `docs/benchmark.md` → *What is missing*. Do not claim criterion 2 first.
+> 2. **CI green (criterion 5).** The distribution matrix was red on every
+>    Linux target until commit `74a8f4b`; the cause was submodule drift, now
+>    guarded by `make check_pin`. Verify with
+>    `gh run list --repo DataZooDE/duckdb-gdrive`.
+> 3. **Wave 6 — `erpl-web` migration (criterion 6).** Untouched. The debt D-2
+>    took on: `datazoo-oauth2` exists at `/home/jr/Projects/datazoo/datazoo-oauth2`
+>    (35/35 green) but `erpl-web` still holds its own copy, so REQ-A-02 is
+>    violated. The two sources are close (8–184 diff lines per file), so the
+>    work is real but bounded. **Gate: erpl-web's existing OAuth2 suites must
+>    pass UNCHANGED.** Note erpl-web has an uncommitted working tree — check
+>    with the user before starting.
+> 4. **Community-extensions PR (criterion 8).** Descriptor staged at
 >    `docs/community-extension-description.yml`; set `ref` to a release SHA
 >    whose live suite passed.
+> 5. **Codex review #2.** Was launched for the read path and produced a
+>    ZERO-BYTE output file — it reported nothing. Re-run per §3.3; do not
+>    treat it as done.
+>
+> **Rate-limit coverage gap (deliberate, stated in the README).** The
+> *storage*-quota error is provoked live. The *rate*-limit error is asserted
+> only against captured 403/429 bodies — exhausting quota needs a throwaway
+> Google project, and provoking it on a real one degrades that account.
 >
 > **Gotchas that cost time before — do not rediscover:**
 > - `DRIVE_SCOPE`, never `SCOPE`. `SCOPE` is a reserved DuckDB clause meaning
