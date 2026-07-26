@@ -1,0 +1,113 @@
+# name: test/sql/gdrive_ducklake.test.template
+# description: DuckLake with its DATA_PATH on gdrive:// -- the "anything built
+#              on the VFS inherits the scheme" claim, actually tested
+# group: [live]
+#
+# Materialised by e2e/helpers/materialise.py. Run via `make test_live`.
+#
+# Why this exists. The README claims table formats such as DuckLake work over
+# gdrive:// because DuckDB dispatches file access through its virtual
+# filesystem. That is a plausible-sounding claim, and plausible-sounding
+# claims about someone else's extension are exactly the kind that turn out to
+# be false in an issue report. DuckLake exercises a harder combination than
+# read_parquet does: it WRITES parquet, then GLOBS to find it, then reads it
+# back in a later transaction, then writes delete files alongside. If path
+# resolution, caching or the write-on-close lifecycle were subtly wrong, this
+# is where it would show.
+
+require gdrive
+
+require parquet
+
+# NOT `require ducklake`: the unittest binary runs with
+# autoinstall_known_extensions=false, so `require` cannot satisfy itself and
+# SKIPS the whole file -- which sqllogictest then reports as success. An
+# explicit LOAD fails loudly instead. scripts/run_live_tests.sh installs it
+# beforehand, and also fails the run if any file reports as skipped.
+statement ok
+LOAD ducklake;
+
+require-env GDRIVE_CI_DRIVE_ID
+
+require-env GDRIVE_OAUTH_CLIENT_ID
+
+require-env GDRIVE_OAUTH_CLIENT_SECRET
+
+require-env GDRIVE_USER_REFRESH_TOKEN
+
+# Delegated user, not the service account: this writes, and a service account
+# has no Drive storage quota outside a Shared Drive.
+statement ok
+CREATE SECRET gdrive_lake (
+    TYPE gdrive,
+    PROVIDER config,
+    CLIENT_ID '${OAUTH_CLIENT_ID}',
+    CLIENT_SECRET '${OAUTH_CLIENT_SECRET}',
+    REFRESH_TOKEN '${USER_REFRESH_TOKEN}',
+    ROOT_FOLDER_ID '${DRIVE_ID}',
+    DRIVE_SCOPE 'https://www.googleapis.com/auth/drive'
+);
+
+# The catalog is a local DuckDB file; only the DATA is on Drive. That is the
+# intended shape -- the catalog needs atomic renames, which Drive cannot give
+# (see the README's warning about DuckDB database files on gdrive://).
+statement ok
+ATTACH 'ducklake:__TEST_DIR__/gdrive_lake.db' AS lake
+    (DATA_PATH 'gdrive://scratch/${SCRATCH}/lake/');
+
+statement ok
+USE lake;
+
+statement ok
+CREATE TABLE t AS SELECT i AS id, i % 7 AS grp, md5(i::VARCHAR) AS s FROM range(20000) tt(i);
+
+# Read back what was just written. An exact checksum, not a row count: a count
+# would survive the whole file being the wrong bytes.
+query III
+SELECT count(*), sum(id), count(DISTINCT grp) FROM t
+----
+20000	199990000	7
+
+# A second transaction: appends land as new parquet files next to the first.
+statement ok
+INSERT INTO t SELECT i AS id, i % 7, md5(i::VARCHAR) FROM range(20000, 25000) tt(i);
+
+query II
+SELECT count(*), sum(id) FROM t
+----
+25000	312487500
+
+# DELETE writes delete-files rather than rewriting data -- more Drive objects,
+# and a read that must merge them.
+statement ok
+DELETE FROM t WHERE grp = 3;
+
+query II
+SELECT count(*), count(DISTINCT grp) FROM t
+----
+21429	6
+
+# Time travel: the pre-INSERT snapshot must still be readable, which means the
+# original parquet files are intact on Drive and still addressable.
+query I
+SELECT count(*) FROM t AT (VERSION => 1)
+----
+20000
+
+statement ok
+USE memory;
+
+statement ok
+DETACH lake;
+
+# The data really is on Drive, in DuckLake's layout, and visible through our
+# own glob. Both data files and delete files.
+query I
+SELECT count(*) > 0 FROM glob('gdrive://scratch/${SCRATCH}/lake/**/*.parquet')
+----
+true
+
+query I
+SELECT count(*) > 0 FROM glob('gdrive://scratch/${SCRATCH}/lake/**/*-delete.parquet')
+----
+true

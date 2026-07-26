@@ -75,6 +75,25 @@ if [[ ! -x "$UNITTEST" ]]; then
     exit 1
 fi
 
+# ---------------------------------------------------------------------------
+# DuckLake, for the table-format test.
+#
+# The unittest binary runs with autoinstall_known_extensions=false, so a
+# `require ducklake` inside a .test file SKIPS rather than installs -- and a
+# skip in this suite is a false green (see the skip guard at the bottom).
+# `LOAD ducklake` works fine there once the extension is actually present, so
+# install it here with the shell, which may autoinstall.
+# ---------------------------------------------------------------------------
+DUCKDB_CLI=build/release/duckdb
+if [[ -x "$DUCKDB_CLI" ]]; then
+    echo "==> ensuring ducklake is installed for the table-format test"
+    if ! "$DUCKDB_CLI" -c "INSTALL ducklake; LOAD ducklake;" >/dev/null 2>&1; then
+        echo "FAIL: could not install/load ducklake." >&2
+        echo "      The DuckLake test would otherwise SKIP and read as a pass." >&2
+        exit 1
+    fi
+fi
+
 echo "==> materialising live tests with real fixture ids"
 (cd e2e && uv run --frozen python -m helpers.materialise)
 
@@ -100,7 +119,19 @@ echo "==> running ${#tests[@]} live test file(s)"
 failed=0
 for t in "${tests[@]}"; do
     echo "--- $t"
-    if ! "$UNITTEST" "$t"; then
+    # Capture as well as show: sqllogictest reports a SKIPPED file as a
+    # SUCCESS (exit 0). In a suite whose entire purpose is "prove it works
+    # against real Drive", a skip is a false green -- and a silent one,
+    # because the summary line reads "All tests were skipped" in the middle
+    # of an otherwise green run. A `require <extension>` that cannot be
+    # satisfied in the test runner must be a failure here.
+    out="$("$UNITTEST" "$t" 2>&1)" || failed=1
+    printf '%s\n' "$out"
+    if grep -q 'All tests were skipped' <<<"$out"; then
+        echo "FAIL: $t was SKIPPED, not run." >&2
+        echo "      Credentials are configured, so a skip here tests nothing." >&2
+        echo "      Usually an unmet 'require <extension>' -- install it into the" >&2
+        echo "      unittest binary's extension directory, or move the test to e2e/." >&2
         failed=1
     fi
 done

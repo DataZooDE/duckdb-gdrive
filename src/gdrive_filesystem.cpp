@@ -11,6 +11,7 @@
 
 #include <cstring>
 #include <functional>
+#include <limits>
 #include <utility>
 
 namespace duckdb {
@@ -465,8 +466,21 @@ void GDriveFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, 
 		if (to_copy < static_cast<idx_t>(nr_bytes)) {
 			throw IOException("gdrive: short read past end of exported content for '%s'", h.path);
 		}
-		h.position = location + nr_bytes;
+		// NOTE: does NOT touch h.position -- see the comment below.
 		return;
+	}
+
+	// Guard the range arithmetic before it can wrap. `location` is idx_t
+	// (unsigned) and the Range header is built from int64_t, so a location
+	// past INT64_MAX -- or a location+length that crosses it -- would produce
+	// a negative range and a baffling Drive error instead of a clear one.
+	// Drive files cannot actually be this large, which is exactly why this
+	// would only ever fire on a caller bug, and should say so.
+	constexpr int64_t kMaxOffset = std::numeric_limits<int64_t>::max();
+	if (location > static_cast<idx_t>(kMaxOffset) || nr_bytes < 0 ||
+	    static_cast<int64_t>(location) > kMaxOffset - nr_bytes) {
+		throw IOException("gdrive: read range out of bounds for '%s': offset %llu length %lld", h.path,
+		                  static_cast<unsigned long long>(location), static_cast<long long>(nr_bytes));
 	}
 
 	auto client = CreateGDriveClient(h.auth_context);
@@ -476,13 +490,43 @@ void GDriveFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, 
 	if (!resp.ok) {
 		ThrowGDriveError(resp.error, h.path);
 	}
-	if (resp.body.size() < static_cast<size_t>(nr_bytes)) {
+
+	// A 206 body starts at `location`. A 200 body is the WHOLE FILE -- the
+	// server (or an intermediary proxy) ignored the Range header, which it is
+	// permitted to do. Download() accepts both by design, so the offset must
+	// be applied here.
+	//
+	// Getting this wrong is silent: copying from body.data() for a 200 hands
+	// back bytes 0..n from the start of the file while the caller believes it
+	// asked for bytes at `location`. Every value is plausible, nothing errors,
+	// and a Parquet scan just returns wrong data.
+	const char *src = resp.body.data();
+	size_t avail = resp.body.size();
+	if (resp.http_status == 200 && location > 0) {
+		if (avail <= static_cast<size_t>(location)) {
+			throw IOException("gdrive: server ignored Range on '%s' and returned %llu bytes, "
+			                  "which does not reach offset %llu",
+			                  h.path, static_cast<unsigned long long>(avail),
+			                  static_cast<unsigned long long>(location));
+		}
+		src += location;
+		avail -= static_cast<size_t>(location);
+	}
+
+	if (avail < static_cast<size_t>(nr_bytes)) {
 		throw IOException("gdrive: short read on '%s': requested %lld bytes at offset %llu, got %llu",
 		                  h.path, static_cast<long long>(nr_bytes), static_cast<unsigned long long>(location),
-		                  static_cast<unsigned long long>(resp.body.size()));
+		                  static_cast<unsigned long long>(avail));
 	}
-	memcpy(buffer, resp.body.data(), static_cast<size_t>(nr_bytes));
-	h.position = location + nr_bytes;
+	memcpy(buffer, src, static_cast<size_t>(nr_bytes));
+
+	// Deliberately does NOT advance h.position.
+	//
+	// This overload is pread(2): it takes an explicit offset and must not
+	// disturb the shared cursor. DuckDB's parallel Parquet reader issues
+	// positional reads for different row groups against ONE handle from
+	// several threads at once, so writing h.position here was both a data
+	// race and semantically wrong. The sequential overload owns the cursor.
 }
 
 int64_t GDriveFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes) {
@@ -492,7 +536,10 @@ int64_t GDriveFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_byte
 	if (to_read == 0) {
 		return 0;
 	}
-	Read(handle, buffer, static_cast<int64_t>(to_read), h.position);
+	idx_t at = h.position;
+	Read(handle, buffer, static_cast<int64_t>(to_read), at);
+	// The sequential overload is the only writer of the cursor.
+	h.position = at + to_read;
 	return static_cast<int64_t>(to_read);
 }
 
