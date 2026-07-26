@@ -41,31 +41,43 @@ time and "pass".
 
 ## Results
 
-Measured 2026-07-26. Linux 6.18, DuckDB v1.5.3, extension statically linked.
-Fixture: `/fixtures/wide.parquet`, file id `17AVQ4WlKaPE3hFxpuoljHLpe3nXI0qsQ`.
+Measured 2026-07-26. Linux 6.18, **DuckDB v1.5.5**, extension statically
+linked. Fixture: `/fixtures/wide.parquet` (87.0 MB), file id
+`17AVQ4WlKaPE3hFxpuoljHLpe3nXI0qsQ`.
 
 | Leg | min | median | vs local |
 |---|---|---|---|
-| `local` | 0.14 s | 0.19 s | 1.0× |
+| `local` | 0.13 s | 0.13 s | 1.0× |
 | `gs://` | *not measured* | — | — |
-| `gdrive://` | 4.57 s | 4.65 s | 33× |
+| `gdrive://` | 5.90 s | 5.97 s | 45× |
 
 **gdrive/GCS ratio: not computable yet.**
 
 ### Reading these numbers
 
 The local leg is the floor: it isolates decode cost from transfer cost. At
-0.14 s for 87 MB, decode is effectively free here, so essentially all of the
-`gdrive` leg's 4.57 s is network — transfer plus per-request latency. That
+0.13 s for 87 MB, decode is effectively free here, so essentially all of the
+`gdrive` leg's 5.90 s is network — transfer plus per-request latency. That
 matters for the gate, because GCS pays transfer cost too. The honest
 comparison is Drive's round-trip overhead against GCS's, not against zero, and
 the local number is what lets those be separated once the `gs://` leg exists.
 
-Drive latency is also **variable**: an earlier run of the identical benchmark
-produced 4.59 s, 4.43 s and 15.43 s — one sample 3.4× the others, with no
-change on our side. This is why the harness reports a minimum and why a single
-number should not be read as a guarantee. It is also an argument for reporting
-the ratio with a stated method rather than a marketing figure.
+**Do not read the `gdrive` figure as stable.** Across runs of this identical
+benchmark on the same machine and file we have seen:
+
+| Run | samples |
+|---|---|
+| earlier | 4.59 s, 4.43 s, **15.43 s** |
+| earlier | 4.72 s, 4.57 s, 4.65 s |
+| reported above | 5.90 s, 6.03 s, 5.97 s |
+
+The spread between runs (4.43 s to 5.90 s minimum, one outlier at 15.43 s) is
+larger than any code change we have made, and nothing on our side differed.
+Drive's per-request latency simply varies. This is why the harness reports a
+minimum over repeats, why the local leg exists as a control, and why the gate
+must be a ratio measured in the same session as its denominator rather than
+against a number written down on a different day. A single figure here would
+be a marketing number, not a measurement.
 
 ## What is missing
 
