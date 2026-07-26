@@ -190,6 +190,21 @@ jobs:
           GDRIVE_OAUTH_CLIENT_SECRET: ${{ secrets.GDRIVE_OAUTH_CLIENT_SECRET }}
           GDRIVE_USER_REFRESH_TOKEN: ${{ secrets.GDRIVE_USER_REFRESH_TOKEN }}
         run: make test_live
+      # BRD criterion 1, end to end: the artifact users install, in a stock
+      # DuckDB, reading real Google Drive. Everything else in this workflow
+      # exercises our statically linked development shell.
+      - name: Install stock duckdb v1.5.5
+        run: |
+          curl -sSLo /tmp/duckdb.zip \
+            https://github.com/duckdb/duckdb/releases/download/v1.5.5/duckdb_cli-linux-amd64.zip
+          unzip -q -o /tmp/duckdb.zip -d /tmp/duckdb-cli
+          sudo install -m 0755 /tmp/duckdb-cli/duckdb /usr/local/bin/duckdb
+      - name: Shipped artifact reads real Drive from a stock duckdb
+        env:
+          GDRIVE_CI_SA_KEY_B64: ${{ secrets.GDRIVE_CI_SA_KEY_B64 }}
+          GDRIVE_CI_DRIVE_ID: ${{ secrets.GDRIVE_CI_DRIVE_ID }}
+        run: make smoke_loadable
+
       - name: E2E harness
         env:
           # Reads run as the service account.
