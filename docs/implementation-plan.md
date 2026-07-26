@@ -1,56 +1,68 @@
 # Implementation plan — `duckdb-gdrive`
 
-> ## RESUME HERE (2026-07-26, 25 commits, pushed to
+> ## RESUME HERE (2026-07-26, 34 commits, pushed to
 > ## github.com/DataZooDE/duckdb-gdrive)
 >
-> **The extension works against real Google Drive**, built and tested against
-> **DuckDB v1.5.5** (latest stable). Live read 34/34, live write 27/27, e2e
-> 8/8, unit 162 cases / 860 assertions. Waves 0–3 done, Wave 4 nearly.
+> **The extension works, and the SHIPPED ARTIFACT has been loaded into a
+> stock DuckDB v1.5.5 and used** — read_csv, glob, read_parquet, a native
+> Sheet, and a hive-partitioned tree. That is BRD criterion 1 demonstrated
+> rather than assumed.
+>
+> Green: unit 860 assertions / 162 cases · live SQL 102 assertions across 4
+> suites · e2e 9 · smoke_static · check_stamp · smoke_loadable · three
+> hygiene gates.
 >
 > ```bash
 > export VCPKG_ROOT=/home/jr/.local/share/vcpkg
 > export VCPKG_TOOLCHAIN_PATH=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake
-> make check_pin                                  # submodule on the shipped tag
-> GEN=ninja make && make test                     # unit + credential-free SQL
+> make check_pin && make check_cstdint       # cheap, run first
+> GEN=ninja make && make test
+> make check_stamp && make smoke_loadable    # the artifact users install
 > set -a && . .env.gdrive && set +a
-> ./scripts/run_live_tests.sh && make e2e         # live suites
+> ./scripts/run_live_tests.sh && make e2e
 > ```
 >
 > **Versions.** Local + CI stable build **v1.5.5** (ci-tools
-> `@v1.5-variegata`); CI additionally builds **v1.4.5 LTS** (ci-tools
-> `@v1.4-andium`). Rolling ci-tools branches, matching erpl-web. A local
-> green is necessary but NOT sufficient — the API differs between lines.
+> `@v1.5-variegata`); CI additionally builds **v1.4.5 LTS** (`@v1.4-andium`).
+> A local green is necessary but NOT sufficient — the API differs between
+> the lines, and musl differs from glibc.
 >
 > **Remaining work, in priority order:**
 >
-> 1. **`gs://` benchmark leg (criterion 2).** `make bench` works and reports
->    gdrive 5.90 s vs local 0.13 s, but exits non-zero with the 3× gate
->    **NOT EVALUATED** — there is no GCS denominator. **Blocked on the user:**
->    `gcloud auth login` (reauth fails non-interactively), then create a
->    bucket and upload the same `wide.parquet`. Exact commands in
->    `docs/benchmark.md` → *What is missing*. Do not claim criterion 2 first.
-> 2. **CI green (criterion 5).** The distribution matrix was red on every
->    Linux target until commit `74a8f4b`; the cause was submodule drift, now
->    guarded by `make check_pin`. Verify with
+> 1. **`gs://` benchmark leg (criterion 2).** `make bench` reports gdrive
+>    5.90 s vs local 0.13 s, but exits non-zero with the 3× gate **NOT
+>    EVALUATED** — no GCS denominator. **Blocked on the user:** `gcloud auth
+>    login` (reauth fails non-interactively), then a bucket holding the same
+>    `wide.parquet`. Commands in `docs/benchmark.md` → *What is missing*.
+>    Do not claim criterion 2 before this runs.
+> 2. **CI fully green (criterion 5).** v1.5.5 passes on Linux amd64/arm64,
+>    Windows, macOS arm64/amd64. Recent fixes (musl `<cstdint>`, MSVC Catch2
+>    CRT, e2e retry) are still being confirmed — check
 >    `gh run list --repo DataZooDE/duckdb-gdrive`.
-> 3. **Wave 6 — `erpl-web` migration (criterion 6).** Untouched. The debt D-2
->    took on: `datazoo-oauth2` exists at `/home/jr/Projects/datazoo/datazoo-oauth2`
->    (35/35 green) but `erpl-web` still holds its own copy, so REQ-A-02 is
->    violated. The two sources are close (8–184 diff lines per file), so the
->    work is real but bounded. **Gate: erpl-web's existing OAuth2 suites must
->    pass UNCHANGED.** Note erpl-web has an uncommitted working tree — check
->    with the user before starting.
+> 3. **Wave 6 — `erpl-web` migration (criterion 6).** Untouched; the debt D-2
+>    took on. `datazoo-oauth2` is at `/home/jr/Projects/datazoo/datazoo-oauth2`
+>    (35/35 green); `erpl-web` still holds its own copy, violating REQ-A-02.
+>    Sources are close (8–184 diff lines per file). **Gate: erpl-web's OAuth2
+>    suites must pass UNCHANGED.** It has an uncommitted working tree —
+>    check with the user first.
 > 4. **Community-extensions PR (criterion 8).** Descriptor staged at
 >    `docs/community-extension-description.yml`; set `ref` to a release SHA
 >    whose live suite passed.
-> 5. **Codex review #2.** Was launched for the read path and produced a
->    ZERO-BYTE output file — it reported nothing. Re-run per §3.3; do not
->    treat it as done.
+> 5. **Resumable uploads.** The one codex finding not fully fixed — retrying
+>    a `POST files.create` after an ambiguous transport failure can create a
+>    duplicate, which R-4 then reports as an unaddressable path. Mitigated
+>    (writes are no longer retried); the real fix is Drive's resumable upload
+>    protocol. See `docs/reviews/2026-07-26-codex-review-2-read-path.md`.
 >
-> **Rate-limit coverage gap (deliberate, stated in the README).** The
-> *storage*-quota error is provoked live. The *rate*-limit error is asserted
-> only against captured 403/429 bodies — exhausting quota needs a throwaway
-> Google project, and provoking it on a real one degrades that account.
+> **Codex review #2 is done**: 6 of 7 findings fixed, 1 mitigated, all
+> triaged in `docs/reviews/`. Two were demonstrated on the live API before
+> and after — a ranged-read that returned bytes from the wrong offset, and a
+> token cache that let one secret read Drive with another's credential.
+>
+> **Rate-limit coverage gap (deliberate, in the README).** Storage-quota
+> errors are provoked live; rate-limit errors are asserted only against
+> captured 403/429 bodies, because exhausting quota needs a throwaway
+> project.
 >
 > **Gotchas that cost time before — do not rediscover:**
 > - `DRIVE_SCOPE`, never `SCOPE`. `SCOPE` is a reserved DuckDB clause meaning
