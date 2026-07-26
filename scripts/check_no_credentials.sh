@@ -67,6 +67,10 @@ ALLOWED_KEY_FILE="test/cpp/testdata/fake_sa_key.json"
 PEM_ALLOWED=(
     "$ALLOWED_KEY_FILE"
     "test/sql/gdrive_secret.test"
+    # Asserts FormatUserMessage() redacts a PEM block out of a Drive error
+    # body (REQ-NF-03). Proving the redactor strips a key requires a key to
+    # strip. The literal is a truncated, non-functional base64 body.
+    "test/cpp/test_errors.cpp"
 )
 
 if [[ -f "$ALLOWED_KEY_FILE" ]]; then
@@ -85,6 +89,89 @@ if [[ -f "$ALLOWED_KEY_FILE" ]]; then
     fi
 fi
 
+# ---------------------------------------------------------------------------
+# Match one pattern against one file.
+#
+# Two things here are not incidental, and both have already bitten:
+#
+#   -e "$pat" -- "$file"
+#       A PEM pattern begins with `-----`. Written as `grep -qE "$pat" "$f"`,
+#       grep parses it as a bundle of short options, prints usage, and exits
+#       2. `if grep ...; then` reads a non-zero exit as "no match", so the
+#       check passed on a file containing a private key. It did that from the
+#       day it was written until a planted-key negative control caught it.
+#
+#   exit status >= 2 is an ERROR, not a miss
+#       That is precisely how the above hid. A scanner that cannot read a
+#       file must say so, never shrug and return clean.
+# ---------------------------------------------------------------------------
+pattern_matches() {
+    local pat="$1" file="$2" status=0
+    grep -qE -e "$pat" -- "$file" 2>/dev/null || status=$?
+    if [[ $status -eq 0 ]]; then
+        return 0
+    fi
+    if [[ $status -ge 2 ]]; then
+        echo "FAIL: grep errored (status $status) on $file for /$pat/" >&2
+        fail=1
+    fi
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# Self-test: prove every pattern still matches something it is meant to catch.
+#
+# The failure this guards against is not a false alarm, it is SILENCE -- a
+# pattern that matches nothing, forever, while the check reports "OK". That
+# happened here (see pattern_matches above) and survived because the only
+# evidence of a working scanner was a green line that a broken scanner also
+# prints. So: plant a known-positive for each pattern and require a hit.
+#
+# Runs on every invocation. It costs milliseconds and it is the only thing
+# standing between "OK: no credentials tracked" and a lie.
+# ---------------------------------------------------------------------------
+self_test() {
+    local probe rc=0
+    probe="$(mktemp)"
+    # Each entry: <pattern-array-name>|<index>|<line that MUST match>
+    local cases=(
+        'pem|0|  "private_key": "-----BEGIN PRIVATE KEY-----\nAAAA"'
+        'pem|1|-----BEGIN RSA PRIVATE KEY-----'
+        'token|0|refresh = 1//0eXaMpLeToKeNvAlUe123456789'
+        'token|1|bearer ya29.a0AfB_bYcExAmPlEtOkEn123456789'
+        'token|2|  "refresh_token": "0123456789abcdefghij"'
+    )
+    local c which idx line pat
+    for c in "${cases[@]}"; do
+        which="${c%%|*}"; c="${c#*|}"
+        idx="${c%%|*}"; line="${c#*|}"
+        if [[ "$which" == pem ]]; then pat="${pem_patterns[$idx]}"; else pat="${token_patterns[$idx]}"; fi
+        printf '%s\n' "$line" > "$probe"
+        if ! grep -qE -e "$pat" -- "$probe" 2>/dev/null; then
+            echo "FAIL: self-test -- pattern /$pat/ did not match its own known-positive:" >&2
+            echo "      $line" >&2
+            rc=1
+        fi
+    done
+    # And a known-NEGATIVE, so a pattern degenerating to "match everything"
+    # (which would also make the self-test above pass) is caught too.
+    printf 'ordinary prose with no secrets in it whatsoever\n' > "$probe"
+    for pat in "${pem_patterns[@]}" "${token_patterns[@]}"; do
+        if grep -qE -e "$pat" -- "$probe" 2>/dev/null; then
+            echo "FAIL: self-test -- pattern /$pat/ matches innocuous text." >&2
+            rc=1
+        fi
+    done
+    rm -f "$probe"
+    return "$rc"
+}
+
+if ! self_test; then
+    echo "" >&2
+    echo "The credential scanner is not working. Fix it before trusting a pass." >&2
+    exit 1
+fi
+
 while IFS= read -r f; do
     case "$f" in
         *.example|scripts/check_no_credentials.sh) continue ;;
@@ -97,7 +184,7 @@ while IFS= read -r f; do
     done
     if [[ $pem_exempt -eq 0 ]]; then
         for cp in "${pem_patterns[@]}"; do
-            if grep -qE "$cp" "$f" 2>/dev/null; then
+            if pattern_matches "$cp" "$f"; then
                 echo "FAIL: $f contains private-key material (/$cp/)" >&2
                 fail=1
             fi
@@ -108,7 +195,7 @@ while IFS= read -r f; do
         test/*) continue ;;
     esac
     for cp in "${token_patterns[@]}"; do
-        if grep -qE "$cp" "$f" 2>/dev/null; then
+        if pattern_matches "$cp" "$f"; then
             echo "FAIL: $f contains a token-shaped secret (/$cp/)" >&2
             fail=1
         fi
