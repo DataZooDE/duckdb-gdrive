@@ -80,9 +80,70 @@ void GDriveStatsScan(ClientContext &, TableFunctionInput &input, DataChunk &outp
 	output.SetCardinality(out_row);
 }
 
+// ---------------------------------------------------------------------------
+// gdrive_reset_stats() -- zero the counters.
+//
+// The docstring for gdrive_stats() tells users to "call it before and after
+// an operation and diff the two snapshots". That works, but it makes the
+// obvious measurement -- "how many API calls did THIS query cost?" -- a
+// two-step with arithmetic, and it makes an exact assertion in a test
+// impossible unless the test happens to run first in its process.
+//
+// ResetGlobalDriveCallStats() already existed for internal use; this exposes
+// it. It is what lets test/sql/gdrive_read.test.template assert that four
+// sibling reads cost exactly six files.list calls rather than twelve.
+// ---------------------------------------------------------------------------
+struct GDriveResetStatsBindData : public TableFunctionData {};
+
+unique_ptr<FunctionData> GDriveResetStatsBind(ClientContext &, TableFunctionBindInput &,
+                                              vector<LogicalType> &return_types, vector<string> &names) {
+	return_types.emplace_back(LogicalType::BOOLEAN);
+	names.emplace_back("success");
+	return make_uniq<GDriveResetStatsBindData>();
+}
+
+struct GDriveResetStatsGlobalState : public GlobalTableFunctionState {
+	bool done = false;
+};
+
+unique_ptr<GlobalTableFunctionState> GDriveResetStatsInit(ClientContext &, TableFunctionInitInput &) {
+	return make_uniq<GDriveResetStatsGlobalState>();
+}
+
+void GDriveResetStatsScan(ClientContext &, TableFunctionInput &input, DataChunk &output) {
+	auto &state = input.global_state->Cast<GDriveResetStatsGlobalState>();
+	if (state.done) {
+		output.SetCardinality(0);
+		return;
+	}
+	ResetGlobalDriveCallStats();
+	state.done = true;
+	output.SetCardinality(1);
+	output.SetValue(0, 0, Value::BOOLEAN(true));
+}
+
 } // namespace
 
 void RegisterGDriveStats(ExtensionLoader &loader) {
+	{
+		TableFunction reset_fn("gdrive_reset_stats", {}, GDriveResetStatsScan, GDriveResetStatsBind,
+		                        GDriveResetStatsInit);
+		CreateTableFunctionInfo reset_info(reset_fn);
+
+		FunctionDescription reset_desc;
+		reset_desc.description =
+		    "Zero the process-wide Drive API call counters reported by gdrive_stats(). Use it to measure "
+		    "exactly what ONE operation costs: reset, run the query, then read gdrive_stats(). Affects the "
+		    "whole process, so it will disturb a concurrent measurement in another connection.";
+		reset_desc.parameter_names = {};
+		reset_desc.parameter_types = {};
+		reset_desc.examples = {"CALL gdrive_reset_stats()"};
+		reset_desc.categories = {"gdrive"};
+		reset_info.descriptions.push_back(std::move(reset_desc));
+
+		loader.RegisterFunction(std::move(reset_info));
+	}
+
 	TableFunction fn("gdrive_stats", {}, GDriveStatsScan, GDriveStatsBind, GDriveStatsInit);
 	CreateTableFunctionInfo info(fn);
 

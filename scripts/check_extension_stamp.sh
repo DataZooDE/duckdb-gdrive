@@ -33,31 +33,45 @@ if [[ ! -f "$EXT" ]]; then
     exit 1
 fi
 
-# The version lives in the extension's metadata footer, as a plain string in
-# the last block of the file.
-stamp="$(tail -c 512 "$EXT" | strings | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)"
+# The DuckDB version lives in the extension's 512-byte metadata footer,
+# which is 8 fixed 32-byte fields:
+#
+#   [3] ABI type          e.g. "CPP"
+#   [4] EXTENSION version e.g. "86e280c" locally, "v0.0.1" in CI (this repo
+#                         has no tags, so DuckDB substitutes a dummy)
+#   [5] DUCKDB version    <- the one that decides whether it loads
+#   [6] platform          e.g. "linux_amd64"
+#   [7] metadata version
+#
+# Parse the FIELD. The first version of this grepped the footer for the first
+# version-shaped string and matched field[4] -- the extension's own dummy
+# "v0.0.1" -- so it failed in CI on a perfectly correct artifact while
+# passing locally, where field[4] happens to be a commit hash. Grepping a
+# binary for "something that looks right" is how you get a check that is
+# wrong in exactly the environment you built it for.
+read -r ext_version duckdb_version platform <<<"$(python3 - "$EXT" <<'PYEOF'
+import sys, pathlib
+data = pathlib.Path(sys.argv[1]).read_bytes()[-512:]
+fields = [data[i * 32:(i + 1) * 32].rstrip(b"\x00").decode("utf-8", "replace") for i in range(8)]
+print(fields[4] or "-", fields[5] or "-", fields[6] or "-")
+PYEOF
+)"
 
-if [[ -z "$stamp" ]]; then
-    hash_stamp="$(tail -c 512 "$EXT" | strings | grep -E '^[0-9a-f]{10}$' | head -1 || true)"
-    cat >&2 <<MSG
-FAIL: $EXT is not stamped with a DuckDB RELEASE version.
-      Found: ${hash_stamp:-<nothing recognisable>}
-
-A commit-hash stamp means CMake computed the DuckDB version from a submodule
-that was not on a release tag -- usually a STALE build directory cached from
-before the submodule moved. The artifact will refuse to load into any stock
-DuckDB. Fix with:
-
-    ./scripts/check_duckdb_pin.sh    # confirm the submodule is right first
-    rm -rf build/release && GEN=ninja make
-MSG
-    exit 1
-fi
+stamp="$duckdb_version"
 
 if [[ "$stamp" != "$WANT_VERSION" ]]; then
     cat >&2 <<MSG
-FAIL: $EXT is stamped $stamp but we target $WANT_VERSION.
+FAIL: $EXT is built for DuckDB $stamp, but we target $WANT_VERSION.
 
+    extension version : $ext_version
+    duckdb version    : $stamp
+    platform          : $platform
+
+A commit-hash duckdb version means CMake computed it from a submodule that
+was not on a release tag -- usually a STALE build directory cached from
+before the submodule moved. The artifact will refuse to load anywhere. Fix:
+
+    ./scripts/check_duckdb_pin.sh    # confirm the submodule is right first
     rm -rf build/release && GEN=ninja make
 
 If the target genuinely changed, update WANT_VERSION here, WANT_SHA in
@@ -66,4 +80,4 @@ MSG
     exit 1
 fi
 
-echo "OK: extension stamped for $stamp"
+echo "OK: extension built for DuckDB $stamp ($platform, extension version $ext_version)"

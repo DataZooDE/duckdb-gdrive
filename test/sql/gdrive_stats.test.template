@@ -1,0 +1,112 @@
+# name: test/sql/gdrive_stats.test.template
+# description: S-2.9 / S-4.1 / R-1 -- the path cache measurably bounds
+#              metadata amplification, and gdrive_stats() reports it
+# group: [live]
+#
+# This lives in its OWN file on purpose. The counters and the path cache are
+# process-wide, and scripts/run_live_tests.sh gives each file its own
+# unittest process -- so the measurement below starts genuinely cold. Folded
+# into gdrive_read.test, the same four reads cost ZERO files.list calls
+# because earlier statements there had already resolved those paths. True,
+# but it measures the cache warming up rather than the amplification the
+# cache exists to bound.
+
+require gdrive
+
+require parquet
+
+require-env GDRIVE_CI_DRIVE_ID
+
+require-env GDRIVE_CI_SA_KEY_FILE
+
+statement ok
+CREATE SECRET gdrive_stats_test (
+    TYPE gdrive,
+    PROVIDER service_account,
+    KEY_FILE '${SA_KEY_FILE}',
+    ROOT_FOLDER_ID '${DRIVE_ID}',
+    DRIVE_SCOPE 'https://www.googleapis.com/auth/drive.readonly'
+);
+
+statement ok
+CALL gdrive_reset_stats();
+
+query I
+SELECT value FROM gdrive_stats() WHERE metric = 'files_list'
+----
+0
+
+# ---------------------------------------------------------------------------
+# Four sibling files under fixtures/parts/. Drive has no path addressing, so
+# each path costs one files.list per segment:
+#
+#   uncached: 4 files x 3 segments         = 12 files.list
+#   cached:   2 folder segments + 4 leaves =  6 files.list
+#
+# The README states this as "ten files in one folder cost one folder lookup
+# rather than ten". This is that sentence, measured.
+#
+# The number is asserted EXACTLY. An inequality (< 12) would still pass if
+# the cache degraded to caching only the first segment, which gives most of
+# the amplification back. If a legitimate change moves this number, move it
+# here deliberately and say why in the commit.
+# ---------------------------------------------------------------------------
+query I
+SELECT count(*) FROM read_parquet('gdrive://fixtures/parts/part-00.parquet')
+----
+10
+
+query I
+SELECT count(*) FROM read_parquet('gdrive://fixtures/parts/part-01.parquet')
+----
+10
+
+query I
+SELECT count(*) FROM read_parquet('gdrive://fixtures/parts/part-02.parquet')
+----
+10
+
+query I
+SELECT count(*) FROM read_parquet('gdrive://fixtures/parts/part-03.parquet')
+----
+10
+
+query I
+SELECT value FROM gdrive_stats() WHERE metric = 'files_list'
+----
+6
+
+# The cache is doing the work, not merely present.
+query I
+SELECT value > 0 FROM gdrive_stats() WHERE metric = 'cache_hits'
+----
+true
+
+# Re-reading a file already resolved in this session costs NO further
+# resolution at all -- the steady state the cache is for.
+statement ok
+CALL gdrive_reset_stats();
+
+query I
+SELECT count(*) FROM read_parquet('gdrive://fixtures/parts/part-00.parquet')
+----
+10
+
+query I
+SELECT value FROM gdrive_stats() WHERE metric = 'files_list'
+----
+0
+
+# The id: form skips resolution entirely -- the documented fast path.
+statement ok
+CALL gdrive_reset_stats();
+
+query I
+SELECT count(*) > 0 FROM read_csv('gdrive://id:${ID:small.csv}')
+----
+true
+
+query I
+SELECT value FROM gdrive_stats() WHERE metric = 'files_list'
+----
+0
