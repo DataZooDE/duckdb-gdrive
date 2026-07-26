@@ -29,6 +29,7 @@
 #include "gdrive_client.hpp"
 #include "gdrive_errors.hpp"
 
+#include <cstdint>
 #include <picojson/picojson.h>
 
 #include <cstdlib>

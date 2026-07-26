@@ -3,6 +3,7 @@
 // See src/include/gdrive_errors.hpp for the contract and rationale.
 #include "gdrive_errors.hpp"
 
+#include <cstdint>
 #include <picojson/picojson.h>
 
 #include <algorithm>

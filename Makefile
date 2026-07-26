@@ -122,3 +122,11 @@ verify_readme: release
 .PHONY: check_pin
 check_pin:
 	@./scripts/check_duckdb_pin.sh
+
+# ---------------------------------------------------------------------------
+# musl builds the 1.4 LTS matrix target linux_amd64_musl, whose headers do not
+# pull in <cstdint> transitively. Missing includes are invisible on glibc.
+# ---------------------------------------------------------------------------
+.PHONY: check_cstdint
+check_cstdint:
+	@./scripts/check_cstdint.sh

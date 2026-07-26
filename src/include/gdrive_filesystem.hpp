@@ -7,6 +7,8 @@
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/unordered_map.hpp"
 
+#include <cstdint>
+
 namespace duckdb {
 namespace gdrive {
 

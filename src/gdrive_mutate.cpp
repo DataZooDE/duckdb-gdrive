@@ -6,6 +6,7 @@
 // straight through to these.
 #include "gdrive_internal.hpp"
 
+#include <cstdint>
 #include <algorithm>
 #include <vector>
 

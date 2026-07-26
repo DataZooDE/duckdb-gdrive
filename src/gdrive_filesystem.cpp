@@ -9,6 +9,7 @@
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/main/client_context.hpp"
 
+#include <cstdint>
 #include <cstring>
 #include <functional>
 #include <limits>

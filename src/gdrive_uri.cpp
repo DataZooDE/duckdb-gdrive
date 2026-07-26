@@ -1,5 +1,6 @@
 #include "gdrive_uri.hpp"
 
+#include <cstdint>
 #include <cstring>
 
 namespace duckdb {

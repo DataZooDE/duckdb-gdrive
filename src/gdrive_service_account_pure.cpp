@@ -7,6 +7,7 @@
 // comment for the split rationale).
 #include "gdrive_service_account.hpp"
 
+#include <cstdint>
 #include <cctype>
 
 #include <jwt-cpp/traits/kazuho-picojson/defaults.h>

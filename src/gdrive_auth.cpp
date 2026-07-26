@@ -35,6 +35,7 @@
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "httplib.hpp"
 
+#include <cstdint>
 #include <jwt-cpp/traits/kazuho-picojson/defaults.h>
 
 #include <chrono>

@@ -46,6 +46,47 @@ jobs:
           submodules: recursive
       - run: ./scripts/check_duckdb_pin.sh
 
+  # ---------------------------------------------------------------------------
+  # musl. The 1.4 LTS matrix builds linux_amd64_musl, whose headers do NOT
+  # pull in <cstdint> transitively the way glibc's do. A missing include is
+  # therefore invisible on every machine a developer owns and breaks exactly
+  # one distribution target -- which is how it actually happened.
+  #
+  # Two layers: a grep that names the offending file in milliseconds, and a
+  # real musl compile of the pure sources that catches whatever the grep did
+  # not think of. Both finish long before the ~20-minute matrix build would.
+  # ---------------------------------------------------------------------------
+  musl:
+    name: musl compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fixed-width integer types include <cstdint>
+        run: ./scripts/check_cstdint.sh
+      - name: Compile pure sources against musl
+        run: |
+          docker run --rm -v "$PWD":/w -w /w alpine:3.20 sh -c '
+            set -e
+            apk add --no-cache g++ git >/dev/null
+            # picojson and jwt-cpp are header-only; fetch just the headers
+            # rather than bootstrapping vcpkg inside the container.
+            git clone -q --depth 1 https://github.com/kazuho/picojson.git /tmp/picojson
+            git clone -q --depth 1 https://github.com/Thalhammer/jwt-cpp.git /tmp/jwt
+            mkdir -p /tmp/inc/picojson && cp /tmp/picojson/picojson.h /tmp/inc/picojson/
+            cp -r /tmp/jwt/include/jwt-cpp /tmp/inc/
+            fail=0
+            for f in src/gdrive_uri.cpp src/gdrive_errors.cpp src/gdrive_glob.cpp \
+                     src/gdrive_service_account_pure.cpp src/gdrive_version.cpp; do
+              if g++ -std=c++17 -fsyntax-only -DPICOJSON_USE_INT64 \
+                     -Isrc/include -I/tmp/inc "$f"; then
+                echo "  ok   $f"
+              else
+                echo "  FAIL $f"; fail=1
+              fi
+            done
+            exit $fail
+          '
+
   unit:
     name: Pure-logic + credential-free SQL
     runs-on: ubuntu-latest

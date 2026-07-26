@@ -2,6 +2,8 @@
 // "duckdb.hpp", no I/O. See src/include/gdrive_glob.hpp for the contract.
 #include "gdrive_glob.hpp"
 
+#include <cstdint>
+
 namespace duckdb {
 namespace gdrive {
 

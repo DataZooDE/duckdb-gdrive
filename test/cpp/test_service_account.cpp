@@ -1,6 +1,7 @@
 // S-1.5 / S-1.6 -- RFC 7523 service-account JWT assertion, pure halves.
 // Pure logic only: no DuckDB linkage, no network, no clock (issued_at is a
 // parameter). Signing (RS256) and the token POST are a different slice.
+#include <cstdint>
 #include <fstream>
 #include <sstream>
 #include <string>
