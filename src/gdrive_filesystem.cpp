@@ -660,7 +660,8 @@ void GDriveFileSystem::MoveFile(const string &source, const string &target, opti
 	}
 	auto auth = GetAuthContext(context, source);
 	auto client = CreateGDriveClient(auth);
-	MutateMoveFile(*client, cache, auth, src_parsed.uri, dst_parsed.uri);
+	bool permanent = GetBoolSetting(opener, "gdrive_permanent_delete", false);
+	MutateMoveFile(*client, cache, auth, src_parsed.uri, dst_parsed.uri, permanent);
 }
 
 void GDriveFileSystem::RemoveFile(const string &filename, optional_ptr<FileOpener> opener) {

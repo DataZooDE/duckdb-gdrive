@@ -119,8 +119,14 @@ bool TryResolvePath(GDrivePathCache &cache, GDriveClient &client, const GDriveAu
 // ---------------------------------------------------------------------------
 void MutateRemoveFile(GDriveClient &client, GDrivePathCache &cache, const GDriveAuthContext &auth,
                       const GDriveUri &uri, bool permanent);
+//! `permanent_delete_replaced` mirrors RemoveFile's `gdrive_permanent_delete`
+//! setting (D-6): when an overwrite finds an existing file already sitting
+//! at the destination name, this decides whether that replaced file is
+//! trashed (default, recoverable) or permanently deleted. See the comment
+//! in gdrive_mutate.cpp for why overwrite reuses that setting rather than
+//! defaulting differently.
 void MutateMoveFile(GDriveClient &client, GDrivePathCache &cache, const GDriveAuthContext &auth,
-                    const GDriveUri &source_uri, const GDriveUri &target_uri);
+                    const GDriveUri &source_uri, const GDriveUri &target_uri, bool permanent_delete_replaced);
 void MutateCreateDirectory(GDriveClient &client, GDrivePathCache &cache, const GDriveAuthContext &auth,
                            const GDriveUri &uri);
 void MutateRemoveDirectory(GDriveClient &client, GDrivePathCache &cache, const GDriveAuthContext &auth,

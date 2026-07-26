@@ -6,6 +6,9 @@
 // straight through to these.
 #include "gdrive_internal.hpp"
 
+#include <algorithm>
+#include <vector>
+
 namespace duckdb {
 namespace gdrive {
 
@@ -50,6 +53,35 @@ std::string ResolveParentId(GDriveClient &client, GDrivePathCache &cache, const 
 	return meta.id;
 }
 
+//! One files.list call for children of `parent_id` named exactly `name`,
+//! paginated to exhaustion. Deliberately NOT filtered by mimeType: R-4
+//! ambiguity does not care whether the colliding object is a file or a
+//! folder, so neither should this. (Mirrors ListByName in
+//! gdrive_filesystem.cpp, which is anonymous-namespace-local there and so
+//! not reusable from this translation unit -- duplicated rather than
+//! plumbed through gdrive_internal.hpp for the one call site here.)
+std::vector<DriveFileMeta> ListFilesNamedInParent(GDriveClient &client, const std::string &parent_id,
+                                                  const std::string &name, const std::string &context_path) {
+	std::string query =
+	    "'" + parent_id + "' in parents and name='" + EscapeDriveQueryLiteral(name) + "' and trashed=false";
+	std::vector<DriveFileMeta> matches;
+	std::string page_token;
+	do {
+		auto resp = client.List(query, page_token);
+		if (!resp.ok) {
+			ThrowGDriveError(resp.error, context_path);
+		}
+		std::vector<DriveFileMeta> page;
+		std::string next;
+		if (!ParseFileList(resp.body, page, next)) {
+			throw IOException("gdrive: malformed listing response resolving '%s'", context_path);
+		}
+		matches.insert(matches.end(), page.begin(), page.end());
+		page_token = next;
+	} while (!page_token.empty());
+	return matches;
+}
+
 } // namespace
 
 void MutateRemoveFile(GDriveClient &client, GDrivePathCache &cache, const GDriveAuthContext &auth,
@@ -71,7 +103,7 @@ void MutateRemoveFile(GDriveClient &client, GDrivePathCache &cache, const GDrive
 }
 
 void MutateMoveFile(GDriveClient &client, GDrivePathCache &cache, const GDriveAuthContext &auth,
-                    const GDriveUri &source_uri, const GDriveUri &target_uri) {
+                    const GDriveUri &source_uri, const GDriveUri &target_uri, bool permanent_delete_replaced) {
 	// NOTE (HLD section 3/7): this is NOT atomic. DuckDB's storage manager
 	// documents an atomic-rename contract for MoveFile; files.update on
 	// parents/name is a read-then-write against Drive with no compare-and-
@@ -101,9 +133,78 @@ void MutateMoveFile(GDriveClient &client, GDrivePathCache &cache, const GDriveAu
 	}
 	std::string new_parent_id = ResolveParentId(client, cache, auth, target_uri.ParentPath());
 
+	// BUG FIX (S-3.9, live run 2026-07-26): DuckDB's COPY writer overwrites
+	// an existing gdrive:// target by writing to a tmp file and then calling
+	// MoveFile onto the final name once it discovers the target already
+	// exists (bind_copy.cpp's ResolveUseTmpFile). This function used to just
+	// call client.Move() and never looked at what was already sitting at the
+	// destination -- Drive happily allows two objects with the same name in
+	// the same parent, so "overwrite" silently produced two files sharing
+	// one name, which is exactly the R-4 ambiguity the resolver refuses to
+	// guess at on the next read.
+	//
+	// Reconcile the destination name BEFORE moving. Exclude the source
+	// file's own id from the count first: if source and target happen to
+	// resolve to the same object (e.g. a no-op rename), that entry IS the
+	// file being moved, not a distinct collision.
+	auto existing_at_dest = ListFilesNamedInParent(client, new_parent_id, new_name, target_uri.ToString());
+	existing_at_dest.erase(std::remove_if(existing_at_dest.begin(), existing_at_dest.end(),
+	                                      [&](const DriveFileMeta &m) { return m.id == source_meta.id; }),
+	                       existing_at_dest.end());
+	if (existing_at_dest.size() > 1) {
+		// 2+ pre-existing files already sharing the destination name can
+		// only be leftover from an earlier buggy run (this bug, before the
+		// fix below) or a concurrent writer. Same R-4 posture as
+		// ResolvePath's ThrowAmbiguous: never guess which one the caller
+		// means to replace -- name every id so they can clean up by hand
+		// with the gdrive://id:<fileId> form.
+		std::string ids;
+		for (size_t i = 0; i < existing_at_dest.size(); i++) {
+			if (i > 0) {
+				ids += ", ";
+			}
+			ids += existing_at_dest[i].id;
+		}
+		throw IOException(
+		    "gdrive: cannot overwrite '%s': %d files already share that name in the destination folder "
+		    "(ids: %s). Remove or rename them with the gdrive://id:<fileId> form before overwriting.",
+		    target_uri.ToString(), static_cast<int>(existing_at_dest.size()), ids);
+	}
+
 	auto resp = client.Move(source_meta.id, new_parent_id, new_name, old_parent_id);
 	if (!resp.ok) {
 		ThrowGDriveError(resp.error, source_uri.ToString());
+	}
+
+	// Ordering (deliberate, and the reason this runs AFTER the move rather
+	// than before it): for the interval between the two calls there can be
+	// two files sharing the destination name, which reads as ambiguous to a
+	// concurrent reader (R-4) -- annoying, but recoverable by hand and never
+	// silently wrong, since ResolvePath refuses to guess and just errors.
+	// Deleting the stale file FIRST and moving SECOND would fail the other
+	// way: if the move then failed (network blip, permission change,
+	// Drive being Drive), the old content is already gone and the new
+	// content never arrived -- real, silent data loss, which is strictly
+	// worse than a duplicate. So: never destroy data that has not already
+	// been replaced.
+	//
+	// Trash vs. permanent delete for the replaced file: D-6 makes an
+	// explicit RemoveFile default to trash, because trash is recoverable.
+	// An overwrite is not quite the same situation -- a workload that
+	// repeatedly overwrites the same report path (a realistic pattern per
+	// the BRD) would otherwise silently accumulate one trashed copy per
+	// run forever, with no obvious reason for the user to ever go empty
+	// the trash. Rather than invent separate overwrite-specific default
+	// behaviour, this honours the same `gdrive_permanent_delete` setting
+	// RemoveFile already reads (still defaulting to trash/recoverable):
+	// a user who wants replaced files gone for good has already told the
+	// extension so at the connection level, and an overwrite should keep
+	// behaving the way an explicit RemoveFile of the old file would.
+	if (existing_at_dest.size() == 1) {
+		auto del_resp = client.Delete(existing_at_dest[0].id, permanent_delete_replaced);
+		if (!del_resp.ok) {
+			ThrowGDriveError(del_resp.error, target_uri.ToString());
+		}
 	}
 
 	if (source_uri.kind == GDriveUriKind::PATH) {
