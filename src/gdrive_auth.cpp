@@ -11,9 +11,11 @@
 //                                 as a known gap in the report for this slice.
 //   PROVIDER service_account  -- reads KEY_FILE, mints a token via RFC 7523
 //                                 (gdrive_service_account_duckdb.cpp), and
-//                                 caches it in memory keyed by secret name so
-//                                 repeated FileSystem calls do not re-mint on
-//                                 every request (REQ-NF-02).
+//                                 caches it in memory keyed by a fingerprint
+//                                 of the credential material so repeated
+//                                 FileSystem calls do not re-mint on every
+//                                 request (REQ-NF-02). See FingerprintKey --
+//                                 the key is NOT the secret name.
 //
 // REQ-NF-03: no path in this file ever puts a token, a client secret, or key
 // material into an exception message.
@@ -37,12 +39,15 @@
 
 #include <cstdint>
 #include <jwt-cpp/traits/kazuho-picojson/defaults.h>
+#include <openssl/evp.h>
 
 #include <chrono>
 #include <fstream>
 #include <mutex>
 #include <sstream>
+#include <sys/stat.h>
 #include <unordered_map>
+#include <vector>
 
 namespace duckdb {
 namespace gdrive {
@@ -68,7 +73,7 @@ MintedToken MintServiceAccountToken(const ServiceAccountKey &key, const std::str
 namespace {
 
 // ---------------------------------------------------------------------------
-// In-memory token cache, keyed by secret name. Re-minting an RS256 assertion
+// In-memory token cache. Re-minting an RS256 assertion
 // and POSTing it to Google on every single Read()/OpenFile() call would be a
 // quota disaster (REQ-NF-02) -- a token is valid ~1h, so it is cached until
 // shortly before it expires and only re-minted then.
@@ -94,6 +99,66 @@ std::unordered_map<std::string, CachedToken> &TokenCache() {
 	return cache;
 }
 
+// ---------------------------------------------------------------------------
+// Cache key. NOT the secret name.
+//
+// This cache is `static` -- one map for the whole PROCESS, shared by every
+// DuckDB instance in it. Keying it by secret name alone meant:
+//
+//   * database A creates SECRET gdrive for service account A, caches token A;
+//   * database B, same process, creates SECRET gdrive for service account B;
+//   * B's next request finds "gdrive" in the cache and uses A's token, while
+//     applying B's drive_id.
+//
+// That is one tenant reading another tenant's Drive with the other tenant's
+// credential. The path-resolution cache was designed against exactly this
+// (see CacheKey in gdrive_filesystem.hpp) and this cache was missed.
+//
+// So the key is the name PLUS a fingerprint of everything that determines
+// which token comes back. The fingerprint is hashed, so no credential
+// material sits in a map key (REQ-NF-03), and it is a SHA-256 so distinct
+// inputs cannot collide into a shared token.
+std::string FingerprintKey(const std::string &secret_name, const std::string &provider,
+                            const std::vector<std::string> &material) {
+	std::string joined;
+	for (const auto &m : material) {
+		joined += m;
+		joined.push_back('\x1f'); // unit separator: cannot appear in these values
+	}
+	unsigned char digest[EVP_MAX_MD_SIZE];
+	unsigned int digest_len = 0;
+	std::string hex;
+	if (EVP_Digest(joined.data(), joined.size(), digest, &digest_len, EVP_sha256(), nullptr) == 1) {
+		static const char *kHex = "0123456789abcdef";
+		hex.reserve(digest_len * 2);
+		for (unsigned int i = 0; i < digest_len; i++) {
+			hex.push_back(kHex[(digest[i] >> 4) & 0xF]);
+			hex.push_back(kHex[digest[i] & 0xF]);
+		}
+	} else {
+		// Hashing must never fail open onto a name-only key -- that is the
+		// cross-tenant bug. A key nothing else can equal simply misses the
+		// cache, costing a re-mint.
+		hex = "unhashable-" + std::to_string(reinterpret_cast<uintptr_t>(joined.data()));
+	}
+	return provider + "\x1f" + secret_name + "\x1f" + hex;
+}
+
+//! Identity of a key file for cache purposes: path plus size plus mtime.
+//!
+//! Path alone would keep serving a stale token after a key is ROTATED IN
+//! PLACE, which is the normal way keys get rotated. Hashing the file's
+//! contents would be exact but reintroduces a read on every call, which is
+//! what the cache exists to avoid; a stat is cheap.
+std::string KeyFileStamp(const std::string &key_file) {
+	struct stat st;
+	if (stat(key_file.c_str(), &st) != 0) {
+		return key_file; // let the later open() produce the real error
+	}
+	return key_file + ":" + std::to_string(static_cast<long long>(st.st_size)) + ":" +
+	       std::to_string(static_cast<long long>(st.st_mtime));
+}
+
 int64_t NowUnix() {
 	return static_cast<int64_t>(
 	    std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());
@@ -102,8 +167,8 @@ int64_t NowUnix() {
 // ---------------------------------------------------------------------------
 // PROVIDER config's refresh path: `grant_type=refresh_token` against Google's
 // token endpoint. Shares the *cache* (TokenCache() above) with the
-// service_account path -- same kRefreshSlackSeconds policy, same map keyed by
-// secret name -- deliberately: two token-acquisition strategies, one cache.
+// service_account path -- same kRefreshSlackSeconds policy, same map, same
+// FingerprintKey scheme -- deliberately: two token strategies, one cache.
 //
 // The HTTP/parsing helpers below intentionally mirror
 // gdrive_service_account_duckdb.cpp's (SplitUrl / UrlEncodeFormValue /
@@ -286,11 +351,19 @@ GDriveAuthContext BuildContextFromServiceAccount(const KeyValueSecret &kv, const
 		scope = SCOPE_DRIVE_READONLY; // REQ-NF-04
 	}
 
+	// Cache key covers the KEY FILE (path+size+mtime), the scope and the
+	// delegated subject -- everything that changes which token Google hands
+	// back. See FingerprintKey: a name-only key leaks tokens between
+	// same-named secrets in different databases sharing one process.
+	const std::string cache_key =
+	    FingerprintKey(secret_name, "service_account",
+	                   {KeyFileStamp(key_file), scope, GetOrEmpty(kv, "subject")});
+
 	// Fast path: a cached, not-about-to-expire token needs no file I/O, no
 	// signing, and no network call at all (REQ-NF-02).
 	{
 		std::lock_guard<std::mutex> lock(CacheMutex());
-		auto it = TokenCache().find(secret_name);
+		auto it = TokenCache().find(cache_key);
 		if (it != TokenCache().end() && it->second.expires_at_unix - kRefreshSlackSeconds > NowUnix()) {
 			GDriveAuthContext ctx;
 			ctx.access_token = it->second.access_token;
@@ -322,7 +395,7 @@ GDriveAuthContext BuildContextFromServiceAccount(const KeyValueSecret &kv, const
 
 	{
 		std::lock_guard<std::mutex> lock(CacheMutex());
-		TokenCache()[secret_name] = CachedToken {minted.access_token, minted.expires_at_unix};
+		TokenCache()[cache_key] = CachedToken {minted.access_token, minted.expires_at_unix};
 	}
 
 	GDriveAuthContext ctx;
@@ -379,12 +452,18 @@ GDriveAuthContext BuildContextFromConfig(const KeyValueSecret &kv, const std::st
 		    secret_name.c_str(), secret_name.c_str(), secret_name.c_str());
 	}
 
+	// Keyed by the credential material, not the secret name -- see
+	// FingerprintKey. Two databases in one process may both hold a secret
+	// called "gdrive" pointing at different Google accounts.
+	const std::string cache_key =
+	    FingerprintKey(secret_name, "config", {client_id, client_secret, refresh_token});
+
 	// Fast path: a cached, not-about-to-expire token needs no network call
 	// at all (REQ-NF-02). Same cache, same slack policy as the
 	// service_account path above -- one mechanism, two mint strategies.
 	{
 		std::lock_guard<std::mutex> lock(CacheMutex());
-		auto it = TokenCache().find(secret_name);
+		auto it = TokenCache().find(cache_key);
 		if (it != TokenCache().end() && it->second.expires_at_unix - kRefreshSlackSeconds > NowUnix()) {
 			return make_ctx(it->second.access_token);
 		}
@@ -401,7 +480,7 @@ GDriveAuthContext BuildContextFromConfig(const KeyValueSecret &kv, const std::st
 
 	{
 		std::lock_guard<std::mutex> lock(CacheMutex());
-		TokenCache()[secret_name] = CachedToken {refreshed.access_token, refreshed.expires_at_unix};
+		TokenCache()[cache_key] = CachedToken {refreshed.access_token, refreshed.expires_at_unix};
 	}
 
 	return make_ctx(refreshed.access_token);
