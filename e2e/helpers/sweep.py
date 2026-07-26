@@ -51,8 +51,16 @@ def sweep(drive: Drive, max_age_hours: int = DEFAULT_MAX_AGE_HOURS, dry_run: boo
 
     cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=max_age_hours)
     removed = 0
+    unswept = []
     for child in drive.list_children(scratch):
         if child["mimeType"] != FOLDER_MIME or not child["name"].startswith("run-"):
+            # The run- prefix is deliberate: it protects anything a HUMAN put
+            # under /scratch from being deleted by a cron job. But skipping
+            # silently means such a folder is never collected and nobody ever
+            # learns it is there. An ad-hoc `lake-<ts>` folder from a manual
+            # DuckLake experiment sat here doing exactly that. Report them.
+            if child["mimeType"] == FOLDER_MIME:
+                unswept.append(child["name"])
             continue
 
         # Liveness comes from the heartbeat file, not the folder. Drive does
@@ -72,6 +80,12 @@ def sweep(drive: Drive, max_age_hours: int = DEFAULT_MAX_AGE_HOURS, dry_run: boo
         removed += 1
 
     print(f"{removed} stale scratch folder(s) {'found' if dry_run else 'removed'}")
+    if unswept:
+        print(f"NOTE: {len(unswept)} folder(s) under /{fx.SCRATCH_ROOT} do not use the "
+              f"run-<uuid> convention and will NEVER be swept:")
+        for name in sorted(unswept):
+            print(f"  {name}")
+        print("  Delete them by hand, or rename them to run-<something>.")
     return removed
 
 
