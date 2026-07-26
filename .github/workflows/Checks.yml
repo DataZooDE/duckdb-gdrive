@@ -119,6 +119,11 @@ jobs:
         run: make check_stamp
       - name: Shipped artifact loads in a stock duckdb
         run: make smoke_loadable
+      # The README is part of the product: BRD criterion 1 is "clean install,
+      # README only". Documentation drift is a defect a reader hits before
+      # any test does.
+      - name: README documents things that exist
+        run: make verify_readme
 
   # ---------------------------------------------------------------------------
   # The real thing. Needs secrets, so it cannot run on fork PRs.
