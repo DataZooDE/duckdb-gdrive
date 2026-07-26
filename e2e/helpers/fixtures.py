@@ -85,6 +85,31 @@ def checksum(data: bytes) -> str:
 
 #: Permanent read-only fixture tree. Paths are relative to /fixtures.
 #: (path, kind, payload-callable) -- kind drives how it is uploaded.
+#: The integrity fixture's content, as a SQL expression.
+#:
+#: This string is the WHOLE POINT: the live test rebuilds the same data
+#: locally with this exact query and asserts the local and gdrive:// reads
+#: return identical rows. Borrowed from duckdb-azure's test_data_integrity
+#: pattern (compare `./data/l.csv` against `az://.../l.csv` under one `nosort`
+#: label), which is a far stronger check than a row count -- a count survives
+#: the file being entirely the wrong bytes, and it would NOT have caught the
+#: ranged-read offset bug where a non-partial response was copied from byte 0.
+#:
+#: Must stay deterministic and must stay in step with the copy embedded in
+#: test/sql/gdrive_read.test.template.
+INTEGRITY_QUERY = (
+    "SELECT i AS id, (i % 7)::INTEGER AS grp, md5(i::VARCHAR) AS s, "
+    "(i * 1.5)::DOUBLE AS d FROM range(100000) t(i)"
+)
+
+#: Hive-partitioned tree: year=/month= directories, one parquet each.
+#: Exercises glob recursion plus hive_partitioning column extraction and
+#: partition pruning -- none of which had any coverage. duckdb-azure keeps an
+#: equivalent `partitioned/l_receipmonth=.../l_shipmode=.../` fixture.
+HIVE_PARTITIONS = [
+    (2025, 1), (2025, 2), (2026, 1), (2026, 2),
+]
+
 PERMANENT_LAYOUT = [
     ("small.csv", "binary", small_csv, "text/csv"),
     ("empty.csv", "binary", lambda: b"", "text/csv"),

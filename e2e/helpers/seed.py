@@ -70,6 +70,18 @@ def _make_parquet(rows: list[dict]) -> bytes:
         return out.read_bytes()
 
 
+def _make_query_parquet(query: str) -> bytes:
+    """Parquet from an arbitrary deterministic SQL query."""
+    import duckdb
+
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "f.parquet"
+        con = duckdb.connect()
+        con.execute(f"COPY ({query}) TO '{out}' (FORMAT parquet)")
+        con.close()
+        return out.read_bytes()
+
+
 def _make_wide_parquet(target_mb: int = 100) -> bytes:
     """A ~100MB Parquet for the REQ-NF-01 cold-scan benchmark.
 
@@ -175,6 +187,24 @@ def seed(drive: Drive) -> dict:
             drive.upload(name, f"i\n{i}\n".encode(), many_dir, "text/csv")
     print(f"  many/f-000..{fx.PAGINATION_COUNT - 1:03d}.csv -> {many_dir}")
     ids["many_dir"] = many_dir
+
+    # --- integrity: a file the test can rebuild locally and diff against --
+    integrity_dir = drive.find_or_create_folder("integrity", fixtures_root)
+    _upload_if_changed(drive, integrity_dir, "data.parquet",
+                       _make_query_parquet(fx.INTEGRITY_QUERY), "application/octet-stream")
+    print(f"  integrity/data.parquet -> {integrity_dir}")
+    ids["integrity_dir"] = integrity_dir
+
+    # --- hive-partitioned tree -------------------------------------------
+    hive_dir = drive.find_or_create_folder("hive", fixtures_root)
+    for year, month in fx.HIVE_PARTITIONS:
+        leaf = _ensure_path(drive, f"year={year}/month={month:02d}", hive_dir)
+        q = (f"SELECT i AS id, {year} AS y, {month} AS m, (i * {month})::BIGINT AS v "
+             f"FROM range(1000) t(i)")
+        _upload_if_changed(drive, leaf, "data.parquet",
+                           _make_query_parquet(q), "application/octet-stream")
+    print(f"  hive/year=*/month=*/data.parquet -> {hive_dir}")
+    ids["hive_dir"] = hive_dir
 
     # --- the benchmark subject -------------------------------------------
     if os.environ.get("GDRIVE_SEED_SKIP_WIDE") != "1":

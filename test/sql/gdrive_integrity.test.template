@@ -1,0 +1,111 @@
+# name: test/sql/gdrive_integrity.test.template
+# description: Data integrity and hive partitioning, patterned on the DuckDB
+#              team's own filesystem-extension suites (duckdb-azure,
+#              duckdb-httpfs)
+# group: [live]
+#
+# Two things borrowed from how the DuckDB core team test their own
+# filesystem extensions, both of which we were missing:
+#
+# 1. LOCAL-vs-REMOTE IDENTITY. duckdb-azure's test_data_integrity.test runs
+#    the same query against `./data/l.parquet` and `az://.../l.parquet` under
+#    one `nosort` label, so sqllogictest requires the two result sets to be
+#    identical. That is dramatically stronger than the row counts and
+#    aggregates we had: a count survives the file being entirely the wrong
+#    bytes. Concretely, it is the check that would have caught the ranged-read
+#    bug where a non-partial (HTTP 200) response was copied from byte 0
+#    regardless of the requested offset -- every aggregate stayed plausible.
+#
+#    We cannot ship a 100k-row parquet in the repo just for this, so instead
+#    the fixture is generated from a deterministic SQL query
+#    (helpers/fixtures.py INTEGRITY_QUERY) and rebuilt here with the same
+#    query. The two must be kept in step -- if they drift, this test fails,
+#    which is the correct outcome.
+#
+# 2. HIVE PARTITIONING. duckdb-azure keeps a `partitioned/k=v/k=v/` tree.
+#    We had no coverage of partitioned reads at all: glob recursion into
+#    `key=value` directories, hive column extraction, and partition pruning
+#    are all separate things that can break independently.
+
+require gdrive
+
+require parquet
+
+require-env GDRIVE_CI_DRIVE_ID
+
+require-env GDRIVE_CI_SA_KEY_FILE
+
+statement ok
+CREATE SECRET gdrive_integrity (
+    TYPE gdrive,
+    PROVIDER service_account,
+    KEY_FILE '${SA_KEY_FILE}',
+    ROOT_FOLDER_ID '${DRIVE_ID}',
+    DRIVE_SCOPE 'https://www.googleapis.com/auth/drive.readonly'
+);
+
+# ---------------------------------------------------------------------------
+# 1. Byte-for-byte identity between a local read and a gdrive:// read.
+#
+# Keep this query IDENTICAL to INTEGRITY_QUERY in e2e/helpers/fixtures.py.
+# ---------------------------------------------------------------------------
+statement ok
+COPY (
+    SELECT i AS id, (i % 7)::INTEGER AS grp, md5(i::VARCHAR) AS s, (i * 1.5)::DOUBLE AS d
+    FROM range(100000) t(i)
+) TO '__TEST_DIR__/integrity.parquet' (FORMAT parquet);
+
+query IIII nosort integrity_rows
+SELECT id, grp, s, d FROM '__TEST_DIR__/integrity.parquet' ORDER BY id;
+
+query IIII nosort integrity_rows
+SELECT id, grp, s, d FROM 'gdrive://fixtures/integrity/data.parquet' ORDER BY id;
+
+# The same, but with a projection and a filter, so the reader takes a
+# different path through the file: fewer column chunks, and row-group
+# skipping. A ranged-read offset bug shows up here even more sharply,
+# because the byte ranges requested are narrower and further into the file.
+query II nosort integrity_slice
+SELECT id, s FROM '__TEST_DIR__/integrity.parquet' WHERE grp = 5 AND id > 90000 ORDER BY id;
+
+query II nosort integrity_slice
+SELECT id, s FROM 'gdrive://fixtures/integrity/data.parquet' WHERE grp = 5 AND id > 90000 ORDER BY id;
+
+# ---------------------------------------------------------------------------
+# 2. Hive partitioning over gdrive://.
+# ---------------------------------------------------------------------------
+
+# Glob recurses into key=value directories.
+query I
+SELECT count(*) FROM glob('gdrive://fixtures/hive/**/*.parquet')
+----
+4
+
+# Partition columns are extracted from the PATH, not the file contents.
+query III
+SELECT year, month, count(*) AS n
+FROM read_parquet('gdrive://fixtures/hive/**/*.parquet', hive_partitioning = true)
+GROUP BY year, month
+ORDER BY year, month
+----
+2025	01	1000
+2025	02	1000
+2026	01	1000
+2026	02	1000
+
+# Partition pruning: filtering on a hive column must still give the right
+# answer. (Whether it actually skipped the other files is a performance
+# question; being CORRECT is the thing that must never break.)
+query II
+SELECT count(*), sum(id)
+FROM read_parquet('gdrive://fixtures/hive/**/*.parquet', hive_partitioning = true)
+WHERE year = 2026 AND month = '02'
+----
+1000	499500
+
+# The non-partition payload column survives the round trip too.
+query I
+SELECT sum(v) FROM read_parquet('gdrive://fixtures/hive/**/*.parquet', hive_partitioning = true)
+WHERE year = 2025 AND month = '02'
+----
+999000
