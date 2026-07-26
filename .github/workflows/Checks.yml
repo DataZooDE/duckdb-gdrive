@@ -67,7 +67,7 @@ jobs:
         run: |
           docker run --rm -v "$PWD":/w -w /w alpine:3.20 sh -c '
             set -e
-            apk add --no-cache g++ git >/dev/null
+            apk add --no-cache g++ git openssl-dev >/dev/null
             # picojson and jwt-cpp are header-only; fetch just the headers
             # rather than bootstrapping vcpkg inside the container.
             git clone -q --depth 1 https://github.com/kazuho/picojson.git /tmp/picojson
