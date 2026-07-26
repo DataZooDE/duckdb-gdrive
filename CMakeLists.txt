@@ -74,8 +74,19 @@ file(GLOB PURE_SOURCES CONFIGURE_DEPENDS
 # DuckDB-coupled sources. Everything here is exercised by live SQL tests
 # against real Google Drive, never by a fake.
 # ---------------------------------------------------------------------------
-set(DUCKDB_SOURCES
+file(GLOB DUCKDB_SOURCES CONFIGURE_DEPENDS
     src/gdrive_extension.cpp
+    src/gdrive_client.cpp
+    src/gdrive_secret.cpp
+    src/gdrive_auth.cpp
+    src/gdrive_service_account_duckdb.cpp
+    src/gdrive_filesystem.cpp
+    src/gdrive_path_cache.cpp
+    src/gdrive_file_handle.cpp
+    src/gdrive_export.cpp
+    src/gdrive_upload.cpp
+    src/gdrive_mutate.cpp
+    src/gdrive_stats.cpp
 )
 
 set(EXTENSION_SOURCES ${PURE_SOURCES} ${DUCKDB_SOURCES})

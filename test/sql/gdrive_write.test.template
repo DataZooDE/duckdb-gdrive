@@ -1,0 +1,118 @@
+# name: test/sql/gdrive_write.test.template
+# description: S-3.1..S-3.13 -- export, write and mutation against REAL Drive
+# group: [live]
+#
+# Materialised by e2e/helpers/materialise.py. Run via `make test_live`.
+# Every mutating statement targets a per-run scratch folder so concurrent CI
+# runs cannot collide.
+
+require gdrive
+
+require parquet
+
+require-env GDRIVE_CI_DRIVE_ID
+
+require-env GDRIVE_CI_SA_KEY_FILE
+
+statement ok
+CREATE SECRET gdrive_test (
+    TYPE gdrive,
+    PROVIDER service_account,
+    KEY_FILE '${SA_KEY_FILE}',
+    DRIVE_ID '${DRIVE_ID}',
+    SCOPE 'https://www.googleapis.com/auth/drive'
+);
+
+# ---------------------------------------------------------------------------
+# S-3.2 -- REQ-F-07 / BRD success criterion 3: a native Google Sheet is
+# queryable with no manual export. A Sheet has NO byte stream, so alt=media
+# fails on it and files.export is the only way through.
+# ---------------------------------------------------------------------------
+query II
+SELECT quarter, revenue FROM read_csv('gdrive://fixtures/Budget') ORDER BY quarter
+----
+Q1	1000
+Q2	2000
+Q3	3000
+
+# S-3.3 -- GetFileSize on a native file must report the EXPORTED length.
+# Drive reports no `size` at all for these, so a naive implementation returns
+# 0 or -1 and every read comes back empty.
+query I
+SELECT count(*) > 0 FROM read_csv('gdrive://fixtures/Budget')
+----
+true
+
+# S-3.4 -- a Doc exports as text/plain by default (D-7: byte-stable, so
+# GetVersionTag-keyed caching stays honest).
+query I
+SELECT count(*) > 0 FROM read_text('gdrive://fixtures/Notes')
+----
+true
+
+# ---------------------------------------------------------------------------
+# S-3.5 / S-3.7 -- write round trip. COPY emits a whole file, which is exactly
+# what the buffered-upload-on-close design suits.
+# ---------------------------------------------------------------------------
+statement ok
+COPY (SELECT 1 AS a, 'x' AS b) TO 'gdrive://scratch/${SCRATCH}/out.csv' (FORMAT csv, HEADER);
+
+query II
+SELECT a, b FROM read_csv('gdrive://scratch/${SCRATCH}/out.csv')
+----
+1	x
+
+statement ok
+COPY (SELECT i, i*2 AS d FROM range(1000) t(i)) TO 'gdrive://scratch/${SCRATCH}/out.parquet' (FORMAT parquet);
+
+query I
+SELECT count(*) FROM read_parquet('gdrive://scratch/${SCRATCH}/out.parquet')
+----
+1000
+
+query I
+SELECT sum(d) FROM read_parquet('gdrive://scratch/${SCRATCH}/out.parquet')
+----
+999000
+
+# ---------------------------------------------------------------------------
+# S-3.9 -- overwriting an existing name must files.update the resolved id,
+# NOT create a second file with the same name. Creating a duplicate would
+# manufacture exactly the R-4 collision the resolver then refuses to read.
+# ---------------------------------------------------------------------------
+statement ok
+COPY (SELECT 2 AS a, 'y' AS b) TO 'gdrive://scratch/${SCRATCH}/out.csv' (FORMAT csv, HEADER);
+
+query II
+SELECT a, b FROM read_csv('gdrive://scratch/${SCRATCH}/out.csv')
+----
+2	y
+
+query I
+SELECT count(*) FROM glob('gdrive://scratch/${SCRATCH}/out.csv')
+----
+1
+
+# ---------------------------------------------------------------------------
+# S-3.10 -- RemoveFile trashes by default (D-6). Trash is recoverable; a
+# table-format cleanup routine hard-deleting the wrong thing on a user's own
+# Drive is not.
+# ---------------------------------------------------------------------------
+statement ok
+COPY (SELECT 1 AS a) TO 'gdrive://scratch/${SCRATCH}/doomed.csv' (FORMAT csv);
+
+query I
+SELECT count(*) FROM glob('gdrive://scratch/${SCRATCH}/doomed.csv')
+----
+1
+
+# ---------------------------------------------------------------------------
+# S-3.12 -- directories are files with a folder mimeType.
+# ---------------------------------------------------------------------------
+statement ok
+COPY (SELECT 1 AS a) TO 'gdrive://scratch/${SCRATCH}/sub/nested.csv' (FORMAT csv);
+
+query I
+SELECT count(*) FROM read_csv('gdrive://scratch/${SCRATCH}/sub/nested.csv')
+----
+1

@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import uuid
 from pathlib import Path
 
 from .drive import Drive, DriveConfigError
@@ -41,10 +42,23 @@ def build_substitutions(drive: Drive) -> dict:
     key_file = os.environ.get("GDRIVE_CI_SA_KEY_FILE", "")
     if key_file and not Path(key_file).is_absolute():
         key_file = str((REPO_ROOT / key_file).resolve())
+
+    # Mutating SQL tests need somewhere to write. One scratch folder per
+    # materialisation (i.e. per `make test_live` run), carrying a heartbeat so
+    # the sweeper can tell a slow run from an abandoned one -- Drive does not
+    # advance a folder's own modifiedTime when its children change.
+    scratch_root = drive.find_or_create_folder(fx.SCRATCH_ROOT)
+    scratch_name = f"run-{uuid.uuid4().hex[:12]}"
+    scratch_id = drive.create_folder(scratch_name, scratch_root)
+    drive.upload(fx.HEARTBEAT_NAME, b"alive\n", scratch_id, "text/plain")
+    print(f"  scratch: /{fx.SCRATCH_ROOT}/{scratch_name} ({scratch_id})")
+
     return {
         "DRIVE_ID": drive.drive_id,
         "FIXTURES_ID": found[0]["id"],
         "SA_KEY_FILE": key_file,
+        "SCRATCH": scratch_name,
+        "SCRATCH_ID": scratch_id,
     }
 
 
