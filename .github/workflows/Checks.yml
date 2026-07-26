@@ -125,6 +125,17 @@ jobs:
       # anyone, while every test stayed green.
       - name: Extension stamped for the target DuckDB
         run: make check_stamp
+      # A stock CLI of the EXACT target version, so smoke_loadable actually
+      # runs. Without it the step printed "SKIP: no stock duckdb on PATH" and
+      # passed -- a green line for work not done, which is the failure mode
+      # this whole gate exists to prevent.
+      - name: Install stock duckdb v1.5.5
+        run: |
+          curl -sSLo /tmp/duckdb.zip \
+            https://github.com/duckdb/duckdb/releases/download/v1.5.5/duckdb_cli-linux-amd64.zip
+          unzip -q -o /tmp/duckdb.zip -d /tmp/duckdb-cli
+          sudo install -m 0755 /tmp/duckdb-cli/duckdb /usr/local/bin/duckdb
+          duckdb -noheader -list -c "SELECT version();"
       - name: Shipped artifact loads in a stock duckdb
         run: make smoke_loadable
       # The README is part of the product: BRD criterion 1 is "clean install,
