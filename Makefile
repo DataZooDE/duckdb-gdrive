@@ -130,3 +130,16 @@ check_pin:
 .PHONY: check_cstdint
 check_cstdint:
 	@./scripts/check_cstdint.sh
+
+# ---------------------------------------------------------------------------
+# The SHIPPED artifact, not the statically linked shell. A static build can be
+# green while the loadable extension refuses to load -- the DuckDB-version
+# handshake and symbol resolution only happen at LOAD time.
+# ---------------------------------------------------------------------------
+.PHONY: check_stamp
+check_stamp: release
+	@./scripts/check_extension_stamp.sh
+
+.PHONY: smoke_loadable
+smoke_loadable: release
+	@./scripts/smoke_loadable.sh

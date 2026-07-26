@@ -234,6 +234,15 @@ the credential scanner silently never looked for private keys.
 a 100 MB upload mid-body with a bare `ConnectionError` naming neither the file
 nor the size. See `Drive._transfer_timeout()`.
 
+**After moving the `duckdb` submodule you MUST `rm -rf build/release`.**
+CMake caches the DuckDB version it computed at configure time. Keep a stale
+build directory and every later `make` produces an extension stamped for the
+OLD DuckDB -- ours was stamped `d8cdaa33fd` instead of `v1.5.5` and refused to
+load into any stock DuckDB, while the whole suite stayed green because the
+tests use the statically linked shell and never load the shipped artifact.
+`make check_stamp` and `make smoke_loadable` now catch this; the warning in
+the Build section above was already there and was not enough.
+
 ## Credential hygiene
 
 `make check_credentials` (also a CI job) fails on tracked files matching

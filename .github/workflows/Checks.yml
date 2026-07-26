@@ -110,6 +110,15 @@ jobs:
         run: make test
       - name: Static linkage allowlist
         run: make smoke_static
+      # The artifact users actually install. Everything above tests the
+      # statically linked shell, which never exercises the LOAD-time DuckDB
+      # version handshake -- a stale CMake cache once stamped the artifact
+      # for a commit hash instead of v1.5.5 and it could not be loaded by
+      # anyone, while every test stayed green.
+      - name: Extension stamped for the target DuckDB
+        run: make check_stamp
+      - name: Shipped artifact loads in a stock duckdb
+        run: make smoke_loadable
 
   # ---------------------------------------------------------------------------
   # The real thing. Needs secrets, so it cannot run on fork PRs.
