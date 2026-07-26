@@ -82,6 +82,33 @@ Creating the Shared Drive itself needs a Google **Workspace user** —
 `drives.create` refuses a bare service account. That step is manual and the
 setup script walks you through it.
 
+### Two identities, and why
+
+Reads run as the **service account**; writes and fixture seeding run as a
+**delegated user**. That is not a style choice — a service account has no
+Drive storage quota and gets `403 storageQuotaExceeded` on *any* upload
+outside a Shared Drive, so it literally cannot create the fixtures it then
+reads.
+
+`make oauth_consent` does the one-time browser consent and stores the refresh
+token in `.env.gdrive`.
+
+**CI** cannot do browser consent, so the token is minted once locally and
+stored as repository secrets:
+
+| Secret | Used for |
+|---|---|
+| `GDRIVE_CI_SA_KEY_B64` | service-account key, base64 — reads |
+| `GDRIVE_CI_DRIVE_ID` | the fixture root (folder id, or a Shared Drive id) |
+| `GDRIVE_OAUTH_CLIENT_ID` / `GDRIVE_OAUTH_CLIENT_SECRET` | the OAuth client |
+| `GDRIVE_USER_REFRESH_TOKEN` | delegated user — writes and seeding |
+
+A Google refresh token does not expire on a timer, but it *is* revoked if the
+user revokes access, if the OAuth client is deleted, or after ~6 months
+unused on a project still in "Testing" publishing status. If the live job
+starts failing auth, re-run `make oauth_consent` and update the secret — that
+is the expected maintenance, not a bug.
+
 Fixtures are two-tier (plan §2.2): permanent read-only `/fixtures` seeded
 once, and per-test `/scratch/run-<uuid>` deleted on teardown so concurrent CI
 runs cannot collide. `make sweep_orphans` cleans up after crashed runs.

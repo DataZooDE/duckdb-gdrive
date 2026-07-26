@@ -83,13 +83,31 @@ jobs:
         run: GEN=ninja make
       - name: Live SQL tests
         env:
+          # Reads run as the service account.
           GDRIVE_CI_SA_KEY_B64: ${{ secrets.GDRIVE_CI_SA_KEY_B64 }}
           GDRIVE_CI_DRIVE_ID: ${{ secrets.GDRIVE_CI_DRIVE_ID }}
+          # Writes run as a delegated user. A service account has NO Drive
+          # storage quota and cannot create a file outside a Shared Drive, so
+          # seeding and every write test need a real user's quota. A runner
+          # cannot do browser consent, so the refresh token is minted once
+          # locally (make oauth_consent) and stored as a secret.
+          GDRIVE_OAUTH_CLIENT_ID: ${{ secrets.GDRIVE_OAUTH_CLIENT_ID }}
+          GDRIVE_OAUTH_CLIENT_SECRET: ${{ secrets.GDRIVE_OAUTH_CLIENT_SECRET }}
+          GDRIVE_USER_REFRESH_TOKEN: ${{ secrets.GDRIVE_USER_REFRESH_TOKEN }}
         run: make test_live
       - name: E2E harness
         env:
+          # Reads run as the service account.
           GDRIVE_CI_SA_KEY_B64: ${{ secrets.GDRIVE_CI_SA_KEY_B64 }}
           GDRIVE_CI_DRIVE_ID: ${{ secrets.GDRIVE_CI_DRIVE_ID }}
+          # Writes run as a delegated user. A service account has NO Drive
+          # storage quota and cannot create a file outside a Shared Drive, so
+          # seeding and every write test need a real user's quota. A runner
+          # cannot do browser consent, so the refresh token is minted once
+          # locally (make oauth_consent) and stored as a secret.
+          GDRIVE_OAUTH_CLIENT_ID: ${{ secrets.GDRIVE_OAUTH_CLIENT_ID }}
+          GDRIVE_OAUTH_CLIENT_SECRET: ${{ secrets.GDRIVE_OAUTH_CLIENT_SECRET }}
+          GDRIVE_USER_REFRESH_TOKEN: ${{ secrets.GDRIVE_USER_REFRESH_TOKEN }}
         run: make e2e
 
   # ---------------------------------------------------------------------------
