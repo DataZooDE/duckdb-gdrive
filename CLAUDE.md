@@ -208,6 +208,32 @@ therefore not a unique identifier (R-4). Multiple matches are an error naming
 both ids — silently picking one makes query results depend on Drive's
 internal ordering.
 
+**A drifted `duckdb` submodule makes every local green meaningless.** It once
+sat ~9,600 commits past its tag on DuckDB main; every local build passed and
+every release build failed, because `BaseSecret::GetName()` returns
+`const string &` on all released 1.4/1.5 versions and `const Identifier &` on
+main. `make check_pin` now enforces the tag. Local builds cover **stable
+only** — CI also builds the 1.4 LTS line, so a local pass is necessary but not
+sufficient.
+
+**Drive picks the native type from the SOURCE content type, not the target.**
+`files.create` with `mimeType: application/vnd.google-apps.document` and a
+`text/csv` body produces a **Sheet**, silently. Upload `text/plain` for a Doc
+and `text/csv` for a Sheet (`Drive._NATIVE_SOURCE_MIME` in
+`e2e/helpers/drive.py`). Because of this the "Notes" fixture was a spreadsheet
+for a long time and every "create only when absent" seeding run skipped it —
+seeding now verifies the mimeType instead of treating present as correct.
+
+**A grep pattern starting with `-` is parsed as options.** `grep -qE "$pat"
+"$f"` where `$pat` begins `-----BEGIN` prints usage and exits **2**, and
+`if grep ...; then` reads that as "no match". Always `grep -qE -e "$pat" --
+"$f"`, and treat exit status >= 2 as an error rather than a miss — that is how
+the credential scanner silently never looked for private keys.
+
+**Drive transfers need a size-based timeout.** A flat 60 s socket timeout kills
+a 100 MB upload mid-body with a bare `ConnectionError` naming neither the file
+nor the size. See `Drive._transfer_timeout()`.
+
 ## Credential hygiene
 
 `make check_credentials` (also a CI job) fails on tracked files matching
