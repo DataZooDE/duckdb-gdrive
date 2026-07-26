@@ -172,6 +172,10 @@ class Drive:
     #: "service_account" or "user" -- which identity this session acts as.
     #: Surfaced because a 403 means very different things for each.
     _identity: str = "service_account"
+    #: True when drive_id names an actual Shared Drive rather than an ordinary
+    #: folder. Detected once, because the two need different query parameters
+    #: and guessing wrong produces a misleading 404.
+    is_shared_drive: bool = False
     #: Count of HTTP calls by kind. The harness asserts on this for the R-1
     #: metadata-amplification checks -- it is the ground truth against which
     #: the extension's own gdrive_stats() counter is validated.
@@ -204,7 +208,9 @@ class Drive:
         if prefer_user:
             user_creds = _user_credentials()
             if user_creds is not None:
-                return cls(drive_id=drive_id, _creds=user_creds, _identity="user")
+                d = cls(drive_id=drive_id, _creds=user_creds, _identity="user")
+            d.is_shared_drive = d._detect_shared_drive()
+            return d
             raise DriveConfigError(
                 "writing needs a delegated user token: a service account has no "
                 "Drive storage quota and cannot create files outside a Shared "
@@ -215,7 +221,9 @@ class Drive:
             str(_key_path()), scopes=SCOPES
         )
         creds.refresh(gauth_requests.Request())
-        return cls(drive_id=drive_id, _creds=creds, _identity="service_account")
+        d = cls(drive_id=drive_id, _creds=creds, _identity="service_account")
+        d.is_shared_drive = d._detect_shared_drive()
+        return d
 
     # -- plumbing ----------------------------------------------------------
 
@@ -235,6 +243,15 @@ class Drive:
         if resp.status_code not in (200, 201, 204):
             raise RuntimeError(f"{what} failed: HTTP {resp.status_code}: {resp.text[:500]}")
         return resp.json() if resp.content else {}
+
+    def _detect_shared_drive(self) -> bool:
+        """Is drive_id a Shared Drive, or an ordinary folder?
+
+        A Shared Drive answers drives.get; a folder 404s. Cheaper and more
+        honest than pattern-matching the id prefix.
+        """
+        resp = self._request("GET", f"{DRIVE_V3}/drives/{self.drive_id}", "drives.get")
+        return resp.status_code == 200
 
     def reset_call_counts(self) -> None:
         self.calls.clear()
@@ -257,11 +274,17 @@ class Drive:
         while True:
             params = {
                 "q": q,
-                "corpora": "drive",
-                "driveId": self.drive_id,
                 "fields": "nextPageToken, files(id, name, mimeType, size, modifiedTime, md5Checksum)",
                 "pageSize": "1000",
             }
+            # corpora=drive + driveId are ONLY valid for a real Shared Drive.
+            # Passing them for an ordinary folder id yields
+            # 404 "Shared drive not found", which reads like a permissions
+            # problem and is nothing of the sort. The root here may legitimately
+            # be either, so scope only when it really is a Shared Drive.
+            if self.is_shared_drive:
+                params["corpora"] = "drive"
+                params["driveId"] = self.drive_id
             if page_token:
                 params["pageToken"] = page_token
             data = self._ok(
