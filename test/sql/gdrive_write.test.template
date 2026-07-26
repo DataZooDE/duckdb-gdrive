@@ -131,3 +131,60 @@ query I
 SELECT count(*) FROM read_csv('gdrive://scratch/${SCRATCH}/sub/nested.csv')
 ----
 1
+
+# ---------------------------------------------------------------------------
+# S-4.3 / BRD success criterion 4 (R-2) -- a QUOTA error must be distinct and
+# actionable, live, not just in the pure classifier.
+#
+# The rate-limit half of R-2 cannot be provoked responsibly: exhausting Drive
+# API quota needs a throwaway Google project, and doing it against a real one
+# degrades that account's Drive for everyone using it. The plan (S-4.3)
+# anticipates this and accepts the captured 403/429 bodies in
+# test/cpp/test_errors.cpp as the assertion for that half. Documented in
+# docs/benchmark.md and the README as a known coverage gap -- stated, not
+# hidden.
+#
+# The STORAGE-quota half, though, is free to provoke and worth having: a
+# service account has NO Drive storage quota, so it cannot create a byte
+# outside a Shared Drive. Our fixture root is an ordinary folder, so this
+# write returns a real 403 storageQuotaExceeded from the live API. That makes
+# the whole path real -- Drive's body, our classifier, DuckDB's exception.
+#
+# Note the failure mode this guards: folder CREATION succeeds for a service
+# account (folders consume no quota), so the error only appears when the
+# first byte is written. It looks exactly like a permissions problem until
+# then, which is why the message must say "storage quota" and must NOT be
+# phrased as a retryable rate limit.
+require-env GDRIVE_CI_SA_KEY_FILE
+
+# Drop the delegated-user secret FIRST. With two gdrive secrets live, both
+# match every gdrive:// path and which one wins is DuckDB's scope-resolution
+# order, not ours -- the write could quietly succeed as the user and this
+# test would assert nothing. This block is last in the file for that reason.
+statement ok
+DROP SECRET gdrive_test;
+
+statement ok
+CREATE SECRET gdrive_sa_noquota (
+    TYPE gdrive,
+    PROVIDER service_account,
+    KEY_FILE '${SA_KEY_FILE}',
+    ROOT_FOLDER_ID '${DRIVE_ID}',
+    DRIVE_SCOPE 'https://www.googleapis.com/auth/drive'
+);
+
+# The expected text is deliberately specific. A bare "quota" would also match
+# a rate-limit message, which is the exact confusion R-2 exists to prevent --
+# the test would then pass on the failure it is meant to catch.
+statement error
+COPY (SELECT 1 AS a) TO 'gdrive://scratch/${SCRATCH}/sa-quota-probe.csv' (FORMAT csv);
+----
+Drive storage quota exceeded
+
+# ...and the cause is named, not just the symptom. A user hitting this needs
+# to be told to use a Shared Drive; "quota exceeded" alone sends them looking
+# at billing.
+statement error
+COPY (SELECT 2 AS a) TO 'gdrive://scratch/${SCRATCH}/sa-quota-probe-2.csv' (FORMAT csv);
+----
+service accounts do not have storage quota outside a Shared Drive

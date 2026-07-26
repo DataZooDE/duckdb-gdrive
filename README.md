@@ -154,6 +154,18 @@ can hit them, so the extension caches path resolution aggressively and reports
 a quota error explicitly rather than as a generic failure. `SELECT * FROM
 gdrive_stats()` shows the API calls and cache hits for the session.
 
+Storage-quota and rate-limit errors are deliberately **different messages**.
+Conflating them is the specific failure this guards against: a service account
+writing outside a Shared Drive gets a storage error that is not retryable and
+not about rate, and telling someone to "retry later" would waste their day.
+
+> **Known coverage gap.** The storage-quota path is asserted against the live
+> API. The **rate-limit** path is asserted only against captured 403/429
+> response bodies in `test/cpp/test_errors.cpp`, not live — exhausting Drive
+> API quota needs a throwaway Google project, and provoking it against a real
+> one degrades Drive for everyone on that account. Stating this rather than
+> letting the suite imply coverage it does not have.
+
 ## Development
 
 See `CLAUDE.md` for the build and test workflow, and
