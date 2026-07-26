@@ -429,10 +429,27 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 			if (ParseFileMeta(resp.body, fresh)) {
 				meta = fresh;
 			}
+		} else if (resp.error.kind == GDriveErrorKind::NOT_FOUND) {
+			// The cached id is DEAD -- another client deleted the file (and
+			// perhaps recreated one with the same name, which Drive gives a
+			// NEW id). Ignoring this, as we used to, opens a handle onto the
+			// dead id and every read then fails "not found" for a path that
+			// plainly exists, until the process restarts.
+			//
+			// Drop the stale entry and resolve the path again from scratch.
+			// Exactly once: if the second resolve also cannot find it, the
+			// file really is gone and that error is the honest answer.
+			CacheKey key;
+			key.secret_name = auth.secret_name;
+			key.drive_id = auth.drive_id;
+			key.root_folder_id = auth.root_folder_id;
+			key.canonical_path = CanonicalPathOf(parsed.uri);
+			cache.InvalidatePrefix(key);
+			meta = ResolvePath(cache, *client, auth, parsed.uri);
 		}
-		// A failed refresh does not fail the whole open -- fall back to what
-		// the resolver already found rather than failing a read the cache
-		// thought would succeed.
+		// Any OTHER refresh failure (a transient 5xx, a rate limit) does not
+		// fail the open: fall back to what the resolver already found rather
+		// than failing a read the cache thought would succeed.
 	}
 
 	auto handle = make_uniq<GDriveFileHandleImpl>(*this, path, flags, meta, auth);

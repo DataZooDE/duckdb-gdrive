@@ -17,8 +17,11 @@ nothing is worse than one that fails.*
 | # | Severity claimed | Verdict | Action |
 |---|---|---|---|
 | 1 | Critical — retries duplicate non-idempotent mutations | **Confirmed** | **Mitigated**; full fix needs resumable uploads |
+
+Six of seven are fixed. The seventh is mitigated, with the remaining work
+(resumable uploads) stated rather than quietly closed.
 | 2 | High — process-global token cache keyed by secret name | **Confirmed, demonstrated** | **Fixed** |
-| 3 | High — cached file id survives delete/recreate | **Confirmed, low impact** | Open, see below |
+| 3 | High — cached file id survives delete/recreate | **Confirmed, demonstrated** | **Fixed** |
 | 4 | High — ranged read accepts 200 and copies from byte 0 | **Confirmed, demonstrated** | **Fixed** |
 | 5 | Medium — handle cursor mutated by positional reads | **Confirmed** | **Fixed** |
 | 6 | Medium — `FileExists` turns ambiguity/auth errors into false | **Confirmed** | **Fixed** |
@@ -123,15 +126,25 @@ surfaces an error where it previously might have succeeded on the second
 attempt. That is the right trade when the alternative is an unaddressable
 path — but it is a trade, not a free win.
 
-### 3 — cached ids survive delete-and-recreate
+### 3 — cached ids survived delete-and-recreate — FIXED
 
-`OpenFile` refreshes metadata by cached file id and ignores a failure, so if
-another client deletes and recreates a file at the same path, reads fail
-against the dead id even though the path now exists.
+`OpenFile` refreshed metadata by cached file id and ignored the failure, so
+once another client deleted and recreated a file at the same path, reads kept
+using the dead id — for the life of the process.
 
-Real, but the impact is a clear "not found" error rather than wrong data, and
-the recovery is obvious. The fix — re-resolve the path when a metadata
-refresh 404s — is small and belongs with the cache-invalidation work.
+A 404 on that refresh now invalidates the cached prefix and re-resolves the
+path exactly once. Any *other* refresh failure (a transient 5xx, a rate limit)
+still falls back to what the resolver found, rather than failing a read the
+cache thought would succeed.
+
+Covered by `e2e/tests/test_stale_cache.py`, which needs all three of a warm
+cache in a live process, a mutation performed **outside** that process, and a
+second read from it — the middle step is why this lives in the e2e layer and
+not in SQLLogicTest. Verified by reverting the fix, where it produces exactly
+the predicted symptom:
+
+    IO Error: no such file: gdrive://scratch/.../stale.csv
+              (File not found: 1l9wRa3uSzlOSUGIudPv4PrwrbMR7G16_.)
 
 ### 6 — `FileExists` swallowed ambiguity and auth failures — FIXED
 

@@ -13,6 +13,7 @@ import atexit
 import base64
 import json
 import os
+import time
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -242,9 +243,46 @@ class Drive:
         # named neither the file nor the size. Callers moving bulk bytes pass
         # their own budget; see upload().
         timeout = kw.pop("timeout", 60)
-        resp = requests.request(method, url, headers=headers, params=params,
-                                timeout=timeout, **kw)
-        return resp
+
+        # Bounded retry. Talking to a real API over the public internet
+        # without one makes CI flaky by construction: a GitHub runner saw
+        # `ConnectionResetError(104)` mid-run and failed two tests that had
+        # nothing wrong with them.
+        #
+        # WHAT is retried follows the same reasoning as the extension's own
+        # client (see IsIdempotent in src/gdrive_client.cpp):
+        #
+        #   * 429 / 503 -- retry ANY method. The request was rejected, so
+        #     there is no half-applied side effect to duplicate.
+        #   * transport error or 5xx -- retry only GET and DELETE. A dropped
+        #     connection is ambiguous: the request may have been applied and
+        #     only the response lost, so replaying a POST can create a second
+        #     file. Drive lets two files share a name, which makes such a
+        #     duplicate genuinely hard to clean up.
+        idempotent = method.upper() in ("GET", "DELETE", "HEAD")
+        attempts = 4
+        last_exc = None
+        for attempt in range(attempts):
+            if attempt:
+                # 0.5s, 1s, 2s. Jitter is unnecessary here -- one client.
+                time.sleep(0.5 * (2 ** (attempt - 1)))
+            try:
+                resp = requests.request(method, url, headers=headers, params=params,
+                                        timeout=timeout, **kw)
+            except requests.exceptions.RequestException as e:
+                last_exc = e
+                if idempotent and attempt < attempts - 1:
+                    self.calls[kind] = self.calls.get(kind, 0) + 1
+                    continue
+                raise
+            if resp.status_code in (429, 503) and attempt < attempts - 1:
+                self.calls[kind] = self.calls.get(kind, 0) + 1
+                continue
+            if resp.status_code >= 500 and idempotent and attempt < attempts - 1:
+                self.calls[kind] = self.calls.get(kind, 0) + 1
+                continue
+            return resp
+        raise last_exc if last_exc else RuntimeError("unreachable")
 
     @staticmethod
     def _transfer_timeout(nbytes: int) -> int:

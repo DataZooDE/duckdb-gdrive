@@ -121,9 +121,35 @@ install(
 # because that port was not built with the atomics/bulk-memory features
 # --shared-memory requires. The extension itself is a shared library and links
 # fine. (Lesson inherited from ../quack-oauth.)
+#
+# Skipped on MSVC by default for a related reason. On the LTS Windows job's
+# `x64-windows-static-md-*-vs2019comp` triplet, vcpkg builds Catch2 against
+# the DYNAMIC CRT while DuckDB compiles our sources against the STATIC one:
+#
+#   Catch2.lib(catch_stringref.cpp.obj): error LNK2038: mismatch detected for
+#   'RuntimeLibrary': value 'MD_DynamicRelease' doesn't match value
+#   'MT_StaticRelease' in gdrive_errors.cpp.obj
+#
+# The EXTENSION links cleanly there; only this test executable does not. And
+# it is a test binary, not a shipped artifact -- failing a release build over
+# it is backwards. What it covers is pure logic (URI parsing, glob matching,
+# error classification, JWT claim construction) with no platform-dependent
+# behaviour whatsoever, so running it on Linux and macOS is real coverage,
+# not a compromise.
+#
+# Opt back in with -DGDRIVE_BUILD_UNIT_TESTS=ON if you are working on the
+# pure layer from Windows and have a matching Catch2.
 # ---------------------------------------------------------------------------
+if(MSVC)
+  set(GDRIVE_BUILD_UNIT_TESTS_DEFAULT OFF)
+else()
+  set(GDRIVE_BUILD_UNIT_TESTS_DEFAULT ON)
+endif()
+option(GDRIVE_BUILD_UNIT_TESTS "Build the Catch2 pure-logic test binary"
+       ${GDRIVE_BUILD_UNIT_TESTS_DEFAULT})
+
 find_package(Catch2 3 CONFIG QUIET)
-if(Catch2_FOUND AND NOT EMSCRIPTEN)
+if(Catch2_FOUND AND NOT EMSCRIPTEN AND GDRIVE_BUILD_UNIT_TESTS)
   file(GLOB GDRIVE_UNIT_TEST_SOURCES CONFIGURE_DEPENDS test/cpp/test_*.cpp)
   if(GDRIVE_UNIT_TEST_SOURCES)
     add_executable(gdrive_unit_tests

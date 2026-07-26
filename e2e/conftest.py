@@ -129,6 +129,30 @@ def scratch(writer: Drive):
 
 
 @pytest.fixture(scope="session")
+def gdrive_secret_sql() -> str:
+    """CREATE SECRET for a delegated user, as SQL.
+
+    The delegated user rather than the service account because tests using
+    this may write, and a service account has no Drive storage quota outside
+    a Shared Drive. Values come from the environment and are never written to
+    anything git tracks.
+    """
+    needed = ("GDRIVE_OAUTH_CLIENT_ID", "GDRIVE_OAUTH_CLIENT_SECRET",
+              "GDRIVE_USER_REFRESH_TOKEN", "GDRIVE_CI_DRIVE_ID")
+    missing = [n for n in needed if not os.environ.get(n)]
+    if missing:
+        pytest.skip(f"missing {', '.join(missing)}; run `make oauth_consent`")
+    return (
+        "CREATE SECRET gdrive_e2e (TYPE gdrive, PROVIDER config, "
+        f"CLIENT_ID '{os.environ['GDRIVE_OAUTH_CLIENT_ID']}', "
+        f"CLIENT_SECRET '{os.environ['GDRIVE_OAUTH_CLIENT_SECRET']}', "
+        f"REFRESH_TOKEN '{os.environ['GDRIVE_USER_REFRESH_TOKEN']}', "
+        f"ROOT_FOLDER_ID '{os.environ['GDRIVE_CI_DRIVE_ID']}', "
+        "DRIVE_SCOPE 'https://www.googleapis.com/auth/drive');"
+    )
+
+
+@pytest.fixture(scope="session")
 def duckdb_cli() -> Path:
     """The built duckdb shell with the extension statically linked."""
     exe = REPO_ROOT / "build" / "release" / "duckdb"
