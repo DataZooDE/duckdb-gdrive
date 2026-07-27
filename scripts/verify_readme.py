@@ -194,6 +194,39 @@ def main() -> int:
                 "error; the secret simply\n      matches nothing. The OAuth scope belongs in "
                 "DRIVE_SCOPE.")
 
+    # --- the PROVIDER table ---------------------------------------------------
+    #
+    # This is prose, not SQL, so nothing above sees it -- and that is exactly
+    # how the README came to advertise `authorization_code`, a provider that
+    # is not registered and errors on use. A feature table is a promise; check
+    # it like one.
+    provider_rows = re.findall(r"^\|\s*`([a-z_]+)`\s*\|", text, re.MULTILINE)
+    if provider_rows:
+        rc, out = run_sql(
+            "SELECT DISTINCT provider FROM duckdb_secret_types() WHERE type = 'gdrive'"
+        )
+        registered = set(out.splitlines()) if rc == 0 else set()
+        # Fall back to probing when the introspection view is unavailable:
+        # a provider that does not exist fails to bind, which is decisive.
+        for prov in sorted(set(provider_rows)):
+            if registered:
+                ok = prov in registered
+            else:
+                # A REGISTERED provider fails on missing parameters
+                # ("needs KEY_FILE"); an UNREGISTERED one fails with
+                # "Secret provider 'x' not found for type 'gdrive'". The
+                # second phrase is the discriminator -- matched exactly,
+                # because guessing at the wording is how the first version
+                # of this check passed on the very input it was written for.
+                prc, pout = run_sql(
+                    f"CREATE OR REPLACE SECRET probe (TYPE gdrive, PROVIDER {prov});")
+                ok = "not found for type" not in pout.lower()
+            if not ok:
+                failures.append(
+                    f"README's provider table lists `{prov}`, but it is not a "
+                    f"registered gdrive secret provider -- using it is an error")
+        print(f"    providers: {', '.join(sorted(set(provider_rows)))}")
+
     # --- settings named ANYWHERE in the README, prose included ---------------
     #
     # `SET gdrive_docs_export_mime=...` appears as inline code in a

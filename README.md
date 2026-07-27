@@ -105,7 +105,17 @@ extension fails and names both file ids so you can use the `id:` form.
 |---|---|
 | `service_account` | unattended: servers, CI, scheduled jobs |
 | `config` | you already hold an access/refresh token |
-| `authorization_code` | interactive browser consent |
+
+`config` covers the interactive case today: obtain a refresh token once (any
+OAuth2 client will do — see `scripts/oauth_consent.py` for a working example)
+and hand it to the secret, which refreshes access tokens itself.
+
+> **No `authorization_code` provider yet.** An in-process browser consent flow
+> is designed (`docs/hld.md` §5) and the machinery exists in the
+> `datazoo-oauth2` library, but it is **not registered**, so `PROVIDER
+> authorization_code` is an error. It was listed here before it existed; that
+> was a documentation bug, and `make verify_readme` now checks this table
+> against the providers actually registered.
 
 **A service account needs a Shared Drive to write.** Service accounts have no
 personal Drive storage quota, so they cannot own files in a My Drive — Google

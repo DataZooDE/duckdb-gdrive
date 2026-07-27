@@ -161,6 +161,24 @@ using it. Now they do: only not-found becomes `false`.
 Verified live: an absent path still returns cleanly, while
 `gdrive://fixtures/dup/dup.csv` raises naming both file ids.
 
+## Known coverage gap: positional writes
+
+The README says a positional write "raises an error rather than silently
+corrupting the file". The guard exists in `GDriveFileSystem::Write(handle,
+buffer, nr_bytes, location)` and throws, but **no test reaches it**, because
+nothing in SQL does a positional write:
+
+* `COPY ... TO` is sequential by construction.
+* `ATTACH 'gdrive://.../db.duckdb'` does not route to this filesystem at all
+  — DuckDB normalises the path and fails earlier with
+  `Cannot open file "gdrive:/..."`. Which is fine for users (the README
+  already says not to put a database file on Drive) but means it cannot be
+  used to exercise the guard.
+
+Recorded rather than left implied. Closing it needs a DuckDB-linked C++ test,
+which the Catch2 binary cannot host — that binary is pure-only by policy
+(`docs/implementation-plan.md` §1) precisely so it needs no mocks.
+
 ## Not expressible yet
 
 The reference suites (`duckdb-azure`) assert credential redaction at the

@@ -147,3 +147,51 @@ statement error
 SELECT * FROM read_csv('gdrive://fixtures/dup/dup.csv')
 ----
 id:
+
+# ---------------------------------------------------------------------------
+# REQ-F-07 / D-7 -- `gdrive_docs_export_mime` actually changes the export.
+#
+# The README documents `SET gdrive_docs_export_mime='text/markdown'`. The
+# SETTING was registered and verified to exist, but nothing checked that it
+# does anything -- a registered no-op reads exactly like a working feature.
+#
+# Google's two export formats for a Doc are observably different, which makes
+# this a real assertion rather than a smoke test:
+#   text/plain     -> begins with a UTF-8 BOM, no hard line breaks
+#   text/markdown  -> no BOM, and "  \n" hard breaks
+# If the setting were ignored, BOTH markdown assertions below would fail.
+# ---------------------------------------------------------------------------
+query I
+SELECT starts_with(content, chr(65279)) FROM read_text('gdrive://fixtures/Notes')
+----
+true
+
+query I
+SELECT contains(content, '  ' || chr(10)) FROM read_text('gdrive://fixtures/Notes')
+----
+false
+
+statement ok
+SET gdrive_docs_export_mime='text/markdown';
+
+query I
+SELECT starts_with(content, chr(65279)) FROM read_text('gdrive://fixtures/Notes')
+----
+false
+
+query I
+SELECT contains(content, '  ' || chr(10)) FROM read_text('gdrive://fixtures/Notes')
+----
+true
+
+# The Doc's actual text survives either way -- the format changes, not the
+# content.
+query I
+SELECT contains(content, 'This is a Google Doc fixture.') FROM read_text('gdrive://fixtures/Notes')
+----
+true
+
+# Leave the connection as we found it: this setting is global and a later
+# test reading a Doc would otherwise inherit it.
+statement ok
+RESET gdrive_docs_export_mime;

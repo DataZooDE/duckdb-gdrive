@@ -109,15 +109,28 @@ SELECT count(*) FROM glob('gdrive://scratch/${SCRATCH}/out.csv')
 1
 
 # ---------------------------------------------------------------------------
-# S-3.10 -- RemoveFile trashes by default (D-6). Trash is recoverable; a
-# table-format cleanup routine hard-deleting the wrong thing on a user's own
-# Drive is not.
+# S-3.10 -- deletion semantics (D-6) are tested in
+# e2e/tests/test_delete_semantics.py, NOT here.
+#
+# This block used to be titled "RemoveFile trashes by default", create a file
+# called doomed.csv, assert it existed, and delete nothing. A test named for
+# a behaviour it does not exercise is worse than no test: it makes the
+# coverage report lie, and it did for as long as it existed.
+#
+# It cannot be done in SQL for two reasons: there is no SQL function that
+# removes a file (RemoveFile is reached through DuckDB internals -- in
+# practice by OVERWRITING a path), and "trashed" versus "permanently gone" is
+# invisible from SQL because both look like absence. Only Drive's own
+# metadata distinguishes them, which needs the harness.
+#
+# What remains here is the plain fact that a written file is visible, which
+# is worth asserting and is all this ever actually asserted.
 # ---------------------------------------------------------------------------
 statement ok
-COPY (SELECT 1 AS a) TO 'gdrive://scratch/${SCRATCH}/doomed.csv' (FORMAT csv);
+COPY (SELECT 1 AS a) TO 'gdrive://scratch/${SCRATCH}/written.csv' (FORMAT csv);
 
 query I
-SELECT count(*) FROM glob('gdrive://scratch/${SCRATCH}/doomed.csv')
+SELECT count(*) FROM glob('gdrive://scratch/${SCRATCH}/written.csv')
 ----
 1
 
