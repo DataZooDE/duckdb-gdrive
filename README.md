@@ -68,7 +68,8 @@ for an occasionally-queried lakehouse. It does not make Drive fast — see
 ## Status
 
 Early, but read *and* write are real. **Verified against a live Google Drive
-account** (102 assertions across four live suites, plus 860 pure-logic ones):
+account** (139 assertions across five live suites, 13 e2e, plus 860
+pure-logic ones):
 
 - reads by file id and by path, multi-segment resolution, UTF-8 and spaced
   names, ranged Parquet reads, globbing, listing past Drive's 100-item page
@@ -79,10 +80,9 @@ account** (102 assertions across four live suites, plus 860 pure-logic ones):
   and the same file over `gdrive://`;
 - **DuckLake** end to end, including deletes and time travel.
 
-**Not yet verified: the performance target.** The `gdrive://` and local
-benchmark legs are measured, but the 3×-GCS gate has no GCS denominator yet,
-so REQ-NF-01 is unproven — see `docs/benchmark.md`, which says so plainly
-rather than quoting the half of the result that looks good.
+**The performance target is missed.** Measured end to end against GCS:
+**4.8×** where the goal is 3×. Not a marginal miss, and the cause is known —
+55 Drive round trips per query. See `docs/benchmark.md`.
 
 Not production-ready. `docs/implementation-plan.md` lists exactly what is
 verified and what is not.
@@ -220,9 +220,22 @@ Being direct, because the alternatives are often better:
 
 ## Performance and quota
 
-Expect a bounded, stated penalty rather than parity — the target is a cold
-columnar scan within **3×** the same file on object storage. Reads are ranged,
-so a Parquet scan fetches footers and column chunks rather than whole files.
+Reads are ranged, so a Parquet scan fetches footers and column chunks rather
+than whole files.
+
+> **The performance target is currently MISSED.** The goal is a cold columnar
+> scan within **3×** the same file on object storage. Measured on an 87 MB
+> Parquet: local 0.14 s, GCS 1.30 s, `gdrive://` 6.21 s — **4.8×**, not 3×.
+>
+> The cause is measured rather than assumed: one such query costs **55 Drive
+> round trips** (35 data, 18 metadata, 2 path resolution). At Drive's ~150 ms
+> per round trip that latency *is* the runtime. Two fixes are identified —
+> coalescing adjacent range requests, and eliminating redundant per-open
+> metadata calls — and neither is done yet. `docs/benchmark.md` has the
+> numbers and the reasoning.
+>
+> Budget accordingly: Drive is currently ~45× a local file and ~5× object
+> storage for a cold scan.
 
 Drive enforces per-user API quotas. A query that looks unremarkable against S3
 can hit them, so the extension caches path resolution aggressively and reports

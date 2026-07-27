@@ -77,10 +77,12 @@ Do not submit while any of these is open. The first two are honesty
 obligations: the descriptor's `extended_description` makes claims, and a
 reviewer will test them.
 
-- **REQ-NF-01 is unproven.** `make bench` measures `gdrive://` and local but
-  exits non-zero with the 3× gate **NOT EVALUATED**, because there is no GCS
-  denominator. Either produce one (see `docs/benchmark.md` → *What is
-  missing*) or remove the performance claim from the description.
+- **REQ-NF-01 FAILS.** Measured 2026-07-27 against GCS: **4.8×**, where the
+  gate is 3×. Not marginal, and the cause is known — 55 Drive round trips per
+  query, of which 18 are redundant metadata calls. Either fix it (coalesce
+  ranges, drop the per-open metadata refresh) or **remove the performance
+  claim from `extended_description` before submitting**. Do not ship a
+  description that implies a target the benchmark says is missed.
 - **Retries can duplicate a create.** Mitigated — writes are no longer
   retried after an ambiguous transport failure — but the real fix is Drive's
   resumable upload protocol. See

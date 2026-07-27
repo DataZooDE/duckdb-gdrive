@@ -3,10 +3,12 @@
 **Gate:** a cold columnar scan over `gdrive://` completes within **3×** the
 same file on Google Cloud Storage.
 
-**Status: the gate is NOT YET EVALUATED.** The `gdrive://` and local legs are
-measured and reproducible; the `gs://` denominator is missing because no
-bucket is provisioned. See *What is missing* below. Reproduce with `make
-bench`; raw numbers land in `docs/benchmark.json`.
+**Status: EVALUATED, and the gate FAILS at 4.8x–5.7x.** REQ-NF-01 is not
+met. The cause is measured, not guessed — 55 Drive round trips for one query
+— and the fix is fewer of them, not a softer gate. See *Diagnosis*.
+
+Reproduce with `make bench` (needs `GDRIVE_BENCH_GCS_URI`); raw numbers land
+in `docs/benchmark.json`.
 
 ## Method
 
@@ -41,58 +43,81 @@ time and "pass".
 
 ## Results
 
-Measured 2026-07-26. Linux 6.18, **DuckDB v1.5.5**, extension statically
-linked. Fixture: `/fixtures/wide.parquet` (87.0 MB), file id
-`17AVQ4WlKaPE3hFxpuoljHLpe3nXI0qsQ`.
+Measured 2026-07-27. Linux 6.18, **DuckDB v1.5.5**, extension statically
+linked. Fixture: `/fixtures/wide.parquet` (87.0 MB), the identical bytes in
+all three legs.
 
 | Leg | min | median | vs local |
 |---|---|---|---|
-| `local` | 0.13 s | 0.13 s | 1.0× |
-| `gs://` | *not measured* | — | — |
-| `gdrive://` | 5.90 s | 5.97 s | 45× |
+| `local` | 0.14 s | 0.14 s | 1.0x |
+| `gs` (GCS) | 1.30 s | 1.39 s | 9.5x |
+| `gdrive` | 6.21 s | 6.77 s | 45.4x |
 
-**gdrive/GCS ratio: not computable yet.**
+## **gdrive / GCS = 4.79x — the 3x gate FAILS**
 
-### Reading these numbers
+Two independent runs gave 5.68x and 4.79x. This is not a marginal miss and
+not sampling noise: even taking the fastest `gdrive` minimum ever recorded
+(4.43 s, before this fixture was re-generated) against the slowest `gs`
+minimum (1.30 s), the ratio is 3.4x.
 
-The local leg is the floor: it isolates decode cost from transfer cost. At
-0.13 s for 87 MB, decode is effectively free here, so essentially all of the
-`gdrive` leg's 5.90 s is network — transfer plus per-request latency. That
-matters for the gate, because GCS pays transfer cost too. The honest
-comparison is Drive's round-trip overhead against GCS's, not against zero, and
-the local number is what lets those be separated once the `gs://` leg exists.
+**REQ-NF-01 is therefore NOT MET, and BRD success criterion 2 is not met.**
 
-**Do not read the `gdrive` figure as stable.** Across runs of this identical
-benchmark on the same machine and file we have seen:
+### Method note
 
-| Run | samples |
+The GCS leg reads the object over `https://storage.googleapis.com/...`
+rather than `gs://`. DuckDB's `gcs` secret type supports HMAC keys only, and
+creating a long-lived credential (or making a bucket permanently public) for
+a benchmark was not a reasonable trade. It is the same GCS backend, the same
+bytes and the same network path, so it measures what the gate asks about.
+The bucket was deleted immediately after measurement.
+
+## Diagnosis
+
+The same query through this extension issues **55 Drive API round trips**:
+
+| Call | Count |
 |---|---|
-| earlier | 4.59 s, 4.43 s, **15.43 s** |
-| earlier | 4.72 s, 4.57 s, 4.65 s |
-| reported above | 5.90 s, 6.03 s, 5.97 s |
+| `files.get` (metadata) | 18 |
+| `files.list` (path resolution) | 2 |
+| `files.get?alt=media` (data) | 35 |
 
-The spread between runs (4.43 s to 5.90 s minimum, one outlier at 15.43 s) is
-larger than any code change we have made, and nothing on our side differed.
-Drive's per-request latency simply varies. This is why the harness reports a
-minimum over repeats, why the local leg exists as a control, and why the gate
-must be a ratio measured in the same session as its denominator rather than
-against a number written down on a different day. A single figure here would
-be a marketing number, not a measurement.
+At Drive's ~150 ms per round trip that is roughly 8 s of pure latency, which
+is essentially the whole measurement. GCS moves the same bytes in ~1.2 s.
 
-## What is missing
+Two things stand out, and neither is "Drive is slow":
 
-The `gs://` leg needs the same Parquet file in a GCS bucket, and
-`GDRIVE_BENCH_GCS_URI` pointing at it:
+1. **18 metadata calls for one file.** A single scan should need one. This
+   looks like a per-open metadata refresh multiplied by however many times
+   DuckDB opens the handle for a parallel scan. Almost certainly avoidable.
+2. **35 data requests, uncoalesced.** Adjacent or near-adjacent column
+   chunks are fetched as separate ranged GETs. Coalescing them trades a
+   little wasted bandwidth for a large latency saving — the right trade when
+   a round trip costs 150 ms.
+
+Plan section S-4.2 anticipated exactly this: *"If it misses, the fix is fewer
+round trips (prefetch/coalesce adjacent ranges), not a relaxed gate."* That
+remains the correct response. The gate stays at 3x.
+
+## Reproducing
+
+The `gs://` leg needs the same Parquet file readable by DuckDB. Note that
+DuckDB's `gcs` secret type supports HMAC keys only — there is no credential
+chain — so either create an HMAC key, or (as here) put the object behind a
+public HTTPS URL in a throwaway bucket and delete it afterwards:
 
 ```bash
 gcloud storage buckets create gs://<bucket> --location=EU
 gcloud storage cp wide.parquet gs://<bucket>/wide.parquet
-GDRIVE_BENCH_GCS_URI=gs://<bucket>/wide.parquet make bench
+gcloud storage buckets add-iam-policy-binding gs://<bucket> \
+    --member=allUsers --role=roles/storage.objectViewer
+GDRIVE_BENCH_GCS_URI=https://storage.googleapis.com/<bucket>/wide.parquet make bench
+gcloud storage rm -r gs://<bucket>          # do not leave it public
 ```
 
-`make bench` exits **non-zero** when the leg is absent. A benchmark that
-silently omits its own denominator and prints a green line is worse than no
-benchmark, so "not evaluated" is a failure state here, not a footnote.
+`make bench` exits **non-zero** both when the leg is absent and when the gate
+is missed. A benchmark that omits its own denominator and prints a green line
+is worse than no benchmark, so "not evaluated" is a failure state here, not a
+footnote.
 
 ## If the gate is missed
 
