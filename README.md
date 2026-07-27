@@ -147,9 +147,20 @@ nothing of the sort.
 > `gdrive://` path does — so the secret matches nothing and every query fails
 > with "no secret configured". The OAuth scope goes in `DRIVE_SCOPE`.
 
-Scopes default to the narrowest that works (`drive.readonly`). Tokens live in
-memory or in DuckDB secrets, are never written to disk by this extension, and
-never appear in an error message.
+Omitting `DRIVE_SCOPE` requests the narrowest scope that works,
+`drive.readonly`. **How much that protects you depends on the provider**, and
+the difference is not ours to fix:
+
+| Provider | Effect of the default |
+|---|---|
+| `service_account` | **Enforced.** The scope is a claim in the signed assertion, so Google refuses a write with *"Request had insufficient authentication scopes"* — tested. |
+| `config` | **Advisory.** A refresh-token exchange returns an access token carrying the scopes granted at *consent* time; asking for a narrower one does not narrow it. If the token was consented for full Drive access, it keeps it. |
+
+So with `config`, restrict at consent time — `DRIVE_SCOPE` cannot claw back
+access that the refresh token already carries.
+
+Tokens live in memory or in DuckDB secrets, are never written to disk by this
+extension, and never appear in an error message.
 
 ## Native Google formats
 

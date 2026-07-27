@@ -177,6 +177,42 @@ require-env GDRIVE_CI_SA_KEY_FILE
 statement ok
 DROP SECRET gdrive_test;
 
+# ---------------------------------------------------------------------------
+# REQ-NF-04 -- least privilege BY DEFAULT, and proof that it is enforced
+# rather than decorative.
+#
+# Omitting DRIVE_SCOPE must request drive.readonly. For a service account
+# that is testable end to end, because the scope claim in the RFC 7523
+# assertion is enforced by Google: a write with the default scope is refused
+# for INSUFFICIENT SCOPES, before quota is ever considered.
+#
+# The contrast immediately below is what makes this meaningful. The same
+# write, from the same identity, with an explicit full scope, gets a
+# DIFFERENT error -- storage quota. If the default were silently full access,
+# both would report quota and this test would prove nothing.
+# ---------------------------------------------------------------------------
+statement ok
+CREATE OR REPLACE SECRET gdrive_sa_default_scope (
+    TYPE gdrive,
+    PROVIDER service_account,
+    KEY_FILE '${SA_KEY_FILE}',
+    ROOT_FOLDER_ID '${DRIVE_ID}'
+);
+
+# Reading is what drive.readonly is for, so this must still work.
+query I
+SELECT count(*) FROM read_csv('gdrive://fixtures/small.csv')
+----
+5
+
+statement error
+COPY (SELECT 1 AS a) TO 'gdrive://scratch/${SCRATCH}/default-scope.csv' (FORMAT csv);
+----
+insufficient authentication scopes
+
+statement ok
+DROP SECRET gdrive_sa_default_scope;
+
 statement ok
 CREATE SECRET gdrive_sa_noquota (
     TYPE gdrive,
