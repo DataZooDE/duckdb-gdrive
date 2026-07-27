@@ -21,7 +21,13 @@ SELECT count(*) FROM 'gdrive://Finance/2026/actuals.parquet';
 
 Because DuckDB dispatches all file access through its virtual filesystem,
 anything built on that layer inherits the scheme for free — `read_parquet`,
-`read_csv`, `COPY`, `glob`, `ATTACH`, and table formats such as DuckLake.
+`read_csv`, `COPY`, `glob`, and table formats such as DuckLake.
+
+`ATTACH` is the exception, in both directions. Attaching a **DuckLake** whose
+`DATA_PATH` is on Drive works and is tested. Attaching a **DuckDB database
+file** on `gdrive://` does not — DuckDB's storage manager needs atomic
+renames and byte-offset writes, and Drive offers neither, so the attempt
+fails early rather than corrupting anything.
 
 ## DuckLake on Drive
 

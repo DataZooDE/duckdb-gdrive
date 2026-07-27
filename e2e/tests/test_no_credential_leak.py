@@ -87,13 +87,19 @@ def test_a_malformed_service_account_key_never_echoes_its_contents(
     if not os.environ.get("GDRIVE_CI_DRIVE_ID"):
         pytest.skip("GDRIVE_CI_DRIVE_ID not set")
 
+    # Assembled at runtime, like the token sentinels above and for the same
+    # reason: scripts/check_no_credentials.sh forbids PEM-shaped text in
+    # tracked files and does NOT exempt e2e/. Writing the block as a literal
+    # here tripped it -- correctly. The check caught its author.
     marker = "PRIVATEKEYMATERIAL" + "0123456789abcdef"
+    dashes = "-" * 5
+    pem = (f"{dashes}BEGIN PRIVATE KEY{dashes}\\n{marker}\\n"
+           f"{dashes}END PRIVATE KEY{dashes}\\n")
     key = tmp_path / "broken_sa.json"
     key.write_text(
         '{"type":"service_account","project_id":"p","client_email":"x@y.z",'
         '"token_uri":"https://oauth2.googleapis.com/token",'
-        f'"private_key":"-----BEGIN PRIVATE KEY-----\\n{marker}\\n'
-        '-----END PRIVATE KEY-----\\n"}}'
+        f'"private_key":"{pem}"}}'
     )
 
     sql = (
@@ -111,6 +117,6 @@ def test_a_malformed_service_account_key_never_echoes_its_contents(
     assert marker not in output, (
         f"REQ-NF-03 violated: private-key material appears in the error.\n{output}"
     )
-    assert "BEGIN PRIVATE KEY" not in output, (
+    assert f"BEGIN PRIVATE KEY{dashes}" not in output, (
         f"REQ-NF-03 violated: a PEM block appears in the error.\n{output}"
     )

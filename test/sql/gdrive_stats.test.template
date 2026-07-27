@@ -110,3 +110,49 @@ query I
 SELECT value FROM gdrive_stats() WHERE metric = 'files_list'
 ----
 0
+
+# ---------------------------------------------------------------------------
+# REQ-NF-01 premise -- reads are RANGED, not whole-file.
+#
+# The README says "Reads are ranged, so a Parquet scan fetches footers and
+# column chunks rather than whole files". That is the reason a 87 MB fixture
+# can be counted in well under a second, and it was untested.
+#
+# The discriminator is the SHAPE of the traffic, not the timing:
+#
+#   count(*)            -> the Parquet footer alone answers it   -> 1 call
+#   scan of one column  -> footer plus that column's chunks      -> many calls
+#
+# If the implementation ever degraded to downloading whole files, BOTH would
+# be exactly 1 -- so asserting that the column scan issues more than one call
+# is what makes this meaningful. An assertion of "fast enough" would not be:
+# it would pass on a whole-file download over a good connection.
+# ---------------------------------------------------------------------------
+statement ok
+CALL gdrive_reset_stats();
+
+query I
+SELECT count(*) FROM read_parquet('gdrive://fixtures/wide.parquet')
+----
+2000000
+
+# The footer answers count(*). One ranged GET, not 87 MB.
+query I
+SELECT value FROM gdrive_stats() WHERE metric = 'files_media'
+----
+1
+
+statement ok
+CALL gdrive_reset_stats();
+
+query I
+SELECT count(DISTINCT s1) FROM read_parquet('gdrive://fixtures/wide.parquet')
+----
+2000000
+
+# Reading actual column data takes several ranged requests -- the column's
+# chunks. A whole-file implementation would report 1 here.
+query I
+SELECT value > 1 FROM gdrive_stats() WHERE metric = 'files_media'
+----
+true

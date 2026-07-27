@@ -172,6 +172,24 @@ if ! self_test; then
     exit 1
 fi
 
+# Tracked files PLUS untracked-but-not-ignored ones.
+#
+# `git ls-files` alone sees only the index, so a brand-new file is invisible
+# until `git add`. The natural workflow -- run the check, then add, then
+# commit -- therefore skipped exactly the files most likely to contain a
+# freshly pasted credential. That is not hypothetical: a PEM-shaped literal
+# in a new test file passed this check and reached a push, and was only
+# caught on the NEXT run once the file was tracked.
+#
+# --exclude-standard keeps .gitignore honoured, so .env.gdrive and build
+# output stay out.
+scannable_files() {
+    {
+        git ls-files
+        git ls-files --others --exclude-standard
+    } | sort -u
+}
+
 while IFS= read -r f; do
     case "$f" in
         *.example|scripts/check_no_credentials.sh) continue ;;
@@ -200,7 +218,7 @@ while IFS= read -r f; do
             fail=1
         fi
     done
-done < <(git ls-files)
+done < <(scannable_files)
 
 if [[ $fail -ne 0 ]]; then
     echo "" >&2
