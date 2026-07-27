@@ -17,6 +17,9 @@
 #include "gdrive_client.hpp"
 #include "gdrive_errors.hpp"
 #include "gdrive_filesystem.hpp"
+
+#include <mutex>
+#include <string>
 #include "gdrive_stats.hpp"
 #include "gdrive_uri.hpp"
 
@@ -58,6 +61,7 @@ std::string JoinGDrivePath(const std::string &parent_path, const std::string &na
 //! through the FileOpener, falling back to `default_value` when unset or when
 //! there is no opener at all (e.g. a handle-less internal call).
 bool GetBoolSetting(optional_ptr<FileOpener> opener, const std::string &name, bool default_value);
+uint64_t GetUBigIntSetting(optional_ptr<FileOpener> opener, const std::string &name, uint64_t default_value);
 std::string GetStringSetting(optional_ptr<FileOpener> opener, const std::string &name,
                               const std::string &default_value);
 
@@ -81,6 +85,7 @@ public:
 	}
 
 	GDriveAuthContext auth_context;
+
 };
 
 //! The bare, scheme-free, segment-joined path a GDriveUri denotes -- the same

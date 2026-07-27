@@ -68,6 +68,17 @@ bool GetBoolSetting(optional_ptr<FileOpener> opener, const std::string &name, bo
 	return default_value;
 }
 
+uint64_t GetUBigIntSetting(optional_ptr<FileOpener> opener, const std::string &name, uint64_t default_value) {
+	if (!opener) {
+		return default_value;
+	}
+	Value value;
+	if (FileOpener::TryGetCurrentSetting(opener, name, value)) {
+		return value.GetValue<uint64_t>();
+	}
+	return default_value;
+}
+
 std::string GetStringSetting(optional_ptr<FileOpener> opener, const std::string &name,
                               const std::string &default_value) {
 	if (!opener) {
@@ -580,6 +591,7 @@ void GDriveFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, 
 	auto client = CreateGDriveClient(h.auth_context);
 	// Inclusive end, as HTTP Range and Drive both define it.
 	int64_t end = static_cast<int64_t>(location) + nr_bytes - 1;
+
 	auto resp = client->Download(h.meta.id, static_cast<int64_t>(location), end);
 	if (!resp.ok && resp.error.kind == GDriveErrorKind::NOT_FOUND && TryRecoverStaleHandle(h)) {
 		// The path still exists, under a new id. Retry ONCE against it: a
@@ -619,6 +631,7 @@ void GDriveFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, 
 		                  static_cast<unsigned long long>(avail));
 	}
 	memcpy(buffer, src, static_cast<size_t>(nr_bytes));
+
 
 	// Deliberately does NOT advance h.position.
 	//

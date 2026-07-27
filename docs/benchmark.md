@@ -125,3 +125,74 @@ Per plan §S-4.2 the fix is **fewer round trips** — prefetching and coalescing
 adjacent byte ranges so a Parquet scan issues fewer, larger requests — not a
 relaxed gate. Drive's per-request latency (~150 ms) dominates, so request
 count is the lever that matters.
+
+## Where the time actually goes (measured 2026-07-27)
+
+The first diagnosis above — "55 round trips at ~150 ms" — was directionally
+right and quantitatively wrong. Measuring properly changed the conclusion.
+
+### Drive's media endpoint has a ~1.2 s floor per request
+
+On a warm keep-alive connection, timed with `requests.Session`:
+
+| Request | Time |
+|---|---|
+| 1 KB | 1.21 s |
+| 1 KB (second) | 1.37 s |
+| 1 MB | 1.03 s |
+| 4 MB | 1.42 s |
+| 16 MB | 1.60 s |
+| **87 MB (whole file)** | **2.06 s** |
+
+A 1 KB read costs about as much as a 1 MB read. The marginal transfer rate is
+roughly 160 MB/s; the fixed cost is ~1.0–1.2 s and dominates everything below
+about 100 MB. This is Drive-side, not ours: it is the same on a warm socket
+with no handshake.
+
+**The consequence is counterintuitive and it drives the design: on Drive,
+fetching MORE data in FEWER requests is faster.** One 87 MB request (2.06 s)
+beats 35 ranged requests totalling 54.9 MB (4.94 s) by 2.4x.
+
+### What the request pattern actually looks like
+
+Tracing the benchmark query (`GDRIVE_TRACE_RANGES=1`):
+
+* 35 ranged GETs, 54.9 MB of the 87 MB file — so ranged reads do work, and
+  the reader is genuinely skipping the columns it does not need.
+* Sorted by offset, the gaps between consecutive ranges alternate 1929 KB and
+  **0 KB**: half of all requests begin exactly where another ended.
+* But those adjacent pairs are on **different file handles** — 35 reads across
+  18 handles, and *zero* adjacent pairs share a handle.
+
+That last point killed the obvious fix. A per-handle read-ahead buffer was
+implemented and measured: it changed the request count not at all (the
+follow-on read is another thread's handle) while inflating every request to
+the block size, fetching **136 MB instead of 54.9 MB**. It was reverted. The
+measurement is recorded here because "add read-ahead" is the natural first
+idea and it is wrong for this access pattern.
+
+### What was fixed
+
+* **Metadata: 19 round trips -> 1.** DuckDB opens a handle per thread and each
+  open fetched metadata. Now cached per query. gdrive leg 6.21 s -> 4.94 s.
+* **Connection reuse.** The client built a fresh `SSLClient` — new TCP
+  connection, full TLS handshake — for every request. Now one connection per
+  thread, reused across requests and queries. Median request 1558 ms ->
+  1334 ms.
+
+### What would close the gate, and its cost
+
+Given a ~1.2 s per-request floor, the only remaining lever is fewer, larger
+requests, and the data says that is worth a lot. The design that follows from
+the measurements is a **shared, file-level block cache** — blocks in the tens
+of megabytes, shared across all handles for one file, so 18 threads scanning
+one file issue a handful of requests rather than 35.
+
+The catch is memory, which is why this is not simply done: a whole-file or
+large-block cache holds tens of megabytes per open file, and the natural
+"just fetch the whole file" version is unbounded. That is a policy decision
+about default memory use, not a pure optimisation, so it is written down here
+rather than chosen unilaterally.
+
+Projected: one whole-file fetch is 2.06 s against GCS's 1.30 s = **1.58x**,
+comfortably inside the 3x gate.

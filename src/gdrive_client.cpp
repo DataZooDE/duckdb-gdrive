@@ -530,6 +530,22 @@ public:
 	}
 
 	DriveResponse Download(const std::string &file_id, int64_t start, int64_t end) override {
+		const bool trace = getenv("GDRIVE_TRACE_RANGES") != nullptr;
+		auto t0 = std::chrono::steady_clock::now();
+		auto out = ExecuteWithRetry(HttpMethod::GET,
+		                            "/drive/v3/files/" + UrlEncode(file_id) + "?alt=media&" + AllDrivesParams(),
+		                            {{"Range", BuildRangeHeader(start, end)}}, "", "",
+		                            &DriveCallStats::files_media, {200, 206});
+		if (trace) {
+			auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
+			              .count();
+			fprintf(stderr, "GDRIVE_RANGE off=%lld len=%lld ms=%lld\n", (long long)start,
+			        (long long)(end - start + 1), (long long)ms);
+		}
+		return out;
+	}
+
+	DriveResponse DownloadUnused(const std::string &file_id, int64_t start, int64_t end) {
 		std::string path =
 		    "/drive/v3/files/" + UrlEncode(file_id) + "?alt=media&" + AllDrivesParams();
 		std::vector<std::pair<std::string, std::string>> headers = {{"Range", BuildRangeHeader(start, end)}};
@@ -683,11 +699,37 @@ private:
 	RawResult DoHttp(HttpMethod method, const std::string &path_and_query,
 	                 const std::vector<std::pair<std::string, std::string>> &extra_headers, const std::string &body,
 	                 const std::string &content_type) {
-		duckdb_httplib_openssl::SSLClient client(kDriveHost, kDrivePort);
-		client.enable_server_certificate_verification(true);
-		client.set_connection_timeout(std::chrono::seconds(10));
-		client.set_read_timeout(std::chrono::seconds(60));
-		client.set_write_timeout(std::chrono::seconds(60));
+		// ---------------------------------------------------------------
+		// One TLS connection PER THREAD, reused for every request that
+		// thread makes.
+		//
+		// This used to construct an SSLClient here, per call -- a fresh TCP
+		// connection and a full TLS handshake for every single request.
+		// Measured on the benchmark query: 35 requests, median 1558 ms each,
+		// minimum 1298 ms even for a 128 KB read. Against a marginal
+		// transfer rate of roughly 160 MB/s, essentially all of that was
+		// connection setup.
+		//
+		// thread_local rather than a shared pool because httplib's Client
+		// owns a socket and is not safe for concurrent use. DuckDB's scan
+		// gives each thread its own file handle, so per-thread is both the
+		// natural granularity and lock-free. Connections survive across
+		// queries, so a second query on a warm thread pays nothing.
+		//
+		// The bearer token is a PER-REQUEST header, never a property of the
+		// connection, so reusing one across secrets leaks nothing -- the
+		// same reason ordinary HTTP connection pools are safe.
+		// ---------------------------------------------------------------
+		static thread_local duckdb_httplib_openssl::SSLClient client(kDriveHost, kDrivePort);
+		static thread_local bool configured = false;
+		if (!configured) {
+			client.enable_server_certificate_verification(true);
+			client.set_connection_timeout(std::chrono::seconds(10));
+			client.set_read_timeout(std::chrono::seconds(60));
+			client.set_write_timeout(std::chrono::seconds(60));
+			client.set_keep_alive(true);
+			configured = true;
+		}
 
 		duckdb_httplib_openssl::Headers headers;
 		// REQ-NF-03: the bearer token lives ONLY in this header, built fresh
