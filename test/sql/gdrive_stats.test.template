@@ -156,3 +156,42 @@ query I
 SELECT value > 1 FROM gdrive_stats() WHERE metric = 'files_media'
 ----
 true
+
+# ---------------------------------------------------------------------------
+# REQ-F-07 -- what an export actually costs.
+#
+# A native file has no byte stream, so it is fetched whole through
+# files.export. The buffer lives on the FILE HANDLE, which means it is reused
+# for the rest of one read and NOT between queries.
+#
+# The README used to say exports were "fetched once and cached", which reads
+# like cross-query caching. They are not: two reads cost two exports. Pinned
+# here so the documentation and the behaviour cannot drift apart again, and
+# so that adding a cross-query cache later is a deliberate change to this
+# number rather than an accident.
+#
+# This is a real quota consideration -- unlike a Parquet read, an export has
+# no footer-only shortcut, so every query pays for the whole file.
+# ---------------------------------------------------------------------------
+statement ok
+CALL gdrive_reset_stats();
+
+query I
+SELECT count(*) FROM read_csv('gdrive://fixtures/Budget')
+----
+3
+
+query I
+SELECT value FROM gdrive_stats() WHERE metric = 'files_export'
+----
+1
+
+query I
+SELECT count(*) FROM read_csv('gdrive://fixtures/Budget')
+----
+3
+
+query I
+SELECT value FROM gdrive_stats() WHERE metric = 'files_export'
+----
+2

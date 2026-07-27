@@ -166,8 +166,14 @@ extension, and never appear in an error message.
 
 A Sheet or Doc has no byte stream, so it is served through Drive's export
 rather than a normal download: Sheets as `text/csv`, Docs as `text/plain`
-(`SET gdrive_docs_export_mime='text/markdown'` to change that). Exports cannot
-be ranged, so the whole file is fetched once and cached.
+(`SET gdrive_docs_export_mime='text/markdown'` to change that).
+
+Exports cannot be ranged, so the whole file is fetched **once per open** and
+served from a buffer for the rest of that read. It is **not** cached between
+queries: querying the same Sheet twice costs two exports. That matters for
+quota — a dashboard polling a Sheet pays the full export every time, and
+unlike a Parquet read there is no footer-only shortcut. Materialise it into a
+table if you are going to query it repeatedly.
 
 ```sql
 SELECT * FROM read_csv('gdrive://Finance/Budget');   -- a real Sheet
