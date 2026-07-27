@@ -64,6 +64,28 @@
 > captured 403/429 bodies, because exhausting quota needs a throwaway
 > project.
 >
+> **Claim audit (2026-07-27).** "Is everything stated as implemented
+> actually verified?" was asked and answered by reading each README claim and
+> asking what would prove it false — NOT by reading the pass count. Five
+> mismatches, all of which had been passing CI indefinitely:
+>
+> | Claim | Reality | Now |
+> |---|---|---|
+> | `authorization_code` provider | not registered; errors on use | withdrawn; `verify_readme` checks the provider table |
+> | `ATTACH` inherits the scheme | not for DuckDB database files | corrected in both directions |
+> | "RemoveFile trashes by default" | the test deleted nothing | both branches tested in e2e |
+> | scopes default to read-only | true for `service_account`, **false for `config`** | per-provider table; enforced half tested |
+> | exports "fetched once and cached" | per-open buffer; 2 reads = 2 exports | corrected + pinned as an assertion |
+>
+> **Still claimed but NOT covered**, stated rather than implied:
+> rate-limit errors (needs a throwaway Google project), positional writes
+> (unreachable from SQL — `COPY` is sequential and `ATTACH` does not route
+> here), and the REQ-NF-01 performance gate (needs a GCS denominator).
+>
+> The lesson worth keeping: a green suite tells you the covered behaviours
+> hold. It tells you nothing about whether the coverage matches the promises.
+> Audit the claims, not the count.
+>
 > **Gotchas that cost time before — do not rediscover:**
 > - `DRIVE_SCOPE`, never `SCOPE`. `SCOPE` is a reserved DuckDB clause meaning
 >   *which paths may use this secret*; using it for the OAuth scope makes the
