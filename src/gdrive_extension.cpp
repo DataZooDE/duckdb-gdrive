@@ -76,6 +76,27 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "'text/plain' (default) or 'text/markdown'. Sheets always export to text/csv.",
 	    LogicalType::VARCHAR, Value("text/plain"));
 
+	// REQ-NF-01. Drive's media endpoint costs ~1.2 s per request REGARDLESS
+	// of size -- a 1 KB read and a 1 MB read measure the same, and the whole
+	// 87 MB benchmark file in one request takes 2.06 s. So on Drive the
+	// winning move is the opposite of the usual one: fetch MORE per request,
+	// in FEWER requests, and share the result between threads.
+	//
+	// 0 disables the cache and restores exact ranged reads (lower memory,
+	// far more requests).
+	loader.GetDatabaseInstance().config.AddExtensionOption(
+	    "gdrive_block_size_bytes",
+	    "Block size for cached reads (default 16 MiB, 0 to disable and read exact ranges). "
+	    "Drive charges roughly the same for a 1 KB and a 16 MB request, so larger blocks "
+	    "trade bandwidth for far fewer round trips.",
+	    LogicalType::UBIGINT, Value::UBIGINT(16ULL * 1024 * 1024));
+
+	loader.GetDatabaseInstance().config.AddExtensionOption(
+	    "gdrive_block_cache_bytes",
+	    "Total memory the shared block cache may hold (default 256 MiB). Least-recently-used "
+	    "blocks are evicted above this. Shared by all files and all threads.",
+	    LogicalType::UBIGINT, Value::UBIGINT(256ULL * 1024 * 1024));
+
 	gdrive::RegisterGDriveSecrets(loader);
 	gdrive::RegisterGDriveStats(loader);
 }

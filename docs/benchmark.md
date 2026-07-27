@@ -196,3 +196,58 @@ rather than chosen unilaterally.
 
 Projected: one whole-file fetch is 2.06 s against GCS's 1.30 s = **1.58x**,
 comfortably inside the 3x gate.
+
+## Shared block cache — measured (2026-07-27)
+
+Implemented per the finding above: blocks keyed by identity + file id +
+headRevisionId + block index, shared across handles, concurrent readers of one
+block coalesced onto a single fetch via `shared_future`.
+
+Block-size sweep, best of two, same query, fresh process each time (so wall
+time includes ~0.15 s of DuckDB start-up):
+
+| `gdrive_block_size_bytes` | media requests | wall |
+|---|---|---|
+| 0 (exact ranges) | 35 | 5.32 s |
+| 4 MiB | 21 | 5.74 s |
+| 8 MiB | 11 | 4.89 s |
+| **16 MiB (default)** | **6** | **4.70 s** |
+| 32 MiB | 3 | 4.62 s |
+| 128 MiB (whole file) | 1 | 4.26 s |
+| 128 MiB + `gdrive://id:` form | 1 | **3.42 s** |
+
+Three things this says, none of them obvious beforehand:
+
+1. **Fewer requests help, but far less than the ~1.2 s floor suggests.** The
+   35 exact reads were already spread across 18 threads — roughly two per
+   thread in sequence — so the floor was being paid twice, not thirty-five
+   times. Collapsing to one request removes about a second, not thirty.
+2. **4 MiB is WORSE than no cache.** Small blocks add bytes without removing
+   enough requests. The curve is not monotonic and guessing a block size
+   without measuring would have made things slower.
+3. **Path resolution is now a visible cost.** The `id:` form saves 0.84 s on
+   an otherwise identical query — two `files.list` calls at the ~1.2 s floor.
+   For a cold process this is unavoidable on Drive: the API has no path
+   addressing. It is the strongest argument for the documented `id:` fast
+   path.
+
+### Where that leaves REQ-NF-01
+
+Against the recorded GCS minimum of 1.30 s:
+
+* default 16 MiB blocks, path form: **~3.5x** — still misses
+* 128 MiB blocks, `id:` form: **~2.6x** — inside the gate
+
+So the gate is achievable but NOT met at the defaults, and the honest summary
+is that Drive can be brought within 3x of GCS for id-addressed reads of large
+files, and not yet for cold path-addressed ones.
+
+The default stays 16 MiB rather than something that games the benchmark: a
+128 MiB block means a `count(*)` — which needs only the Parquet footer —
+downloads the entire file. That is a bad trade for every selective query, and
+tuning a default to a single benchmark is how benchmarks stop meaning
+anything.
+
+**These numbers need re-measuring against a live GCS leg in one session
+before being quoted as a ratio.** The bucket was deleted after the earlier
+run, so the 1.30 s denominator is from a previous session.

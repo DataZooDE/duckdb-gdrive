@@ -439,6 +439,17 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 	}
 
 	// Read path.
+	//
+	// Scope metadata caching to THIS query BEFORE resolving anything. It used
+	// to happen after ResolvePath, which meant the gdrive://id: form -- whose
+	// metadata lookup happens inside ResolvePath -- could serve an entry from
+	// the PREVIOUS query and only then clear the cache. Stale by one query,
+	// for exactly the addressing form documented as the fast path.
+	{
+		auto ctx = FileOpener::TryGetClientContext(opener);
+		cache.BeginQuery(ctx ? ctx->transaction.GetActiveQuery() : 0);
+	}
+
 	auto meta = ResolvePath(cache, *client, auth, parsed.uri);
 
 	// The path-walk cache may serve a leaf entry captured during an earlier
@@ -446,14 +457,6 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 	// metadata fresh so size and GetVersionTag (headRevisionId) reflect
 	// Drive's CURRENT state (S-2.16). The FILE_ID form already did exactly
 	// this files.get inside ResolvePath, so skip the duplicate call there.
-	// Scope metadata caching to THIS query. See GDrivePathCache::BeginQuery:
-	// within one scan DuckDB opens a handle per thread, and they should share
-	// one metadata fetch; across queries nothing should be shared at all.
-	{
-		auto ctx = FileOpener::TryGetClientContext(opener);
-		cache.BeginQuery(ctx ? ctx->transaction.GetActiveQuery() : 0);
-	}
-
 	CacheKey meta_identity;
 	meta_identity.secret_name = auth.secret_name;
 	meta_identity.drive_id = auth.drive_id;
@@ -499,6 +502,10 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 	}
 
 	auto handle = make_uniq<GDriveFileHandleImpl>(*this, path, flags, meta, auth);
+	handle->block_size = static_cast<idx_t>(GetUBigIntSetting(opener, "gdrive_block_size_bytes", 16ULL * 1024 * 1024));
+	blocks.SetCapacity(static_cast<idx_t>(GetUBigIntSetting(opener, "gdrive_block_cache_bytes", 256ULL * 1024 * 1024)));
+	handle->block_key = auth.secret_name + '\x1f' + auth.drive_id + '\x1f' + auth.root_folder_id + '\x1f' +
+	                    meta.id + '\x1f' + meta.head_revision_id;
 
 	if (meta.IsNativeGoogleFormat()) {
 		// REQ-F-07 / D-7: native Google formats have no byte stream at all;
@@ -586,6 +593,61 @@ void GDriveFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, 
 	    static_cast<int64_t>(location) > kMaxOffset - nr_bytes) {
 		throw IOException("gdrive: read range out of bounds for '%s': offset %llu length %lld", h.path,
 		                  static_cast<unsigned long long>(location), static_cast<long long>(nr_bytes));
+	}
+
+	// -----------------------------------------------------------------------
+	// Block cache. Drive charges ~1.2 s per media request regardless of size,
+	// so serving a scan from a few large blocks beats many small ranged GETs
+	// even though it transfers more. See GDriveBlockCache.
+	// -----------------------------------------------------------------------
+	if (h.block_size > 0 && h.meta.size > 0) {
+		auto client_for_block = CreateGDriveClient(h.auth_context);
+		idx_t remaining = static_cast<idx_t>(nr_bytes);
+		idx_t out_offset = 0;
+		idx_t pos = location;
+		while (remaining > 0) {
+			idx_t block_index = pos / h.block_size;
+			idx_t block_start = block_index * h.block_size;
+			auto block = blocks.GetBlock(
+			    h.block_key, block_index, h.block_size, static_cast<idx_t>(h.meta.size),
+			    [&](idx_t start, idx_t len, std::string &out) {
+				    auto r = client_for_block->Download(h.meta.id, static_cast<int64_t>(start),
+				                                        static_cast<int64_t>(start + len - 1));
+				    if (!r.ok) {
+					    ThrowGDriveError(r.error, h.path);
+				    }
+				    // A 200 means the server IGNORED the Range and sent the
+				    // whole file; only a 206 body starts at `start`. The
+				    // exact-read path below has handled this since the bug was
+				    // found -- caching the un-normalised body here would have
+				    // reintroduced it, and made it worse by persisting the
+				    // wrong bytes for every later reader of the block.
+				    if (r.http_status == 200 && start > 0) {
+					    if (r.body.size() <= start) {
+						    throw IOException("gdrive: server ignored Range on '%s' and returned %llu bytes, "
+						                      "which does not reach offset %llu",
+						                      h.path, static_cast<unsigned long long>(r.body.size()),
+						                      static_cast<unsigned long long>(start));
+					    }
+					    out = r.body.substr(start, len);
+				    } else {
+					    out = std::move(r.body);
+				    }
+			    });
+			idx_t within = pos - block_start;
+			if (within >= block->size()) {
+				throw IOException("gdrive: short read on '%s': block %llu ended at %llu, wanted offset %llu", h.path,
+				                  static_cast<unsigned long long>(block_index),
+				                  static_cast<unsigned long long>(block->size()),
+				                  static_cast<unsigned long long>(within));
+			}
+			idx_t take = MinValue<idx_t>(remaining, block->size() - within);
+			memcpy(static_cast<char *>(buffer) + out_offset, block->data() + within, take);
+			remaining -= take;
+			out_offset += take;
+			pos += take;
+		}
+		return;
 	}
 
 	auto client = CreateGDriveClient(h.auth_context);

@@ -18,6 +18,7 @@
 #include "gdrive_errors.hpp"
 #include "gdrive_filesystem.hpp"
 
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include "gdrive_stats.hpp"
@@ -85,6 +86,15 @@ public:
 	}
 
 	GDriveAuthContext auth_context;
+
+	//! Block-cache parameters, captured at OpenFile because Read() has no
+	//! FileOpener and therefore cannot read settings. Also means they cannot
+	//! change under an open handle.
+	idx_t block_size = 0;
+	//! identity + file id + headRevisionId. The revision is what makes an
+	//! overwrite (which keeps the file id) miss the cache instead of serving
+	//! stale bytes.
+	std::string block_key;
 
 };
 

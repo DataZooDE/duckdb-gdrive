@@ -4,6 +4,9 @@
 #include "gdrive_uri.hpp"
 
 #include "duckdb/common/file_system.hpp"
+
+#include <functional>
+#include <future>
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/unordered_map.hpp"
 
@@ -63,6 +66,60 @@ struct CacheKey {
 	bool operator==(const CacheKey &other) const;
 	//! Stable string form, used as the map key.
 	std::string ToString() const;
+};
+
+//! ---------------------------------------------------------------------------
+//! Shared block cache for file CONTENT.
+//!
+//! Why a shared cache and not per-handle read-ahead: measured, one Parquet
+//! scan issued 35 ranged GETs across 18 handles, and although half of them
+//! began exactly where another ended, NO adjacent pair shared a handle. A
+//! per-handle buffer therefore never sees the follow-on read. That version was
+//! built, measured (136 MB fetched instead of 54.9 MB, request count
+//! unchanged) and reverted -- see docs/benchmark.md.
+//!
+//! Why blocks at all: Drive's media endpoint costs ~1.2 s per request
+//! REGARDLESS OF SIZE. A 1 KB read and a 1 MB read cost the same; the whole
+//! 87 MB file in one request costs 2.06 s. So the winning move on Drive is
+//! the opposite of the usual one -- fetch MORE in FEWER requests.
+//!
+//! Keyed by identity + file id + headRevisionId + block index:
+//!   * identity, because one FileSystem object serves every ClientContext and
+//!     a content cache keyed by file id alone would hand one tenant another's
+//!     bytes. (The token cache shipped exactly that bug once.)
+//!   * headRevisionId, because Drive keeps the file id across an overwrite --
+//!     without it, rewritten content would be served from a stale block.
+//!
+//! Concurrent readers of the same block share ONE fetch via a shared_future:
+//! 18 threads hitting a cold block must not issue 18 identical requests.
+//! ---------------------------------------------------------------------------
+class GDriveBlockCache {
+public:
+	//! The block containing `block_index`, fetching it if absent. `fetch`
+	//! receives (start, length) and fills the buffer; it runs at most once per
+	//! block no matter how many threads ask concurrently.
+	shared_ptr<const std::string> GetBlock(const std::string &key, idx_t block_index, idx_t block_size,
+	                                        idx_t file_size,
+	                                        const std::function<void(idx_t, idx_t, std::string &)> &fetch);
+	void SetCapacity(idx_t bytes);
+	void InvalidateSecret(const std::string &secret_name);
+	void Clear();
+	idx_t BytesCached();
+
+private:
+	mutex lock;
+	struct Entry {
+		std::shared_future<shared_ptr<const std::string>> value;
+		idx_t bytes = 0;
+		uint64_t used_at = 0;
+	};
+	unordered_map<std::string, Entry> blocks;
+	idx_t capacity_bytes = 0;
+	idx_t cached_bytes = 0;
+	uint64_t clock = 0;
+
+	//! Caller must hold `lock`.
+	void EvictLocked();
 };
 
 class GDrivePathCache {
@@ -242,6 +299,7 @@ private:
 	                                    const DriveFileMeta &meta, bool name_is_ambiguous);
 
 	GDrivePathCache cache;
+	GDriveBlockCache blocks;
 
 	//! Re-resolve a handle whose cached file id has gone dead. See the .cpp.
 	//! Takes the base handle: GDriveFileHandleImpl lives in the private
