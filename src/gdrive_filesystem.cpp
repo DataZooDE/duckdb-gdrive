@@ -219,6 +219,18 @@ bool TryResolvePath(GDrivePathCache &cache, GDriveClient &client, const GDriveAu
 	if (uri.kind == GDriveUriKind::FILE_ID) {
 		// Direct form: zero resolution (files.list) calls (S-2.9). The single
 		// files.get below is metadata lookup, not resolution.
+		//
+		// Served from the metadata cache when it is warm. DuckDB opens a
+		// handle PER THREAD for a parallel scan, so without this the id:
+		// form -- the one documented as the zero-round-trip fast path --
+		// still cost one files.get per thread.
+		CacheKey meta_key;
+		meta_key.secret_name = auth.secret_name;
+		meta_key.drive_id = auth.drive_id;
+		meta_key.root_folder_id = auth.root_folder_id;
+		if (cache.TryGetMetadata(meta_key, uri.file_id, out)) {
+			return true;
+		}
 		auto resp = client.GetMetadata(uri.file_id);
 		if (!resp.ok) {
 			if (resp.error.kind == GDriveErrorKind::NOT_FOUND) {
@@ -229,6 +241,7 @@ bool TryResolvePath(GDrivePathCache &cache, GDriveClient &client, const GDriveAu
 		if (!ParseFileMeta(resp.body, out)) {
 			throw IOException("gdrive: malformed metadata response for '%s'", context_path);
 		}
+		cache.PutMetadata(meta_key, uri.file_id, out);
 		return true;
 	}
 
@@ -422,12 +435,34 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 	// metadata fresh so size and GetVersionTag (headRevisionId) reflect
 	// Drive's CURRENT state (S-2.16). The FILE_ID form already did exactly
 	// this files.get inside ResolvePath, so skip the duplicate call there.
-	if (parsed.uri.kind != GDriveUriKind::FILE_ID) {
+	// Scope metadata caching to THIS query. See GDrivePathCache::BeginQuery:
+	// within one scan DuckDB opens a handle per thread, and they should share
+	// one metadata fetch; across queries nothing should be shared at all.
+	{
+		auto ctx = FileOpener::TryGetClientContext(opener);
+		cache.BeginQuery(ctx ? ctx->transaction.GetActiveQuery() : 0);
+	}
+
+	CacheKey meta_identity;
+	meta_identity.secret_name = auth.secret_name;
+	meta_identity.drive_id = auth.drive_id;
+	meta_identity.root_folder_id = auth.root_folder_id;
+
+	DriveFileMeta cached_meta;
+	if (parsed.uri.kind != GDriveUriKind::FILE_ID &&
+	    cache.TryGetMetadata(meta_identity, meta.id, cached_meta)) {
+		// Fresh enough (see kMetadataTtlMs). DuckDB opens a handle per thread
+		// for a parallel scan, so this is the difference between one
+		// files.get per query and one per thread -- 19 of them on a
+		// 32-thread box, at ~150 ms each.
+		meta = cached_meta;
+	} else if (parsed.uri.kind != GDriveUriKind::FILE_ID) {
 		auto resp = client->GetMetadata(meta.id);
 		if (resp.ok) {
 			DriveFileMeta fresh;
 			if (ParseFileMeta(resp.body, fresh)) {
 				meta = fresh;
+				cache.PutMetadata(meta_identity, meta.id, meta);
 			}
 		} else if (resp.error.kind == GDriveErrorKind::NOT_FOUND) {
 			// The cached id is DEAD -- another client deleted the file (and
@@ -468,6 +503,47 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 	return std::move(handle);
 }
 
+//! A cached file id can go dead under us: another client deletes the file and
+//! recreates one at the same path, which Drive gives a NEW id.
+//!
+//! This used to be handled in OpenFile, by noticing that the metadata refresh
+//! 404'd. Caching metadata removed that probe -- and the e2e test for it
+//! failed immediately, which is the only reason this is here rather than
+//! shipped broken.
+//!
+//! Handling it at READ time is strictly better than the version it replaces:
+//! it also covers a file deleted AFTER the handle was opened, which no amount
+//! of validation at open could catch.
+//!
+//! Returns true if the handle now points at a live, different file id.
+bool GDriveFileSystem::TryRecoverStaleHandle(GDriveFileHandle &base) {
+	auto &h = base.Cast<GDriveFileHandleImpl>();
+	auto parsed = ParseGDriveUri(h.path);
+	if (!parsed.ok || parsed.uri.kind == GDriveUriKind::FILE_ID) {
+		// An explicit gdrive://id: that 404s is genuinely gone. Re-resolving
+		// would mean inventing a different file than the one asked for.
+		return false;
+	}
+
+	CacheKey key;
+	key.secret_name = h.auth_context.secret_name;
+	key.drive_id = h.auth_context.drive_id;
+	key.root_folder_id = h.auth_context.root_folder_id;
+	key.canonical_path = CanonicalPathOf(parsed.uri);
+	cache.InvalidatePrefix(key);
+
+	auto client = CreateGDriveClient(h.auth_context);
+	DriveFileMeta fresh;
+	if (!TryResolvePath(cache, *client, h.auth_context, parsed.uri, fresh)) {
+		return false; // really gone
+	}
+	if (fresh.id == h.meta.id) {
+		return false; // same id -- the 404 was not staleness
+	}
+	h.meta = fresh;
+	return true;
+}
+
 void GDriveFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) {
 	auto &h = handle.Cast<GDriveFileHandleImpl>();
 	if (nr_bytes == 0) {
@@ -505,6 +581,12 @@ void GDriveFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, 
 	// Inclusive end, as HTTP Range and Drive both define it.
 	int64_t end = static_cast<int64_t>(location) + nr_bytes - 1;
 	auto resp = client->Download(h.meta.id, static_cast<int64_t>(location), end);
+	if (!resp.ok && resp.error.kind == GDriveErrorKind::NOT_FOUND && TryRecoverStaleHandle(h)) {
+		// The path still exists, under a new id. Retry ONCE against it: a
+		// loop here would spin against a file being rewritten repeatedly.
+		client = CreateGDriveClient(h.auth_context);
+		resp = client->Download(h.meta.id, static_cast<int64_t>(location), end);
+	}
 	if (!resp.ok) {
 		ThrowGDriveError(resp.error, h.path);
 	}

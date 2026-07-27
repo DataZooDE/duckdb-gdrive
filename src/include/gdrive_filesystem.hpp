@@ -74,6 +74,42 @@ public:
 	//! rename or delete invalidates every descendant path, but must not
 	//! disturb another identity's entries.
 	void InvalidatePrefix(const CacheKey &key);
+
+	//! ---------------------------------------------------------------------
+	//! Metadata by FILE ID, for one identity, scoped to ONE QUERY.
+	//!
+	//! Separate from the path map above because it answers a different
+	//! question ("what are this id's size and headRevisionId?") and because
+	//! its validity is bounded, which path->id mappings' is not.
+	//!
+	//! Scoped by DuckDB's active query number rather than a wall-clock TTL.
+	//! A TTL was tried first and was wrong: it let a file deleted and
+	//! recreated between two queries be read at its OLD size, because
+	//! OpenFile's metadata refresh -- which is what detects a dead id -- was
+	//! served from cache instead of hitting Drive. The e2e stale-cache test
+	//! caught it. Query scoping gives the same saving (all of a scan's
+	//! per-thread opens share one fetch) with no staleness across queries at
+	//! all, and no dependence on timing.
+	//!
+	//! Why it exists: DuckDB's parallel Parquet scan opens one handle PER
+	//! THREAD, and every OpenFile fetched metadata. Measured on a 32-thread
+	//! box: 19 identical files.get calls for one query, ~150 ms each. The
+	//! count scaled with `SET threads` (1->3, 4->6, 32->19) while the data
+	//! requests stayed at 35, which is what identified this as the fixable
+	//! half of REQ-NF-01's failure.
+	//!
+	//! Keyed by identity, exactly like the path map, and for the same reason:
+	//! one FileSystem object serves every ClientContext, so a cache keyed by
+	//! file id alone would serve one tenant's metadata to another. That is
+	//! not hypothetical -- the token cache had precisely this bug.
+	//! ---------------------------------------------------------------------
+	//! Start of a query. Clears metadata if `generation` differs from the
+	//! last one seen. Generation 0 means "no query context": nothing is
+	//! cached or served, because an entry we cannot scope is one we cannot
+	//! safely reuse.
+	void BeginQuery(idx_t generation);
+	bool TryGetMetadata(const CacheKey &identity, const std::string &file_id, DriveFileMeta &out);
+	void PutMetadata(const CacheKey &identity, const std::string &file_id, const DriveFileMeta &meta);
 	//! Drop everything belonging to one secret -- called when a secret is
 	//! dropped or re-created, since its ids may no longer be reachable.
 	void InvalidateSecret(const std::string &secret_name);
@@ -83,6 +119,9 @@ public:
 private:
 	mutex lock;
 	unordered_map<std::string, DriveFileMeta> entries;
+
+	unordered_map<std::string, DriveFileMeta> metadata_entries;
+	idx_t metadata_generation = 0;
 };
 
 //! Per-handle state. Metadata is captured once at OpenFile and reused: asking
@@ -203,6 +242,11 @@ private:
 	                                    const DriveFileMeta &meta, bool name_is_ambiguous);
 
 	GDrivePathCache cache;
+
+	//! Re-resolve a handle whose cached file id has gone dead. See the .cpp.
+	//! Takes the base handle: GDriveFileHandleImpl lives in the private
+	//! gdrive_internal.hpp, which this public contract must not depend on.
+	bool TryRecoverStaleHandle(GDriveFileHandle &handle);
 };
 
 } // namespace gdrive

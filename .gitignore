@@ -36,3 +36,6 @@ e2e/.uv-cache/
 
 # Codex review artefacts (session transcripts, API responses)
 .codex-delegate/
+
+# Deep Research job state and cached responses
+.deep-research/
