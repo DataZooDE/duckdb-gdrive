@@ -143,3 +143,11 @@ check_stamp: release
 .PHONY: smoke_loadable
 smoke_loadable: release
 	@./scripts/smoke_loadable.sh
+
+# ---------------------------------------------------------------------------
+# Borrow DuckLake's own test suite and point its DATA PATH at gdrive://.
+# Differential: only tests that pass locally and fail on Drive are findings.
+# ---------------------------------------------------------------------------
+.PHONY: ducklake_conformance
+ducklake_conformance: release
+	@python3 scripts/ducklake_conformance.py

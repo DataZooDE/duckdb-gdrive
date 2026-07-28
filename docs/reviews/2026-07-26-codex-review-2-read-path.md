@@ -214,3 +214,57 @@ output file. Both times `codex exec` sat at "Reading additional input from
 stdin" — it was waiting on stdin, not working. Redirecting `< /dev/null` fixed
 it. Two hours of apparent work produced nothing, silently, which is the same
 failure mode this repo keeps finding in its own checks.
+
+
+---
+
+# DuckLake conformance sweep (2026-07-28)
+
+`make ducklake_conformance` borrows DuckLake's own test suite and repoints its
+DATA_PATH at `gdrive://`, running each test twice -- local and Drive -- and
+reporting only tests that pass locally and fail on Drive.
+
+**Result: 0 real findings.** Six tests are meaningfully comparable and all six
+pass on both. That is a genuine, if modest, result: appends, CTAS, inlined
+data flush and multi-path attach all behave the same on Drive as on a local
+disk.
+
+It is modest because of what the numbers exclude, and those bounds matter more
+than the headline:
+
+| | |
+|---|---|
+| 509 DuckLake test files | |
+| ~471 need `{DUCKLAKE_CONNECTION}` | a Postgres/MySQL catalog we cannot supply |
+| 37 fail on LOCAL too | the DATA_PATH rewrite breaks tests that assert on paths; excluded by design |
+| **6 comparable** | all pass on both |
+
+## Three apparent findings that were harness bugs
+
+The first run reported three failures with
+`IO Error: Failed to create directory "gdrive://...": No such file or
+directory`. That looks exactly like a missing `mkdir -p` in our
+CreateDirectory, and I wrote one.
+
+**It was wrong.** The error came from `local_file_system.cpp` -- DuckDB's
+LOCAL filesystem -- because the generated tests lacked `require gdrive`, so
+the scheme was never registered and every `gdrive://` path fell through to the
+local FS. Adding `require gdrive` cleared all three.
+
+The `mkdir -p` change was then tested on its own merits and **reverted**: a
+DuckLake data path three levels deep, none of it existing, works with and
+without it, because the write path in `OpenFile` creates intermediate folders
+and `MutateCreateDirectory` is not the code path DuckLake uses. Shipping it
+would have been an unproven behaviour change justified by a misread error.
+
+## And the harness itself reported a false green first
+
+Before any of that, it claimed **43 tests passed on both sides** while
+creating zero folders on Drive. Cause: it passed unittest an ABSOLUTE path,
+which unittest answers with `No test cases matched` and exit 0 -- so
+`returncode == 0` read as a pass and nothing ran at all.
+
+That is the seventh instance of this failure mode in this repo, and the first
+inside a tool built specifically to find bugs. `run_one` now treats
+`No test cases matched`, `All tests were skipped`, and any output without a
+recognisable result line as NOT-COMPARED rather than as agreement.

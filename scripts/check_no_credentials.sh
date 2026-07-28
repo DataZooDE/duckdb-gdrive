@@ -43,10 +43,17 @@ pem_patterns=(
 )
 
 # Token-shaped strings: Google refresh tokens start "1//", access tokens
-# "ya29.". These are NOT applied under test/, because the REQ-NF-03 redaction
-# tests must contain token-shaped literals in order to prove the redactor
-# strips them -- a scanner that forbade them would forbid testing the very
-# control it exists to enforce. Everywhere else they are a hard failure.
+# "ya29.".
+#
+# A few files must be allowed to contain token-SHAPED literals, because the
+# REQ-NF-03 redaction tests prove the redactor strips them and cannot do that
+# without one. Those are allowlisted BY EXACT PATH below.
+#
+# This used to exempt ALL of test/, which is far too broad and was proven so:
+# a harness generating test/sql/live/ducklake_conf/*.test wrote a REAL refresh
+# token into a tracked-able file and this scanner said "OK: no credentials
+# tracked". An exemption wide enough to cover a directory tree is wide enough
+# to hide a real credential in it.
 token_patterns=(
     '\b1//[A-Za-z0-9_-]{20,}'
     '\bya29\.[A-Za-z0-9_-]{20,}'
@@ -64,6 +71,18 @@ ALLOWED_KEY_FILE="test/cpp/testdata/fake_sa_key.json"
 # key, so a flat ban would forbid testing the control this script enforces.
 # Allowlisted BY EXACT PATH, never by directory: a blanket test/ exemption
 # would let a real key be committed under test/ and pass silently.
+# Files permitted to contain token-SHAPED literals. By exact path, never by
+# directory -- see the note above token_patterns for what a directory-wide
+# exemption actually hides.
+TOKEN_ALLOWED=(
+    "test/cpp/test_errors.cpp"
+    "test/sql/gdrive_secret.test"
+    # Contains "client_secret": "not-a-real-secret" -- a placeholder proving
+    # the parser reads the field. Reviewed when the exemption was narrowed
+    # from all of test/ to these three paths.
+    "test/cpp/test_service_account.cpp"
+)
+
 PEM_ALLOWED=(
     "$ALLOWED_KEY_FILE"
     "test/sql/gdrive_secret.test"
@@ -209,9 +228,14 @@ while IFS= read -r f; do
         done
     fi
 
-    case "$f" in
-        test/*) continue ;;
-    esac
+    # Token-shaped literals are allowed ONLY in these exact files.
+    token_exempt=0
+    for allowed in "${TOKEN_ALLOWED[@]}"; do
+        [[ "$f" == "$allowed" ]] && token_exempt=1
+    done
+    if [[ $token_exempt -eq 1 ]]; then
+        continue
+    fi
     for cp in "${token_patterns[@]}"; do
         if pattern_matches "$cp" "$f"; then
             echo "FAIL: $f contains a token-shaped secret (/$cp/)" >&2

@@ -25,7 +25,12 @@ client_secret_*.json
 
 # Materialised live SQL tests (generated from *.test.template by
 # scripts/materialise_tests.py with the run's fixture ids substituted).
-test/sql/live/*.test
+# Materialised live tests carry REAL credential values substituted at run
+# time. The rule was `test/sql/live/*.test`, which does NOT match a
+# SUBDIRECTORY -- and a harness that generated
+# test/sql/live/ducklake_conf/*.test put real tokens in a trackable file.
+# Ignore the whole directory instead.
+test/sql/live/
 
 # E2E harness (Python + uv)
 e2e/.venv/
