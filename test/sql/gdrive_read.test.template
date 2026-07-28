@@ -67,9 +67,21 @@ SELECT count(*) FROM read_csv('gdrive://fixtures/grüße.csv')
 ----
 1
 
-# An empty file must read as zero rows, not error.
-statement ok
-SELECT * FROM read_csv('gdrive://fixtures/empty.csv', header=false, columns={'x':'VARCHAR'})
+# An empty file must read as ZERO ROWS, not error -- and the assertion has to
+# say zero. `statement ok` passed for any successful shape, including a
+# one-row NULL, which is what a zero-length read mishandled as a single empty
+# record would produce.
+query I
+SELECT count(*) FROM read_csv('gdrive://fixtures/empty.csv', header=false, columns={'x':'VARCHAR'})
+----
+0
+
+# GetFileSize must report 0 for it, not -1 or "unknown". A wrong size here is
+# how an empty file turns into a hanging read or a bogus range request.
+query I
+SELECT size FROM read_blob('gdrive://fixtures/empty.csv')
+----
+0
 
 # ---------------------------------------------------------------------------
 # S-2.15 -- ranged reads over a columnar file. A Parquet scan fetches the

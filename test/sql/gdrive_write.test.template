@@ -54,14 +54,19 @@ Q3	3000
 # Drive reports no `size` at all for these, so a naive implementation returns
 # 0 or -1 and every read comes back empty.
 query I
-SELECT count(*) > 0 FROM read_csv('gdrive://fixtures/Budget')
+SELECT count(*) FROM read_csv('gdrive://fixtures/Budget')
 ----
-true
+3
 
 # S-3.4 -- a Doc exports as text/plain by default (D-7: byte-stable, so
 # GetVersionTag-keyed caching stays honest).
+#
+# Asserts the CONTENT, not the row count. read_text() always returns exactly
+# one row, so `count(*) > 0` was true whether the export produced the Doc's
+# text, an empty string, or an error page -- it proved only that nothing
+# threw.
 query I
-SELECT count(*) > 0 FROM read_text('gdrive://fixtures/Notes')
+SELECT contains(content, 'This is a Google Doc fixture.') FROM read_text('gdrive://fixtures/Notes')
 ----
 true
 

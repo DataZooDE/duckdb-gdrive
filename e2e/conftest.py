@@ -94,6 +94,13 @@ def fixtures_root(drive: Drive) -> str:
             f"no /{fx.FIXTURES_ROOT} folder in Shared Drive {drive.drive_id}. "
             "Run `make seed_fixtures` first."
         )
+    if len(found) > 1:
+        # See materialise.py: picking one would bind every test to whichever
+        # tree Drive listed first, which is how a suite ends up passing
+        # against stale fixtures.
+        ids = ", ".join(f["id"] for f in found)
+        pytest.fail(f"{len(found)} folders named /{fx.FIXTURES_ROOT} exist (ids: {ids}); "
+                    "delete the stale one.")
     return found[0]["id"]
 
 

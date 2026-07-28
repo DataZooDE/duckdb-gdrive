@@ -268,3 +268,42 @@ That is the seventh instance of this failure mode in this repo, and the first
 inside a tool built specifically to find bugs. `run_one` now treats
 `No test cases matched`, `All tests were skipped`, and any output without a
 recognisable result line as NOT-COMPARED rather than as agreement.
+
+
+---
+
+# Codex review #4 — the TESTS (2026-07-28)
+
+Asked whether the suites are realistic, cover the main use cases and the edge
+cases that matter, and actually exercise the extension rather than passing
+vacuously.
+
+| # | Finding | Action |
+|---|---|---|
+| 1 | `ducklake_conformance.py` could exit 0 having compared nothing | **Fixed** — exits 2 when `agreed == 0` |
+| 2 | `run_live_tests.sh` made DuckLake optional, so "live suite passed" could leave the table-format claim unverified | **Fixed** — now a failure unless `ALLOW_MISSING_DUCKLAKE=1` |
+| 3 | Harness took the FIRST `/fixtures` folder if duplicates existed | **Fixed** — refuses and names both ids, the same R-4 discipline the extension applies |
+| 4 | Empty-file test used `statement ok`, which passes for any successful shape | **Fixed** — asserts 0 rows and `size = 0` |
+| 5 | Native Sheet/Doc asserted with `count(*) > 0` | **Fixed** — exact row count, and content for the Doc (`read_text` always returns one row, so the old form proved only "no error") |
+| 6 | Live SQL scratch folder never torn down; only the 24-hour sweeper | **Fixed** — `helpers.drop_scratch` on exit |
+| 7 | Reserved-id create idempotency had no live test, only a pure parser test | **Fixed** — `e2e/tests/test_idempotent_create.py`, with a control |
+
+Finding 7 is the one that mattered most. Duplicate names make a Drive path
+permanently unaddressable, the reservation exists to prevent exactly that, and
+the property had been verified by hand once. Hand-verification is not a test.
+The new test also carries a **control** asserting that Drive really does allow
+two files of one name — without it, the first test would pass for the wrong
+reason if Drive ever started rejecting duplicates itself.
+
+## Still open, deliberately
+
+Codex listed edge cases worth having that are not yet covered: zero-row
+Parquet, filenames with quotes/newlines/emoji, partial reads at exactly EOF,
+pagination at the 100/101 boundary rather than only 150, trashed-name
+reappearance, and a My Drive (as opposed to CI-root) fixture. None are
+security- or correctness-critical on current evidence; all are cheap fixture
+work and belong in the next pass.
+
+Its "delete these" recommendation was not followed literally: the two weak
+Sheet/Doc assertions were strengthened rather than removed, because the
+behaviour is worth asserting and only the assertion was weak.

@@ -255,6 +255,15 @@ def main() -> int:
         for l in lines[-25:]:
             print(f"  {l}")
 
+    if agreed == 0:
+        # Nothing was actually compared, so "0 findings" means "we learned
+        # nothing" -- not "everything works". Reporting success here would be
+        # the same failure this harness was built to expose, and which it
+        # already committed once (43 "passes", zero tests run).
+        print("\nFAIL: not one test was comparable -- no local-vs-drive comparison "
+              "happened, so a green result here would mean nothing.", file=sys.stderr)
+        return 2
+
     return 1 if findings else 0
 
 

@@ -102,8 +102,11 @@ DETACH lake;
 
 # The data really is on Drive, in DuckLake's layout, and visible through our
 # own glob. Both data files and delete files.
+# Three writes happened -- the CTAS, the INSERT, and the DELETE's delete-file
+# -- so there must be at least three parquet objects. `> 0` would have passed
+# on a single file, i.e. on a DuckLake that silently lost two of them.
 query I
-SELECT count(*) > 0 FROM glob('gdrive://scratch/${SCRATCH}/lake/**/*.parquet')
+SELECT count(*) >= 3 FROM glob('gdrive://scratch/${SCRATCH}/lake/**/*.parquet')
 ----
 true
 

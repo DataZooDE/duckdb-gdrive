@@ -50,9 +50,17 @@ fi
 # export the path so both the materialiser and the duckdb CLI see it.
 # ---------------------------------------------------------------------------
 DECODED_KEY=""
+SCRATCH_TO_CLEAN=""
 cleanup() {
     if [[ -n "$DECODED_KEY" && -f "$DECODED_KEY" ]]; then
         rm -f "$DECODED_KEY"
+    fi
+    # Delete THIS run's scratch folder. The sweeper is a 24-hour backstop for
+    # crashed runs, not teardown: without this, every failed run leaves a tree
+    # behind and the noise eventually hides the failure you care about.
+    if [[ -n "$SCRATCH_TO_CLEAN" ]]; then
+        (cd e2e && uv run --frozen python -m helpers.drop_scratch "$SCRATCH_TO_CLEAN") \
+            >/dev/null 2>&1 || true
     fi
 }
 trap cleanup EXIT INT TERM
@@ -104,9 +112,21 @@ fi
 # rather than either failing the suite or (worse) silently skipping. Every
 # other file still fails on an unexpected skip.
 if [[ "$DUCKLAKE_OK" -ne 1 ]]; then
-    echo "WARNING: ducklake unavailable here; the DuckLake test will NOT run." >&2
-    echo "         This is upstream availability, not a gdrive failure --" >&2
-    echo "         but it does mean DuckLake support is UNVERIFIED in this run." >&2
+    # The README claims DuckLake works over gdrive://. A run that silently
+    # skips the test verifying it lets that claim go unchecked while the suite
+    # reports success -- so this is a FAILURE unless someone deliberately
+    # waives it. Upstream unavailability is a real situation, which is why the
+    # escape hatch exists; it is opt-in so it can never be the default.
+    if [[ "${ALLOW_MISSING_DUCKLAKE:-}" == "1" ]]; then
+        echo "WARNING: ducklake unavailable; the DuckLake test will NOT run." >&2
+        echo "         ALLOW_MISSING_DUCKLAKE=1 is set, so this is not failing --" >&2
+        echo "         but DuckLake support is UNVERIFIED in this run." >&2
+    else
+        echo "FAIL: ducklake could not be installed, so the test proving DuckLake" >&2
+        echo "      works over gdrive:// cannot run. Set ALLOW_MISSING_DUCKLAKE=1" >&2
+        echo "      to accept an unverified DuckLake claim for this run." >&2
+        exit 1
+    fi
 fi
 
 echo "==> materialising live tests with real fixture ids"
@@ -129,6 +149,8 @@ if [[ ${#tests[@]} -eq 0 ]]; then
     echo "Set ALLOW_EMPTY_LIVE_SQL=1 only while scaffolding." >&2
     exit 1
 fi
+
+SCRATCH_TO_CLEAN="$(sed -n 's|.*scratch/\(run-[a-z0-9]*\)/.*|\1|p' test/sql/live/*.test 2>/dev/null | head -1)"
 
 echo "==> running ${#tests[@]} live test file(s)"
 failed=0

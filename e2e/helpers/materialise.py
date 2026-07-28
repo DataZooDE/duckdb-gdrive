@@ -48,6 +48,17 @@ def build_substitutions(drive: Drive) -> dict:
         raise RuntimeError(
             f"no /{fx.FIXTURES_ROOT} in Shared Drive {drive.drive_id}; run `make seed_fixtures`"
         )
+    if len(found) > 1:
+        # Drive permits two folders with one name in one parent -- the same
+        # R-4 ambiguity the extension refuses to guess through. Taking
+        # found[0] would silently bind the whole suite to whichever tree Drive
+        # happened to list first, so tests could pass against a stale fixture
+        # set. Refuse, and name both.
+        ids = ", ".join(f["id"] for f in found)
+        raise RuntimeError(
+            f"{len(found)} folders named /{fx.FIXTURES_ROOT} exist (ids: {ids}). "
+            "The suite cannot tell which is current; delete the stale one."
+        )
     key_file = os.environ.get("GDRIVE_CI_SA_KEY_FILE", "")
     if key_file and not Path(key_file).is_absolute():
         key_file = str((REPO_ROOT / key_file).resolve())
