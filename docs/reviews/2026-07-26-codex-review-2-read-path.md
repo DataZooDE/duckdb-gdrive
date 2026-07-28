@@ -187,3 +187,30 @@ header and no signature query parameter reaches a log unredacted. We assert
 redaction only in error text. Our client does not feed DuckDB's HTTP logger,
 so the stronger check is not available to us. Recorded here rather than
 quietly skipped.
+
+
+---
+
+# Codex review #3 — round-trip reduction (2026-07-27)
+
+Reviewed the metadata cache and the proposed block cache. Five findings, all
+real; three were bugs in code written that day.
+
+| # | Finding | Action |
+|---|---|---|
+| 1 | Block cache stored a `200` (Range-ignored) body without the offset fix | **Fixed** — and it was a bug I had fixed hours earlier in the exact-read path and reintroduced in new code |
+| 2 | Query scoping ran AFTER `ResolvePath`, so the `id:` form could serve metadata from the previous query | **Fixed** — `BeginQuery` now precedes all resolution |
+| 3 | No snapshot isolation: blocks keyed by revision, but the download is by file id | **Documented** — Drive cannot pin a download to a revision; the README now says so |
+| 4 | Metadata cache had no single-flight, so concurrent first opens could all miss and all fetch | **Fixed** — `GetOrFetchMetadata` publishes a `shared_future` under the lock |
+| 5 | `Glob`'s literal probe neither used nor warmed the query metadata cache | **Fixed** — `Glob` now scopes the query like `OpenFile` |
+
+It also confirmed, independently of the measurements, that a shared block
+cache beats per-handle read-ahead here, and that the ~19 opens are DuckDB's
+parallel reader rather than anything about our `CanSeek`/`OnDiskFile` flags.
+
+**Process note, worth keeping.** This review failed twice before producing
+anything: once at a 300-second timeout, once at 3000 seconds with an empty
+output file. Both times `codex exec` sat at "Reading additional input from
+stdin" — it was waiting on stdin, not working. Redirecting `< /dev/null` fixed
+it. Two hours of apparent work produced nothing, silently, which is the same
+failure mode this repo keeps finding in its own checks.

@@ -92,9 +92,24 @@ public:
 	virtual DriveResponse Export(const std::string &file_id, const std::string &mime_type) = 0;
 
 	//! Resumable upload; creates when `file_id` is empty, updates otherwise.
+	//! Reserve a file id before creating anything (files.generateIds).
+	//!
+	//! This is what makes a CREATE retryable. A transport failure is
+	//! ambiguous -- the request may have been applied and only the response
+	//! lost -- so a blind retry of `files.create` can produce a second file
+	//! with the same name, which R-4 then reports as an unaddressable path
+	//! forever. With the id chosen up front, a retry either succeeds or comes
+	//! back 409 "A file already exists with the provided ID", which proves
+	//! the first attempt landed. Verified against the live API.
+	//!
+	//! Costs one round trip per create. Worth it: the alternative was
+	//! refusing to retry writes at all.
+	virtual DriveResponse GenerateFileId() = 0;
+
 	virtual DriveResponse Upload(const std::string &file_id, const std::string &parent_id,
 	                             const std::string &name, const std::string &content_type,
-	                             const std::string &data) = 0;
+	                             const std::string &data,
+	                             const std::string &reserved_id = "") = 0;
 
 	//! Trash (default) or permanently delete -- see decision D-6.
 	virtual DriveResponse Delete(const std::string &file_id, bool permanent) = 0;
@@ -110,6 +125,10 @@ public:
 //! Parse a files.get / files.list JSON payload. PURE enough to unit-test, but
 //! kept here because it is meaningless without the transport.
 bool ParseFileMeta(const std::string &json_object, DriveFileMeta &out);
+
+//! First id from a files.generateIds response. See GDriveClient::GenerateFileId
+//! for why a create reserves its id before making the file.
+bool ParseGeneratedFileId(const std::string &json, std::string &out);
 bool ParseFileList(const std::string &json_body, std::vector<DriveFileMeta> &out,
                    std::string &next_page_token);
 

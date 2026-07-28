@@ -85,31 +85,78 @@ void GDrivePathCache::BeginQuery(idx_t generation) {
 	}
 }
 
-bool GDrivePathCache::TryGetMetadata(const CacheKey &identity, const std::string &file_id, DriveFileMeta &out) {
-	lock_guard<mutex> guard(lock);
-	if (metadata_generation == 0) {
-		// No query context (see BeginQuery's caller). Never serve a cached
-		// entry we cannot scope -- fetching again is cheap next to being
-		// wrong.
-		IncrementGlobalCacheMiss();
-		return false;
-	}
-	auto it = metadata_entries.find(MetadataKey(identity, file_id));
-	if (it == metadata_entries.end()) {
-		IncrementGlobalCacheMiss();
-		return false;
-	}
-	out = it->second;
-	IncrementGlobalCacheHit();
-	return true;
-}
+bool GDrivePathCache::GetOrFetchMetadata(const CacheKey &identity, const std::string &file_id,
+                                          const std::function<bool(DriveFileMeta &)> &fetch, DriveFileMeta &out) {
+	const std::string key = MetadataKey(identity, file_id);
 
-void GDrivePathCache::PutMetadata(const CacheKey &identity, const std::string &file_id, const DriveFileMeta &meta) {
-	lock_guard<mutex> guard(lock);
-	if (metadata_generation == 0) {
-		return;
+	std::shared_future<shared_ptr<const DriveFileMeta>> future;
+	std::promise<shared_ptr<const DriveFileMeta>> promise;
+	bool i_fetch = false;
+
+	{
+		lock_guard<mutex> guard(lock);
+		if (metadata_generation == 0) {
+			// No query context (see BeginQuery). Do not cache and do not
+			// serve: an entry we cannot scope is one we cannot safely reuse.
+			DriveFileMeta fresh;
+			// Fetch outside the lock -- fall through below.
+			i_fetch = false;
+			(void)fresh;
+		} else {
+			auto it = metadata_entries.find(key);
+			if (it != metadata_entries.end()) {
+				future = it->second.value;
+				IncrementGlobalCacheHit();
+			} else {
+				// Publish the future BEFORE releasing the lock, so every other
+				// thread that wants this file waits on our fetch instead of
+				// starting its own.
+				future = promise.get_future().share();
+				metadata_entries.emplace(key, MetaEntry {future});
+				i_fetch = true;
+				IncrementGlobalCacheMiss();
+			}
+		}
 	}
-	metadata_entries[MetadataKey(identity, file_id)] = meta;
+
+	if (!i_fetch && !future.valid()) {
+		// Uncacheable (generation 0): straight through, every time.
+		return fetch(out);
+	}
+
+	if (i_fetch) {
+		try {
+			DriveFileMeta fresh;
+			if (!fetch(fresh)) {
+				// Absent. Do NOT cache: a file created a moment later must be
+				// visible, and this is not the hot path.
+				{
+					lock_guard<mutex> guard(lock);
+					metadata_entries.erase(key);
+				}
+				promise.set_value(nullptr);
+				return false;
+			}
+			auto stored = make_shared_ptr<const DriveFileMeta>(fresh);
+			promise.set_value(stored);
+			out = fresh;
+			return true;
+		} catch (...) {
+			{
+				lock_guard<mutex> guard(lock);
+				metadata_entries.erase(key);
+			}
+			promise.set_exception(std::current_exception());
+			throw;
+		}
+	}
+
+	auto got = future.get();
+	if (!got) {
+		return false;
+	}
+	out = *got;
+	return true;
 }
 
 void GDrivePathCache::InvalidatePrefix(const CacheKey &key) {

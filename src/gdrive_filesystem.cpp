@@ -239,21 +239,22 @@ bool TryResolvePath(GDrivePathCache &cache, GDriveClient &client, const GDriveAu
 		meta_key.secret_name = auth.secret_name;
 		meta_key.drive_id = auth.drive_id;
 		meta_key.root_folder_id = auth.root_folder_id;
-		if (cache.TryGetMetadata(meta_key, uri.file_id, out)) {
-			return true;
-		}
-		auto resp = client.GetMetadata(uri.file_id);
-		if (!resp.ok) {
-			if (resp.error.kind == GDriveErrorKind::NOT_FOUND) {
-				return false;
-			}
-			ThrowGDriveError(resp.error, context_path);
-		}
-		if (!ParseFileMeta(resp.body, out)) {
-			throw IOException("gdrive: malformed metadata response for '%s'", context_path);
-		}
-		cache.PutMetadata(meta_key, uri.file_id, out);
-		return true;
+		return cache.GetOrFetchMetadata(meta_key, uri.file_id,
+		                                 [&](DriveFileMeta &fresh) {
+			                                 auto resp = client.GetMetadata(uri.file_id);
+			                                 if (!resp.ok) {
+				                                 if (resp.error.kind == GDriveErrorKind::NOT_FOUND) {
+					                                 return false;
+				                                 }
+				                                 ThrowGDriveError(resp.error, context_path);
+			                                 }
+			                                 if (!ParseFileMeta(resp.body, fresh)) {
+				                                 throw IOException(
+				                                     "gdrive: malformed metadata response for '%s'", context_path);
+			                                 }
+			                                 return true;
+		                                 },
+		                                 out);
 	}
 
 	std::string parent_id = RootFolderFor(auth);
@@ -462,23 +463,33 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 	meta_identity.drive_id = auth.drive_id;
 	meta_identity.root_folder_id = auth.root_folder_id;
 
-	DriveFileMeta cached_meta;
-	if (parsed.uri.kind != GDriveUriKind::FILE_ID &&
-	    cache.TryGetMetadata(meta_identity, meta.id, cached_meta)) {
-		// Fresh enough (see kMetadataTtlMs). DuckDB opens a handle per thread
-		// for a parallel scan, so this is the difference between one
-		// files.get per query and one per thread -- 19 of them on a
-		// 32-thread box, at ~150 ms each.
-		meta = cached_meta;
-	} else if (parsed.uri.kind != GDriveUriKind::FILE_ID) {
-		auto resp = client->GetMetadata(meta.id);
-		if (resp.ok) {
-			DriveFileMeta fresh;
-			if (ParseFileMeta(resp.body, fresh)) {
-				meta = fresh;
-				cache.PutMetadata(meta_identity, meta.id, meta);
+	if (parsed.uri.kind != GDriveUriKind::FILE_ID) {
+		// Single-flight: DuckDB opens a handle per thread, so a plain
+		// check-then-fetch lets every one of them miss together and issue the
+		// same files.get -- the exact amplification this cache exists to
+		// remove, reappearing on a cold start.
+		DriveFileMeta refreshed;
+		bool found = cache.GetOrFetchMetadata(meta_identity, meta.id, [&](DriveFileMeta &fresh) {
+			auto resp = client->GetMetadata(meta.id);
+			if (!resp.ok) {
+				if (resp.error.kind == GDriveErrorKind::NOT_FOUND) {
+					return false;
+				}
+				// Any OTHER failure (transient 5xx, rate limit) must not fail
+				// an open the resolver already satisfied: fall back to what it
+				// found rather than failing a read the cache thought fine.
+				fresh = meta;
+				return true;
 			}
-		} else if (resp.error.kind == GDriveErrorKind::NOT_FOUND) {
+			if (!ParseFileMeta(resp.body, fresh)) {
+				fresh = meta;
+			}
+			return true;
+		}, refreshed);
+
+		if (found) {
+			meta = refreshed;
+		} else {
 			// The cached id is DEAD -- another client deleted the file (and
 			// perhaps recreated one with the same name, which Drive gives a
 			// NEW id). Ignoring this, as we used to, opens a handle onto the
@@ -496,9 +507,6 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 			cache.InvalidatePrefix(key);
 			meta = ResolvePath(cache, *client, auth, parsed.uri);
 		}
-		// Any OTHER refresh failure (a transient 5xx, a rate limit) does not
-		// fail the open: fall back to what the resolver already found rather
-		// than failing a read the cache thought would succeed.
 	}
 
 	auto handle = make_uniq<GDriveFileHandleImpl>(*this, path, flags, meta, auth);
@@ -926,6 +934,16 @@ vector<OpenFileInfo> GDriveFileSystem::Glob(const string &path, FileOpener *open
 		throw IOException(
 		    "gdrive: no gdrive secret configured for '%s' -- run CREATE SECRET (TYPE gdrive, ...) first.", path);
 	}
+	// Scope the metadata cache to THIS query before resolving anything, the
+	// same as OpenFile. Glob's literal-path probe below does a full resolve
+	// (including a files.get for the id: form), and without this it would
+	// neither be served from nor warm the query's cache -- so a glob followed
+	// by an open of the same file paid the metadata round trip twice.
+	{
+		auto ctx = FileOpener::TryGetClientContext(op);
+		cache.BeginQuery(ctx ? ctx->transaction.GetActiveQuery() : 0);
+	}
+
 	auto parsed = ParseGDriveUri(path);
 	if (!parsed.ok) {
 		if (IsFileIdFallbackGlobProbe(path)) {

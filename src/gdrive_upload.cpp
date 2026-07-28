@@ -20,8 +20,28 @@ void UploadHandleContents(GDriveClient &client, GDriveFileHandleImpl &handle) {
 		return;
 	}
 
+	// A CREATE (no existing id) reserves an id first, which is what makes it
+	// safe to retry after an ambiguous transport failure. Without it, a retry
+	// can produce a SECOND file with the same name in the same folder -- and
+	// duplicate names are a hard error by design (R-4), so the path becomes
+	// unaddressable and the user sees "ambiguous" for a file they wrote once.
+	//
+	// Costs one extra round trip per created file. The alternative, in place
+	// until now, was refusing to retry writes at all and surfacing spurious
+	// failures on flaky networks.
+	//
+	// If the reservation itself fails we simply proceed without one: a create
+	// that cannot be retried is strictly better than no create at all.
+	std::string reserved_id;
+	if (handle.meta.id.empty()) {
+		auto id_resp = client.GenerateFileId();
+		if (id_resp.ok) {
+			ParseGeneratedFileId(id_resp.body, reserved_id);
+		}
+	}
+
 	auto resp = client.Upload(handle.meta.id, handle.write_parent_id, handle.write_name, "application/octet-stream",
-	                          handle.write_buffer);
+	                          handle.write_buffer, reserved_id);
 	if (!resp.ok) {
 		ThrowGDriveError(resp.error, handle.path);
 	}

@@ -195,6 +195,23 @@ gdrive_permanent_delete=true` to opt in. Renames are **not atomic**; DuckDB's
 storage manager assumes they are, so do not put a DuckDB database file on
 `gdrive://`.
 
+### Consistency, stated plainly
+
+A scan is **not** isolated from a concurrent overwrite. DuckDB captures a
+file's size when it opens it, and reads are served from a block cache keyed by
+the revision that was current at open. If somebody replaces the file *while*
+a query is reading it, that query can mix blocks from two revisions.
+
+Drive offers no way to pin a download to a revision, so this is not something
+the extension can fix — only report. In practice it matters for a file being
+rewritten under a live query, which is exactly the pattern a table format
+(DuckLake, Iceberg) avoids by writing new files rather than mutating old ones.
+
+Creates are **idempotent**: the extension reserves a file id
+(`files.generateIds`) before writing, so a retry after a dropped connection
+cannot leave you with two files of the same name — which, given that duplicate
+names are a hard error here, would otherwise make the path unusable.
+
 Writing Parquet to Drive produces an opaque binary file. If you were hoping to
 *see* your data in Drive afterwards, you will be disappointed — export to CSV
 instead.

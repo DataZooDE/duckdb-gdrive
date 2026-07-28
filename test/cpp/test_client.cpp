@@ -206,3 +206,31 @@ TEST_CASE("DriveCallStats::Total sums the per-kind call counters only", "[client
 	stats.retries = 300;
 	REQUIRE(stats.Total() == 1 + 2 + 3 + 4 + 5 + 6 + 7);
 }
+
+// ---------------------------------------------------------------------------
+// files.generateIds -- the reservation that makes a CREATE retryable.
+//
+// Verified against the live API 2026-07-27: creating with a reserved id
+// succeeds once and returns 409 "A file already exists with the provided ID"
+// on a repeat, with exactly ONE file present. That 409 is what lets an
+// ambiguous transport failure be retried without risking the duplicate that
+// R-4 turns into a permanently unaddressable path.
+// ---------------------------------------------------------------------------
+TEST_CASE("ParseGeneratedFileId takes the first id", "[client]") {
+	std::string id;
+	REQUIRE(duckdb::gdrive::ParseGeneratedFileId(R"({"ids":["1AbC","2DeF"]})", id));
+	REQUIRE(id == "1AbC");
+}
+
+TEST_CASE("ParseGeneratedFileId rejects responses that carry no usable id", "[client]") {
+	std::string id;
+	// An empty array is a well-formed response with nothing in it. Returning
+	// true here would hand the caller an empty id, which Drive would treat as
+	// "no reservation" -- silently losing the idempotency this exists for.
+	REQUIRE_FALSE(duckdb::gdrive::ParseGeneratedFileId(R"({"ids":[]})", id));
+	REQUIRE_FALSE(duckdb::gdrive::ParseGeneratedFileId(R"({"ids":[""]})", id));
+	REQUIRE_FALSE(duckdb::gdrive::ParseGeneratedFileId(R"({})", id));
+	REQUIRE_FALSE(duckdb::gdrive::ParseGeneratedFileId("not json at all", id));
+	// An error body must never look like a reservation.
+	REQUIRE_FALSE(duckdb::gdrive::ParseGeneratedFileId(R"({"error":{"code":403}})", id));
+}

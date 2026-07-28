@@ -194,6 +194,28 @@ bool ParseFileMetaObject(const picojson::object &obj, DriveFileMeta &out) {
 
 } // namespace
 
+//! First id out of a files.generateIds response: {"ids":["...", ...]}.
+//!
+//! Pure, and deliberately placed with the other parsers so test_client.cpp
+//! can exercise it without any DuckDB linkage.
+bool ParseGeneratedFileId(const std::string &json, std::string &out) {
+	picojson::value root;
+	if (!picojson::parse(root, json).empty() || !root.is<picojson::object>()) {
+		return false;
+	}
+	const auto &obj = root.get<picojson::object>();
+	auto it = obj.find("ids");
+	if (it == obj.end() || !it->second.is<picojson::array>()) {
+		return false;
+	}
+	const auto &arr = it->second.get<picojson::array>();
+	if (arr.empty() || !arr[0].is<std::string>()) {
+		return false;
+	}
+	out = arr[0].get<std::string>();
+	return !out.empty();
+}
+
 bool ParseFileMeta(const std::string &json_object, DriveFileMeta &out) {
 	picojson::value root;
 	std::string parse_err = picojson::parse(root, json_object);
@@ -562,8 +584,14 @@ public:
 		return ExecuteWithRetry(HttpMethod::GET, path, {}, "", "", &DriveCallStats::files_export, {200});
 	}
 
+	DriveResponse GenerateFileId() override {
+		std::string path = "/drive/v3/files/generateIds?count=1&space=drive&" + AllDrivesParams();
+		return ExecuteWithRetry(HttpMethod::GET, path, {}, "", "", &DriveCallStats::files_get, {200});
+	}
+
 	DriveResponse Upload(const std::string &file_id, const std::string &parent_id, const std::string &name,
-	                     const std::string &content_type, const std::string &data) override {
+	                     const std::string &content_type, const std::string &data,
+	                     const std::string &reserved_id) override {
 		// BUG FIX (live run 2026-07-26): `content_type` is a real MIME type
 		// for every caller EXCEPT MutateCreateDirectory, which passes Drive's
 		// pseudo-type "application/vnd.google-apps.folder" -- not a valid
@@ -600,6 +628,16 @@ public:
 				metadata << ",";
 			}
 			metadata << "\"mimeType\":\"" << JsonEscape(content_type) << "\"";
+			first = false;
+		}
+		if (!reserved_id.empty() && file_id.empty()) {
+			// A CREATE with a pre-reserved id. Drive rejects a second create
+			// with the same id (409), which is exactly what makes the request
+			// safe to retry -- see GenerateFileId.
+			if (!first) {
+				metadata << ",";
+			}
+			metadata << "\"id\":\"" << JsonEscape(reserved_id) << "\"";
 		}
 		metadata << "}";
 
@@ -619,8 +657,21 @@ public:
 		if (file_id.empty()) {
 			path << "/upload/drive/v3/files?uploadType=multipart&fields=" << UrlEncode(FileFieldsMask()) << "&"
 			     << AllDrivesParams();
-			return ExecuteWithRetry(HttpMethod::POST, path.str(), {}, body, content_type_header,
-			                        &DriveCallStats::files_create, {200});
+			if (reserved_id.empty()) {
+				return ExecuteWithRetry(HttpMethod::POST, path.str(), {}, body, content_type_header,
+				                        &DriveCallStats::files_create, {200});
+			}
+			// With a reserved id the create IS retryable: a duplicate attempt
+			// cannot make a second file, it can only collide with the first.
+			auto resp = ExecuteWithRetry(HttpMethod::POST, path.str(), {}, body, content_type_header,
+			                             &DriveCallStats::files_create, {200}, /*retry_non_idempotent=*/true);
+			if (!resp.ok && resp.http_status == 409) {
+				// 409 "A file already exists with the provided ID" means an
+				// earlier attempt DID land and we only lost its response.
+				// That is a success, not a failure -- report the file.
+				return GetMetadata(reserved_id);
+			}
+			return resp;
 		}
 		path << "/upload/drive/v3/files/" << UrlEncode(file_id) << "?uploadType=multipart&fields="
 		     << UrlEncode(FileFieldsMask()) << "&" << AllDrivesParams();
@@ -774,7 +825,8 @@ private:
 	DriveResponse ExecuteWithRetry(HttpMethod method, const std::string &path_and_query,
 	                               const std::vector<std::pair<std::string, std::string>> &extra_headers,
 	                               const std::string &body, const std::string &content_type,
-	                               int64_t DriveCallStats::*counter, const std::vector<int> &success_statuses) {
+	                               int64_t DriveCallStats::*counter, const std::vector<int> &success_statuses,
+	                               bool retry_non_idempotent = false) {
 		int attempt = 0;
 		for (;;) {
 			++attempt;
@@ -807,7 +859,7 @@ private:
 				// is tracked in docs/reviews/2026-07-26-codex-review-2-read-
 				// path.md, finding 1, and is a piece of work rather than a
 				// patch.
-				if (IsIdempotent(method) && attempt < kMaxAttempts) {
+				if ((retry_non_idempotent || IsIdempotent(method)) && attempt < kMaxAttempts) {
 					stats_.retries += 1;
 					RecordGlobalRetry();
 					SleepBackoff(attempt, 0);
@@ -817,7 +869,7 @@ private:
 				response.ok = false;
 				response.http_status = 0;
 				response.error.kind = GDriveErrorKind::TRANSIENT;
-				if (IsIdempotent(method)) {
+				if (retry_non_idempotent || IsIdempotent(method)) {
 					response.error.message = "network transport failure (no response from Drive)";
 				} else {
 					// Say plainly that the outcome is unknown. "Failed" would

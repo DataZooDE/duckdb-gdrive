@@ -165,8 +165,20 @@ public:
 	//! cached or served, because an entry we cannot scope is one we cannot
 	//! safely reuse.
 	void BeginQuery(idx_t generation);
-	bool TryGetMetadata(const CacheKey &identity, const std::string &file_id, DriveFileMeta &out);
-	void PutMetadata(const CacheKey &identity, const std::string &file_id, const DriveFileMeta &meta);
+
+	//! Metadata for `file_id`, fetching it at most ONCE however many threads
+	//! ask concurrently.
+	//!
+	//! Single-flight matters here for the same reason it does in the block
+	//! cache: DuckDB opens a handle per thread, and a plain
+	//! check-then-fetch lets all of them miss together and issue the same
+	//! files.get. That is the very amplification this cache exists to remove,
+	//! reappearing at the moment of a cold start.
+	//!
+	//! `fetch` returns false for "no such file" (which is NOT cached -- a
+	//! later create must be visible) and throws for anything else.
+	bool GetOrFetchMetadata(const CacheKey &identity, const std::string &file_id,
+	                        const std::function<bool(DriveFileMeta &)> &fetch, DriveFileMeta &out);
 	//! Drop everything belonging to one secret -- called when a secret is
 	//! dropped or re-created, since its ids may no longer be reachable.
 	void InvalidateSecret(const std::string &secret_name);
@@ -177,7 +189,10 @@ private:
 	mutex lock;
 	unordered_map<std::string, DriveFileMeta> entries;
 
-	unordered_map<std::string, DriveFileMeta> metadata_entries;
+	struct MetaEntry {
+		std::shared_future<shared_ptr<const DriveFileMeta>> value;
+	};
+	unordered_map<std::string, MetaEntry> metadata_entries;
 	idx_t metadata_generation = 0;
 };
 
