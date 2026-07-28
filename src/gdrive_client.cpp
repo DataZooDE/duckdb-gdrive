@@ -280,6 +280,7 @@ bool ParseFileList(const std::string &json_body, std::vector<DriveFileMeta> &out
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "httplib.hpp"
 
+#include <atomic>
 #include <algorithm>
 #include <chrono>
 #include <memory>
@@ -333,6 +334,23 @@ void ResetGlobalDriveCallStats() {
 	auto &box = Box();
 	std::lock_guard<std::mutex> guard(box.mu);
 	box.stats = DriveCallStats();
+}
+
+// A GAUGE, not a counter, and therefore deliberately NOT part of
+// DriveCallStats: ResetGlobalDriveCallStats() must not zero it, because the
+// cache would still be holding those entries and gdrive_stats() would then
+// report a size that is simply false.
+std::atomic<uint64_t> &PathCacheGauge() {
+	static std::atomic<uint64_t> gauge {0};
+	return gauge;
+}
+
+void SetGlobalPathCacheEntries(uint64_t entries) {
+	PathCacheGauge().store(entries, std::memory_order_relaxed);
+}
+
+uint64_t GetGlobalPathCacheEntries() {
+	return PathCacheGauge().load(std::memory_order_relaxed);
 }
 
 void IncrementGlobalCacheHit() {

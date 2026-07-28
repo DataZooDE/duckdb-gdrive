@@ -37,6 +37,34 @@ std::string CacheKey::ToString() const {
 	return out;
 }
 
+void GDrivePathCache::SetMaxEntries(idx_t max_entries_p) {
+	lock_guard<mutex> guard(lock);
+	max_entries = max_entries_p;
+	EvictPathsLocked();
+}
+
+//! Least-recently-used eviction of path->id entries. Caller holds `lock`.
+//!
+//! A path mapping is cheap to rebuild -- one files.list per segment -- so
+//! evicting the coldest is always safe, unlike the block cache where an
+//! in-flight entry must survive.
+void GDrivePathCache::EvictPathsLocked() {
+	if (max_entries == 0) {
+		SetGlobalPathCacheEntries(entries.size());
+		return; // unbounded, by configuration
+	}
+	while (max_entries != 0 && entries.size() > max_entries) {
+		auto victim = entries.begin();
+		for (auto it = entries.begin(); it != entries.end(); ++it) {
+			if (it->second.used_at < victim->second.used_at) {
+				victim = it;
+			}
+		}
+		entries.erase(victim);
+	}
+	SetGlobalPathCacheEntries(entries.size());
+}
+
 bool GDrivePathCache::TryGet(const CacheKey &key, DriveFileMeta &out) {
 	lock_guard<mutex> guard(lock);
 	auto it = entries.find(key.ToString());
@@ -44,14 +72,17 @@ bool GDrivePathCache::TryGet(const CacheKey &key, DriveFileMeta &out) {
 		IncrementGlobalCacheMiss();
 		return false;
 	}
-	out = it->second;
+	it->second.used_at = ++path_clock;
+	out = it->second.meta;
 	IncrementGlobalCacheHit();
 	return true;
 }
 
 void GDrivePathCache::Put(const CacheKey &key, const DriveFileMeta &meta) {
 	lock_guard<mutex> guard(lock);
-	entries[key.ToString()] = meta;
+	entries[key.ToString()] = PathEntry {meta, ++path_clock};
+	EvictPathsLocked();
+	SetGlobalPathCacheEntries(entries.size());
 }
 
 namespace {

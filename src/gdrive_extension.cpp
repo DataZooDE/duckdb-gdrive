@@ -97,6 +97,16 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "blocks are evicted above this. Shared by all files and all threads.",
 	    LogicalType::UBIGINT, Value::UBIGINT(256ULL * 1024 * 1024));
 
+	// S-2.11. The path->id map had no bound at all: entries were removed only
+	// by explicit invalidation, so a long-lived process globbing many folders
+	// grew it forever. 0 restores that unbounded behaviour deliberately.
+	loader.GetDatabaseInstance().config.AddExtensionOption(
+	    "gdrive_path_cache_entries",
+	    "Maximum path->file-id mappings to cache (default 4096, 0 for unbounded). "
+	    "Least-recently-used entries are dropped above this; a dropped mapping just "
+	    "costs one files.list per segment to rebuild.",
+	    LogicalType::UBIGINT, Value::UBIGINT(4096));
+
 	gdrive::RegisterGDriveSecrets(loader);
 	gdrive::RegisterGDriveStats(loader);
 }

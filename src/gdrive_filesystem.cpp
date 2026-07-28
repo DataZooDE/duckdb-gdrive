@@ -450,6 +450,7 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 		auto ctx = FileOpener::TryGetClientContext(opener);
 		cache.BeginQuery(ctx ? ctx->transaction.GetActiveQuery() : 0);
 	}
+	cache.SetMaxEntries(static_cast<idx_t>(GetUBigIntSetting(opener, "gdrive_path_cache_entries", 4096)));
 
 	auto meta = ResolvePath(cache, *client, auth, parsed.uri);
 
@@ -943,6 +944,7 @@ vector<OpenFileInfo> GDriveFileSystem::Glob(const string &path, FileOpener *open
 		auto ctx = FileOpener::TryGetClientContext(op);
 		cache.BeginQuery(ctx ? ctx->transaction.GetActiveQuery() : 0);
 	}
+	cache.SetMaxEntries(static_cast<idx_t>(GetUBigIntSetting(op, "gdrive_path_cache_entries", 4096)));
 
 	auto parsed = ParseGDriveUri(path);
 	if (!parsed.ok) {

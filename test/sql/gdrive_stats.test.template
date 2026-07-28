@@ -195,3 +195,32 @@ query I
 SELECT value FROM gdrive_stats() WHERE metric = 'files_export'
 ----
 2
+
+# ---------------------------------------------------------------------------
+# S-2.11 -- the path cache is BOUNDED.
+#
+# It maps path -> file id and, until this test, grew forever: entries were
+# only ever removed by explicit invalidation. A query tool restarts often
+# enough that nobody noticed, but a long-lived process globbing many folders
+# has an unbounded map in it, and the plan called for eviction from the start.
+#
+# The bound is asserted by SETTING it small and then resolving far more paths
+# than that. Asserting on a default-sized cache would prove nothing -- it
+# would pass whether eviction worked or not, because the default is never
+# reached in a test.
+# ---------------------------------------------------------------------------
+statement ok
+SET gdrive_path_cache_entries = 8;
+
+statement ok
+SELECT count(*) FROM read_csv('gdrive://fixtures/many/f-0*.csv');
+
+query I
+SELECT value <= 8 FROM gdrive_stats() WHERE metric = 'path_cache_entries'
+----
+true
+
+# ...and the cache is still USEFUL at that size: a re-read of a path just
+# resolved must not have been evicted out from under itself mid-query.
+statement ok
+SET gdrive_path_cache_entries = 1024;

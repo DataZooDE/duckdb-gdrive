@@ -164,6 +164,12 @@ public:
 	//! last one seen. Generation 0 means "no query context": nothing is
 	//! cached or served, because an entry we cannot scope is one we cannot
 	//! safely reuse.
+	//! Cap on path->id entries. 0 means unbounded, which is what this was
+	//! before a bound existed: entries were only ever removed by explicit
+	//! invalidation, so a long-lived process globbing many folders grew the
+	//! map forever.
+	void SetMaxEntries(idx_t max_entries);
+
 	void BeginQuery(idx_t generation);
 
 	//! Metadata for `file_id`, fetching it at most ONCE however many threads
@@ -187,7 +193,16 @@ public:
 
 private:
 	mutex lock;
-	unordered_map<std::string, DriveFileMeta> entries;
+	struct PathEntry {
+		DriveFileMeta meta;
+		uint64_t used_at = 0;
+	};
+	unordered_map<std::string, PathEntry> entries;
+	idx_t max_entries = 0;
+	uint64_t path_clock = 0;
+
+	//! Caller must hold `lock`.
+	void EvictPathsLocked();
 
 	struct MetaEntry {
 		std::shared_future<shared_ptr<const DriveFileMeta>> value;

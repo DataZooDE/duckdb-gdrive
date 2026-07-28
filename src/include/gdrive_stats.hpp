@@ -2,6 +2,8 @@
 
 #include "gdrive_client.hpp"
 
+#include <cstdint>
+
 #include <memory>
 #include <string>
 
@@ -37,6 +39,14 @@ namespace gdrive {
 //! GDriveClientImpl's ResetStats() -- see gdrive_client.cpp for the rationale).
 DriveCallStats GetGlobalDriveCallStats();
 void ResetGlobalDriveCallStats();
+
+//! Live size of the path cache. A GAUGE, not a counter: gdrive_stats() is a
+//! global table function with no handle on the filesystem object, and the
+//! cache is the only thing that knows its own size. uint64_t rather than
+//! idx_t because this header is reachable from the pure sources, which must
+//! not pull in duckdb.hpp.
+void SetGlobalPathCacheEntries(uint64_t entries);
+uint64_t GetGlobalPathCacheEntries();
 
 //! For components that track Drive-related activity but are not themselves a
 //! GDriveClient (the path-resolution cache, notably).

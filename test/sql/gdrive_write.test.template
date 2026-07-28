@@ -140,6 +140,52 @@ SELECT count(*) FROM glob('gdrive://scratch/${SCRATCH}/written.csv')
 1
 
 # ---------------------------------------------------------------------------
+# S-3.8 -- a write that FAILS must leave nothing behind.
+#
+# The design buffers bytes locally and uploads once on close, so a query that
+# throws partway should never have contacted Drive at all. That is the theory;
+# this asserts it. A half-written Parquet appearing in someone's Drive is a
+# bad failure -- worse than the query failing -- because it looks like data.
+#
+# error() throws at row 500 of 1000, i.e. after the write handle exists and
+# has taken bytes, which is exactly the window that matters.
+# ---------------------------------------------------------------------------
+statement error
+COPY (SELECT CASE WHEN i = 500 THEN error('boom')::INT ELSE i END AS v FROM range(1000) t(i))
+TO 'gdrive://scratch/${SCRATCH}/partial.csv' (FORMAT csv);
+----
+boom
+
+query I
+SELECT count(*) FROM glob('gdrive://scratch/${SCRATCH}/partial.csv')
+----
+0
+
+# ---------------------------------------------------------------------------
+# S-2.19 -- FileExists / DirectoryExists, BOTH outcomes.
+#
+# The false case is the one that was wrong: these used to catch every
+# exception and return false, so an R-4 ambiguity and a 403 both reported
+# "does not exist" and a caller using existence as a guard would happily
+# overwrite. Only genuine absence may be false.
+# ---------------------------------------------------------------------------
+query I
+SELECT count(*) FROM glob('gdrive://scratch/${SCRATCH}/out.csv')
+----
+1
+
+query I
+SELECT count(*) FROM glob('gdrive://scratch/${SCRATCH}/no-such-file.csv')
+----
+0
+
+# Ambiguity must NOT be reported as absence.
+statement error
+SELECT count(*) FROM read_csv('gdrive://fixtures/dup/dup.csv');
+----
+is ambiguous
+
+# ---------------------------------------------------------------------------
 # S-3.12 -- directories are files with a folder mimeType.
 # ---------------------------------------------------------------------------
 statement ok

@@ -82,6 +82,15 @@
 > (unreachable from SQL — `COPY` is sequential and `ATTACH` does not route
 > here), and the REQ-NF-01 performance gate (needs a GCS denominator).
 >
+> **Backlog closed 2026-07-28** — the remaining un-slices, done red/green:
+>
+> | Slice | Status |
+> |---|---|
+> | S-2.11 path-cache eviction | **built.** The cache was unbounded; entries were only ever removed by explicit invalidation. Now LRU behind `gdrive_path_cache_entries` (default 4096, `0` = unbounded), with the live size exposed as `path_cache_entries` in `gdrive_stats()` so the bound is assertable. Negative control: 102 entries unbounded vs ≤8 capped. |
+> | S-1.4 refresh survives restart | **covered**, `e2e/tests/test_secret_persistence.py`. Two processes sharing a secret directory; the second gets no credential in-band. Controls: an empty secret directory must fail, and a garbage refresh token must fail with an auth message that does not echo the token. |
+> | S-1.3 `authorization_code` | **withdrawn, and now pinned.** `test/sql/gdrive_secret.test` asserts the provider is absent, with a control proving the two real providers still register. Registering it later breaks that test, which forces the README and this plan to be updated in the same change. |
+> | S-3.13 `Truncate`/`Trim` | **unreachable from SQL, verified rather than assumed.** Both throw `NotImplementedException`. DuckDB calls them only from the WAL, the single-file block manager and the temp-file manager — all database-file paths. An `ATTACH 'gdrive://…/probe.duckdb'` probe was run: DuckDB normalises the URI to `gdrive:/` and opens it with the LOCAL filesystem, so ours is never called. Same shape as the positional-write gap above, and recorded for the same reason. |
+>
 > The lesson worth keeping: a green suite tells you the covered behaviours
 > hold. It tells you nothing about whether the coverage matches the promises.
 > Audit the claims, not the count.
