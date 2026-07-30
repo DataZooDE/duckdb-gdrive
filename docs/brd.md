@@ -191,7 +191,7 @@ validation with timeout handling, and token expiry and refresh bookkeeping.
 
 **Reusable as a pattern:** the DuckDB secret shape — creation providers
 (`client_credentials`, `config`, and an interactive `authorization_code` that
-was scoped out; see §0 of the implementation plan) — and, most valuably,
+was scoped out; see the decisions table in CLAUDE.md) — and, most valuably,
 the token manager that reads a token out of a secret, refreshes it
 transparently when expired, and writes the new tokens back. That machinery is
 the difference between "OAuth works once" and "OAuth keeps working".

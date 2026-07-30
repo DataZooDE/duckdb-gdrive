@@ -1,7 +1,7 @@
 // S-2.2 / S-2.5 / part of S-4.1 -- the Drive API v3 transport.
 //
 // See src/include/gdrive_client.hpp for the frozen contract and rationale,
-// and docs/implementation-plan.md section 0 (decision D-1: real Drive is the
+// and CLAUDE.md's decision D-1 (real Drive is the
 // only integration target, no fake server, no HTTP replay) for why this file
 // has no Catch2 coverage of its networking behaviour.
 //

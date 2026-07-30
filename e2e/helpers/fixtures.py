@@ -1,6 +1,6 @@
 """Fixture layout and content.
 
-Two tiers, for a reason (plan section 2.2):
+Two tiers, for a reason:
 
 * **Permanent, read-only** under ``/fixtures``. Seeded once by ``make
   seed_fixtures``. Re-uploading a 100 MB Parquet on every CI run would be slow

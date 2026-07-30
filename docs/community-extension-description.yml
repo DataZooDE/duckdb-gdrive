@@ -7,7 +7,7 @@
 #
 # `ref` must point at a tagged commit whose live suite has passed against a
 # real Drive account -- the community build runs no live tests of ours, so
-# whatever is broken at tag time ships. See docs/implementation-plan.md §6,
+# whatever is broken at tag time ships. See docs/RELEASE.md,
 # criterion 8, and docs/RELEASE.md.
 #
 # The placeholder below is deliberate. Substituting it is the one step that

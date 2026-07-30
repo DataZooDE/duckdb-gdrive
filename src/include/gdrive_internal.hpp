@@ -5,9 +5,9 @@
 // (gdrive_filesystem.cpp, gdrive_path_cache.cpp, gdrive_file_handle.cpp,
 // gdrive_export.cpp, gdrive_upload.cpp, gdrive_mutate.cpp).
 //
-// This header is NOT part of the frozen contract (docs/implementation-plan.md
-// section 3.2) -- it did not exist before fan-out, so nobody else depends on
-// it and it is safe to shape freely. It exists because gdrive_filesystem.hpp
+// This header is NOT part of the frozen contract -- it did not exist before
+// the parallel tracks started, so nobody else depends on it and it is safe to
+// shape freely (CLAUDE.md, "Working several tracks in parallel"). It exists because gdrive_filesystem.hpp
 // is frozen and cannot grow new fields; the state a handle needs beyond what
 // that header declares (an auth context, so Read/Write/Close do not need an
 // opener) lives in a subclass declared here instead.

@@ -2,9 +2,10 @@
 //
 // Returns one row per DriveCallStats counter, reading the process-wide
 // aggregate declared in gdrive_stats.hpp / defined in gdrive_client.cpp. Live
-// tests assert on these numbers to prove the R-1 path-cache mitigation
-// actually bounds Drive API amplification (docs/implementation-plan.md
-// S-2.7 / S-2.9) -- if the counters lie, the mitigation is unmeasurable.
+// tests assert on these numbers to prove the path-cache mitigation for R-1
+// (Drive has no path addressing, so each segment costs an API call) actually
+// bounds the amplification -- if the counters lie, the mitigation is
+// unmeasurable.
 //
 // Registration pattern follows ../quack-oauth/src/diagnose.cpp
 // (quack_oauth_diagnose(): TableFunction with Bind/Init/Scan, no arguments,

@@ -1,9 +1,24 @@
 # Releasing, and submitting to community-extensions
 
-Criterion 8 of `docs/implementation-plan.md` §6 is acceptance into
+The project's last acceptance criterion is getting into
 `duckdb/community-extensions`. That repo builds the extension itself from a
 tagged commit and runs **no live tests of ours** — so whatever is broken at
 tag time ships. This is the checklist for not finding that out afterwards.
+
+## Definition of done
+
+The eight criteria the project set itself, and where each stands.
+
+| # | Criterion | Status |
+|---|---|---|
+| 1 | `SELECT count(*) FROM 'gdrive://…parquet'` correct against real Drive, clean install, README only | met — `make smoke_loadable` does exactly this against the shipping artifact |
+| 2 | Cold 100 MB Parquet scan within 3× the same file over GCS, number published | **marginal** — 3.05× default, 2.02× tuned; `docs/benchmark.md` |
+| 3 | A native Sheet queryable with no manual export | met, live-tested |
+| 4 | Credential, permission and quota errors each distinct and actionable | met, except the rate-limit path (see *What must be true first*) |
+| 5 | CI green on all target platforms, stable + LTS | met |
+| 6 | `datazoo-oauth2` standalone **and `erpl-web` consuming it** with no remaining copy | **open** — deferred by D-2, not dropped |
+| 7 | No credential in the repo, in any log, or in any error message | met, gated by `make check_credentials` |
+| 8 | Accepted into `duckdb/community-extensions` | submitted 2026-07-30 (PR #2407) |
 
 ## Before tagging
 

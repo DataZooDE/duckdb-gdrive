@@ -22,7 +22,7 @@ test: unit_test test_release
 # ---------------------------------------------------------------------------
 # Catch2 unit tests -- pure logic, no DuckDB linkage, no network, no
 # credentials. Always runnable by anyone who can build. See
-# docs/implementation-plan.md section 1.
+# CLAUDE.md, "Tests -- two layers, no mocks anywhere".
 # ---------------------------------------------------------------------------
 .PHONY: unit_test
 unit_test: release

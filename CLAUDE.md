@@ -4,12 +4,37 @@ DuckDB extension registering a `gdrive://` filesystem over Google Drive, so
 `read_parquet`, `read_csv`, `COPY`, `glob` and `ATTACH` can address a Drive
 file directly with no download step.
 
-See `docs/brd.md` (why), `docs/hld.md` (what), `docs/implementation-plan.md`
-(how we build and test it — **read section 0 first: it records decisions that
-override the other two documents**).
+See `docs/brd.md` (why) and `docs/hld.md` (what). The decisions below
+**override both** where they differ — they were taken during implementation
+and the design docs were written before.
+
+## Decisions (D-1 … D-8)
+
+These are referenced by ID from source comments. Changing one means changing
+the code that cites it.
+
+| # | Decision | Consequence |
+|---|---|---|
+| **D-1** | **Real Google Drive is the only integration target. No fake Drive server, no HTTP replay, no test doubles.** Supersedes HLD §10's "integration against a fake". | The merge gate needs the CI service-account secret. Fork PRs cannot run the live suite; they run build + pure-logic tests only. Accepted knowingly. |
+| **D-2** | `datazoo-oauth2` is built first and consumed here immediately; the `erpl-web` migration is deferred. | Time-boxed debt against REQ-A-02. Until it lands, no logic change is made to the extracted code that `erpl-web` would need to absorb. |
+| **D-3** | No FUSE/rclone benchmark, no go/no-go gate. | BRD §9's strongest alternative stays formally unanswered, so the README answers it in prose ("When you should NOT use this"). The GCS comparison still ships — REQ-NF-01 requires it. |
+| **D-4** | Public `github.com/DataZooDE/duckdb-gdrive`, target name `gdrive`, scheme `gdrive://`. | `INSTALL gdrive; LOAD gdrive;` after community acceptance. |
+| **D-5** | **Shared Drives are in v1.** Not a preference: a service account has no personal Drive storage quota and cannot own files in a My Drive, so CI fixtures *must* live in a Shared Drive. | The secret carries an optional `drive_id` root binding. Personal Drive works for user-OAuth secrets. |
+| **D-6** | **`RemoveFile` trashes by default**; `SET gdrive_permanent_delete=true` opts into `files.delete`. | Trash is recoverable; a table-format cleanup routine deleting the wrong thing on someone's own Drive is not. |
+| **D-7** | **Docs export to `text/plain`** by default (`gdrive_docs_export_mime` to change); Sheets always `text/csv`. | Markdown is not byte-stable across exports, which would make `GetVersionTag`-keyed caching lie. |
+| **D-8** | Owner of `datazoo-oauth2`: Joachim Rosskopf (REQ-NF-06). | — |
 
 Target name: **`gdrive`** — `INSTALL gdrive; LOAD gdrive;`, and `TARGET_NAME`
 in `CMakeLists.txt`.
+
+### A note on `S-x.y` in comments
+
+Source comments carry work-item IDs like `S-2.11` or `S-3.8`. They came from a
+build plan that has since been removed — it was ~60% schedule and wave
+sequencing that stopped being true the moment the thing shipped. The IDs are
+left in place because they appear throughout the commit history, so
+`git log --grep=S-2.11` still finds the reasoning and the red/green cycle for
+any of them. They are historical labels, not pointers to a live document.
 
 ## Knowledge updates
 
@@ -52,7 +77,10 @@ bumping the DuckDB submodule.
 
 ## Tests — two layers, no mocks anywhere
 
-Policy in `docs/implementation-plan.md` §1. Summary:
+Two layers, **no test doubles anywhere** (D-1). If a behaviour needs a socket
+it gets a live test, never a double; if it does not, it gets a Catch2 test.
+**No behaviour gets both** — a live SQL test covering something means there is
+no Catch2 test for the same thing.
 
 | Layer | What | Network | Command |
 |---|---|---|---|
@@ -117,7 +145,7 @@ unused on a project still in "Testing" publishing status. If the live job
 starts failing auth, re-run `make oauth_consent` and update the secret — that
 is the expected maintenance, not a bug.
 
-Fixtures are two-tier (plan §2.2): permanent read-only `/fixtures` seeded
+Fixtures are two-tier: permanent read-only `/fixtures` seeded
 once, and per-test `/scratch/run-<uuid>` deleted on teardown so concurrent CI
 runs cannot collide. `make sweep_orphans` cleans up after crashed runs.
 
@@ -138,7 +166,7 @@ src/
   gdrive_glob.cpp             PURE: local glob (Drive's API cannot glob)
   gdrive_service_account_pure.cpp  PURE: RFC 7523 assertion construction
   include/                    one header per module; the pure/DuckDB split
-                              shares a header (plan §1)
+                              shares a header
 test/cpp/                     Catch2, pure logic only
 test/cpp/testdata/            REAL captured Drive error bodies — data, not mocks
 test/sql/                     SQLLogicTest; *.test.template gets fixture ids

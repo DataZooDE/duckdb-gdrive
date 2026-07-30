@@ -1,6 +1,6 @@
 // S-2.2 / S-2.5 / part of S-4.1 -- pure-logic coverage for gdrive_client.cpp.
 //
-// docs/implementation-plan.md section 1 / decision D-1: GDriveClientImpl
+// CLAUDE.md, decision D-1 / the two-layer test policy: GDriveClientImpl
 // itself is DuckDB-coupled, real-network I/O and is exercised only by LIVE
 // tests against real Drive (none of which can run yet -- no CI Shared Drive).
 // This file tests only the genuinely pure pieces factored out inside

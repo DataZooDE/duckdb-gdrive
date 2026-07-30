@@ -436,7 +436,7 @@ GDriveAuthContext BuildContextFromConfig(const KeyValueSecret &kv, const std::st
 	// minting a fresh one via `grant_type=refresh_token` against Google's
 	// token endpoint. This is the delegated-user path a service account
 	// needs to write outside a Shared Drive (it has no storage quota of its
-	// own -- see docs/implementation-plan.md's live-test-credentials note).
+	// own -- see CLAUDE.md's live-test-credentials note).
 	const std::string refresh_token = GetOrEmpty(kv, "refresh_token");
 	const std::string client_id = GetOrEmpty(kv, "client_id");
 	const std::string client_secret = GetOrEmpty(kv, "client_secret");

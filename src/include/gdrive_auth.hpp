@@ -12,7 +12,7 @@ namespace gdrive {
 // The seam between Wave 1 (auth) and Wave 2 (filesystem).
 //
 // Frozen before either wave fanned out, so the two could proceed in parallel
-// against a fixed contract (plan section 3.2). The filesystem knows exactly
+// against a fixed contract. The filesystem knows exactly
 // one thing about authentication: how to obtain a bearer token for a secret.
 // Everything else -- which provider minted it, whether it was refreshed on
 // the way out, where the refresh token is persisted -- is Wave 1's business.

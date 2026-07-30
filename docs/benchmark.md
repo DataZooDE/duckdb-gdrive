@@ -157,7 +157,7 @@ footnote.
 
 ## If the gate is missed
 
-Per plan §S-4.2 the fix is **fewer round trips** — prefetching and coalescing
+The fix is **fewer round trips** — prefetching and coalescing
 adjacent byte ranges so a Parquet scan issues fewer, larger requests — not a
 relaxed gate. Drive's per-request latency dominates (see *Per-request latency*
 below: 0.3–2.1 s depending on the request shape), so request count is the

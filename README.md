@@ -93,7 +93,7 @@ pure-logic ones):
 **4.8×** where the goal is 3×. Not a marginal miss, and the cause is known —
 55 Drive round trips per query. See `docs/benchmark.md`.
 
-Not production-ready. `docs/implementation-plan.md` lists exactly what is
+Not production-ready. The *Known limitations* section below lists what is
 verified and what is not.
 
 ## Addressing
@@ -336,8 +336,8 @@ SELECT name, value FROM duckdb_settings() WHERE name LIKE 'gdrive%';
 
 ## Development
 
-See `CLAUDE.md` for the build and test workflow, and
-`docs/implementation-plan.md` for the plan and its recorded decisions.
+See `CLAUDE.md` for the build and test workflow, the recorded decisions
+(D-1 … D-8) and a list of pitfalls worth not rediscovering.
 
 ```bash
 GEN=ninja make          # build

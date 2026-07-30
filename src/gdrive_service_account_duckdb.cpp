@@ -5,7 +5,7 @@
 // Split rationale is in gdrive_service_account.hpp's header comment: claim
 // construction is pure and unit-tested; signing needs OpenSSL and the token
 // POST needs a socket, so both live here, exercised only by live SQL tests
-// (plan section 1 -- no mocks).
+// (CLAUDE.md, decision D-1 -- no mocks).
 #include "gdrive_service_account.hpp"
 
 #include "duckdb/common/exception.hpp"
