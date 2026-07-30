@@ -77,35 +77,30 @@ whatever else the box was doing. All legs must return an identical result or
 the run fails — otherwise a leg pointed at the wrong file would post a fast
 time and "pass".
 
-## Results
+## Results — history
 
-Measured 2026-07-27. Linux 6.18, **DuckDB v1.5.5**, extension statically
-linked. Fixture: `/fixtures/wide.parquet` (87.0 MB), the identical bytes in
-all three legs.
+The current result is at the top of this document. This section keeps the
+earlier measurements because the *trajectory* is the useful part: what changed,
+and what turned out to be measurement error rather than a real effect.
 
-| Leg | min | median | vs local |
-|---|---|---|---|
-| `local` | 0.14 s | 0.14 s | 1.0x |
-| `gs` (GCS) | 1.30 s | 1.39 s | 9.5x |
-| `gdrive` | 6.21 s | 6.77 s | 45.4x |
+| Date | gdrive | GCS | ratio | verdict | what changed |
+|---|---|---|---|---|---|
+| 2026-07-27 | 6.21 s | 1.30 s | 4.79x | FAIL | first measurement; 55 round trips per query |
+| 2026-07-30 | 4.36 s | — | — | not evaluated | shared block cache landed; no GCS leg that session |
+| **2026-07-30** | **4.09 s** | **1.34 s** | **3.05x** | **at the gate** | both legs together, 9 repeats |
 
-## **gdrive / GCS = 4.79x — the 3x gate FAILS**
+Two caveats on the 2026-07-27 row, both learned later and both worth carrying:
 
-Two independent runs gave 5.68x and 4.79x. This is not a marginal miss and
-not sampling noise: even taking the fastest `gdrive` minimum ever recorded
-(4.43 s, before this fixture was re-generated) against the slowest `gs`
-minimum (1.30 s), the ratio is 3.4x.
-
-**REQ-NF-01 is therefore NOT MET, and BRD success criterion 2 is not met.**
-
-### Method note
-
-The GCS leg reads the object over `https://storage.googleapis.com/...`
-rather than `gs://`. DuckDB's `gcs` secret type supports HMAC keys only, and
-creating a long-lived credential (or making a bucket permanently public) for
-a benchmark was not a reasonable trade. It is the same GCS backend, the same
-bytes and the same network path, so it measures what the gate asks about.
-The bucket was deleted immediately after measurement.
+* It was a **3-repeat** run. The GCS leg varies by 67% between sessions, which
+  is enough on its own to move the verdict by more than a full multiple. Any
+  ratio from a 3-repeat run — including that 4.79x, which this document
+  presented as settled for three days — should be read as indicative.
+* Its GCS leg read the object over `https://storage.googleapis.com/...`
+  rather than `gs://`, because DuckDB's `gcs` secret type supported HMAC keys
+  only and minting a long-lived credential for a benchmark was not a
+  reasonable trade. The current measurement uses a real `gs://` leg with a
+  short-lived OAuth2 bearer, which is why `make bench` now needs a gcloud
+  login. Both bucket instances were deleted immediately after measurement.
 
 ## Diagnosis
 
@@ -168,7 +163,7 @@ relaxed gate. Drive's per-request latency dominates (see *Per-request latency*
 below: 0.3–2.1 s depending on the request shape), so request count is the
 lever that matters.
 
-## Where the time actually goes (measured 2026-07-27)
+## Where the time actually goes
 
 The first diagnosis above — "55 round trips at ~150 ms" — was directionally
 right and quantitatively wrong. Measuring properly changed the conclusion.
@@ -176,28 +171,6 @@ Where the ~150 ms came from is not recorded anywhere; it appears to have been
 assumed. It was published in the README, the BRD and the community-extensions
 descriptor for as long as it existed. See *Per-request latency* below for what
 it actually is.
-
-### Drive's media endpoint has a ~1.2 s floor per request
-
-On a warm keep-alive connection, timed with `requests.Session`:
-
-| Request | Time |
-|---|---|
-| 1 KB | 1.21 s |
-| 1 KB (second) | 1.37 s |
-| 1 MB | 1.03 s |
-| 4 MB | 1.42 s |
-| 16 MB | 1.60 s |
-| **87 MB (whole file)** | **2.06 s** |
-
-A 1 KB read costs about as much as a 1 MB read. The marginal transfer rate is
-roughly 160 MB/s; the fixed cost is ~1.0–1.2 s and dominates everything below
-about 100 MB. This is Drive-side, not ours: it is the same on a warm socket
-with no handshake.
-
-**The consequence is counterintuitive and it drives the design: on Drive,
-fetching MORE data in FEWER requests is faster.** One 87 MB request (2.06 s)
-beats 35 ranged requests totalling 54.9 MB (4.94 s) by 2.4x.
 
 ### Per-request latency, by endpoint and request shape (measured 2026-07-30)
 
@@ -234,6 +207,32 @@ file. Neither generalises to "a Drive API round trip".
 Metadata calls, at ~300 ms, are the cheap ones — which is why the R-1 path
 cache is worth having but was never where the time went.
 
+### How that floor varies with size (measured 2026-07-27)
+
+This is the ranged-read row above, swept across sizes. It is where the "~1.2 s
+floor" figure quoted elsewhere in this repo came from, and it applies to
+**ranged reads of a large object** — not to Drive requests in general.
+
+On a warm keep-alive connection, timed with `requests.Session`:
+
+| Request | Time |
+|---|---|
+| 1 KB | 1.21 s |
+| 1 KB (second) | 1.37 s |
+| 1 MB | 1.03 s |
+| 4 MB | 1.42 s |
+| 16 MB | 1.60 s |
+| **87 MB (whole file)** | **2.06 s** |
+
+A 1 KB read costs about as much as a 1 MB read. The marginal transfer rate is
+roughly 160 MB/s; the fixed cost is ~1.0–1.2 s and dominates everything below
+about 100 MB. This is Drive-side, not ours: it is the same on a warm socket
+with no handshake.
+
+**The consequence is counterintuitive and it drives the design: on Drive,
+fetching MORE data in FEWER requests is faster.** One 87 MB request (2.06 s)
+beats 35 ranged requests totalling 54.9 MB (4.94 s) by 2.4x.
+
 ### What the request pattern actually looks like
 
 Tracing the benchmark query (`GDRIVE_TRACE_RANGES=1`):
@@ -245,7 +244,11 @@ Tracing the benchmark query (`GDRIVE_TRACE_RANGES=1`):
 * But those adjacent pairs are on **different file handles** — 35 reads across
   18 handles, and *zero* adjacent pairs share a handle.
 
-That last point killed the obvious fix. A per-handle read-ahead buffer was
+That last point killed the obvious fix, and it is worth saying that the
+obvious fix was also the *recommended* one: a commissioned research pass on
+Drive read performance concluded that coalescing adjacent ranges on a 10–16 MB
+threshold "will easily bridge the performance gap". Measured here, it did the
+opposite. A per-handle read-ahead buffer was
 implemented and measured: it changed the request count not at all (the
 follow-on read is another thread's handle) while inflating every request to
 the block size, fetching **136 MB instead of 54.9 MB**. It was reverted. The
@@ -312,7 +315,7 @@ Three things this says, none of them obvious beforehand:
    addressing. It is the strongest argument for the documented `id:` fast
    path.
 
-### The sweep above was under-sampled — resampled 2026-07-30
+### Block-size sweep, resampled (2026-07-30)
 
 "Best of two" is not enough to separate 4.62 s from 4.70 s. Re-run with five
 samples per cell, reporting both min and median, and adding the counterweight
@@ -351,23 +354,10 @@ measured configuration and it is documented rather than defaulted.
 
 ### Where that leaves REQ-NF-01
 
-**Superseded by the measurement at the top of this document.** This section
-previously divided a fresh gdrive number by a GCS minimum from a different
-session and a deleted bucket, and marked the result "provisional". Both legs
-have since been run together (2026-07-30, 9 repeats): **3.05x at the defaults,
-2.02x at 128 MiB blocks.**
+Settled at the top of this document: **3.05x at the defaults, 2.02x at 128 MiB
+blocks**, measured with both legs in one session.
 
-The provisional estimate said "~3.4x default, ~2.6x tuned". It was close, and
-it was still the wrong way to produce a number — the real GCS leg turned out
-to vary by 67% between sessions, so any ratio built on a remembered
-denominator was luckier than it deserved to be.
-
-The default stays 16 MiB rather than something that games the benchmark: a
-128 MiB block means a `count(*)` — which needs only the Parquet footer —
-downloads the entire file. That is a bad trade for every selective query, and
-tuning a default to a single benchmark is how benchmarks stop meaning
-anything.
-
-**These numbers need re-measuring against a live GCS leg in one session
-before being quoted as a ratio.** The bucket was deleted after the earlier
-run, so the 1.30 s denominator is from a previous session.
+An earlier estimate here divided a fresh gdrive number by a GCS minimum
+remembered from another session. It landed close (~3.4x / ~2.6x) and it was
+still the wrong way to produce a number — the real GCS leg varies by 67%
+between sessions, so that estimate was luckier than it deserved to be.

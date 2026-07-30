@@ -123,10 +123,16 @@ still blocks is the decision below.
   varied 1.03–1.72 s between sessions, which is enough to flip a 3-repeat
   verdict; three of four runs said FAIL and one said PASS on the same code.
 
-- **Retries can duplicate a create.** Mitigated — writes are no longer
-  retried after an ambiguous transport failure — but the real fix is Drive's
-  resumable upload protocol. See
-  `docs/reviews/2026-07-26-codex-review-2-read-path.md`, finding 1.
+- **Retries can duplicate a create.** Drive's simple upload is not
+  idempotent: if it commits a `files.create` and the response is lost, a retry
+  makes a second file with the same name — and duplicate names in one folder
+  are a hard error here (R-4), so a blind retry can poison a path permanently.
+
+  Mitigated: transport failures are retried only for idempotent methods, and
+  a failed write says plainly that it may or may not have been applied. Not
+  fixed: the real answer is Drive's resumable upload protocol, whose session
+  URI makes a retry genuinely idempotent. Documented under *Known limitations*
+  in the README so users meet it before it meets them.
 - **Rate-limit errors are not covered live.** Deliberate and documented in
   the README; make sure it stays documented rather than quietly dropped.
 

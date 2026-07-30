@@ -1,16 +1,16 @@
 # Implementation plan — `duckdb-gdrive`
 
-> ## RESUME HERE (2026-07-26, 34 commits, pushed to
-> ## github.com/DataZooDE/duckdb-gdrive)
+> ## STATUS (2026-07-30) — shipped
 >
-> **The extension works, and the SHIPPED ARTIFACT has been loaded into a
-> stock DuckDB v1.5.5 and used** — read_csv, glob, read_parquet, a native
-> Sheet, and a hive-partitioned tree. That is BRD criterion 1 demonstrated
-> rather than assumed.
+> **v0.1.0 is tagged and submitted** to `duckdb/community-extensions` as
+> PR #2407, ref `181b851`. The shipped artifact has been loaded into a stock
+> DuckDB v1.5.5 and used against real Drive — read_csv, glob, read_parquet, a
+> native Sheet, a hive-partitioned tree — which is BRD criterion 1
+> demonstrated rather than assumed.
 >
-> Green: unit 860 assertions / 162 cases · live SQL 102 assertions across 4
-> suites · e2e 9 · smoke_static · check_stamp · smoke_loadable · three
-> hygiene gates.
+> Green at the tag: 867 Catch2 assertions / 164 cases · 149 live SQL
+> assertions across 5 files · 17 e2e · both CI workflows on v1.5.5 and v1.4.5
+> LTS across Linux amd64/arm64, musl, Windows and both macOS architectures.
 >
 > ```bash
 > export VCPKG_ROOT=/home/jr/.local/share/vcpkg
@@ -27,35 +27,32 @@
 > A local green is necessary but NOT sufficient — the API differs between
 > the lines, and musl differs from glibc.
 >
+> **REQ-NF-01 is settled** at 3.05x on the defaults and 2.02x with 128 MiB
+> blocks, against a 3x gate — i.e. *at* the gate, not comfortably inside it.
+> See `docs/benchmark.md`, including why a 3-repeat run of that benchmark
+> reports noise rather than a verdict.
+>
 > **Remaining work, in priority order:**
 >
-> 1. **`gs://` benchmark leg (criterion 2).** `make bench` reports gdrive
->    5.90 s vs local 0.13 s, but exits non-zero with the 3× gate **NOT
->    EVALUATED** — no GCS denominator. **Blocked on the user:** `gcloud auth
->    login` (reauth fails non-interactively), then a bucket holding the same
->    `wide.parquet`. Commands in `docs/benchmark.md` → *What is missing*.
->    Do not claim criterion 2 before this runs.
-> 2. **CI fully green (criterion 5).** v1.5.5 passes on Linux amd64/arm64,
->    Windows, macOS arm64/amd64. Recent fixes (musl `<cstdint>`, MSVC Catch2
->    CRT, e2e retry) are still being confirmed — check
->    `gh run list --repo DataZooDE/duckdb-gdrive`.
-> 3. **Wave 6 — `erpl-web` migration (criterion 6).** Untouched; the debt D-2
+> 1. **Resumable uploads.** Retrying a `POST files.create` after an ambiguous
+>    transport failure can create a duplicate, which R-4 then reports as an
+>    unaddressable path. Mitigated (writes are no longer retried after such a
+>    failure); the real fix is Drive's resumable upload protocol, whose
+>    session URI makes a retry genuinely idempotent. In the README under
+>    *Known limitations* so users meet it before it meets them.
+> 2. **Wave 6 — `erpl-web` migration (criterion 6).** Untouched; the debt D-2
 >    took on. `datazoo-oauth2` is at `/home/jr/Projects/datazoo/datazoo-oauth2`
 >    (35/35 green); `erpl-web` still holds its own copy, violating REQ-A-02.
 >    Sources are close (8–184 diff lines per file). **Gate: erpl-web's OAuth2
->    suites must pass UNCHANGED.** It has an uncommitted working tree —
->    check with the user first.
-> 4. **Community-extensions PR (criterion 8).** Descriptor staged at
->    `docs/community-extension-description.yml`; set `ref` to a release SHA
->    whose live suite passed.
-> 5. **Resumable uploads.** The one codex finding not fully fixed — retrying
->    a `POST files.create` after an ambiguous transport failure can create a
->    duplicate, which R-4 then reports as an unaddressable path. Mitigated
->    (writes are no longer retried); the real fix is Drive's resumable upload
->    protocol. See `docs/reviews/2026-07-26-codex-review-2-read-path.md`.
+>    suites must pass UNCHANGED.** Deferred by explicit decision until gdrive
+>    shipped; that has now happened.
+> 3. **Edge-case fixtures.** Zero-row Parquet, filenames with quotes or emoji,
+>    reads at exactly EOF, pagination at the 100/101 boundary, trashed-name
+>    reappearance, a My Drive fixture. Cheap fixture work, none
+>    correctness-critical on current evidence.
 >
 > **Codex review #2 is done**: 6 of 7 findings fixed, 1 mitigated, all
-> triaged in `docs/reviews/`. Two were demonstrated on the live API before
+> triaged slice by slice. Two were demonstrated on the live API before
 > and after — a ranged-read that returned bytes from the wrong offset, and a
 > token cache that let one secret read Drive with another's credential.
 >
@@ -127,7 +124,7 @@
 > **Progress note (2026-07-26).** Wave 0 is complete; the pure-logic layers of
 > Waves 1 and 2 are done and green (`make unit_test`). Codex review #1 has run
 > and its findings are triaged in
-> `docs/reviews/2026-07-26-codex-review-1-wave0.md`.
+> the review round recorded in the git history for 2026-07-26.
 >
 > **Everything touching Drive is unverified**, because D-1 leaves no fake to
 > verify against and the CI Shared Drive (§2.1) does not exist yet. That single
@@ -166,7 +163,7 @@ The instruction is honoured with a two-layer split that has **no test doubles an
 | **Pure-logic (Catch2 v3)** `test/cpp/test_*.cpp` | Functions that take values and return values: URI parsing, glob pattern matching, `Range:` header construction, Drive-error-JSON → DuckDB exception mapping, path-cache eviction, JWT assertion *construction*. No `#include "duckdb.hpp"`, no I/O, therefore **nothing to mock**. | No | Every PR, every platform |
 | **Live SQL (SQLLogicTest)** `test/sql/*.test` | Everything else. Real extension, real secret, real Google OAuth, real Drive API, real files. This is the source of truth. | Yes | main, nightly, on-demand, and any PR from a branch (not a fork) |
 
-If a behaviour needs a socket, it gets a live test — never a double. The module split that makes this possible is `quack-oauth`'s (`docs/IMPLEMENTATION.md` §2.3): one header, a `_pure.cpp` with no DuckDB linkage, a `_duckdb.cpp` with the glue. The Catch2 binary compiles only the former.
+If a behaviour needs a socket, it gets a live test — never a double. The module split that makes this possible is the sibling `quack-oauth` project's (its `docs/IMPLEMENTATION.md` §2.3 — another repository, not this one): one header, a `_pure.cpp` with no DuckDB linkage, a `_duckdb.cpp` with the glue. The Catch2 binary compiles only the former.
 
 **Corollary:** no behaviour gets two tests. If a live SQL test covers it, there is no Catch2 test for the same thing.
 
@@ -260,7 +257,7 @@ Work is dispatched to **Sonnet 5 subagents**, one per track, each in its own **g
 | **Wave 3** | Write/delete/export: the buffered-upload lifecycle (partial write then exception — is the temp buffer leaked, is a half-file created in Drive?), positional-write rejection, export-vs-`alt=media` fork, trash-vs-delete default. |
 | **Wave 5** | Pre-submission: community-extension checklist, the static-linkage allowlist, credential hygiene, README claims vs actual behaviour. |
 
-Codex findings are triaged into slices, not fixed ad hoc. Findings judged wrong are recorded with the reason in `docs/reviews/`.
+Review findings are triaged into slices, not fixed ad hoc. Findings judged wrong are recorded with the reason in the commit that dismisses them.
 
 ---
 

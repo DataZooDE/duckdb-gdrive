@@ -121,6 +121,13 @@ Fixtures are two-tier (plan §2.2): permanent read-only `/fixtures` seeded
 once, and per-test `/scratch/run-<uuid>` deleted on teardown so concurrent CI
 runs cannot collide. `make sweep_orphans` cleans up after crashed runs.
 
+**Do not run `make seed_fixtures` while live tests are running.** Seeding
+deletes a fixture before re-uploading it, so a concurrent test can observe
+the gap and fail for a reason that has nothing to do with the code. The
+robust fix is staging plus a pointer swap; it was judged not worth the work
+for a case that only arises if someone seeds during CI, so the nightly sweep
+and seed jobs are simply scheduled not to overlap. Revisit if it ever bites.
+
 ## Repository layout
 
 ```

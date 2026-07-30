@@ -17,9 +17,12 @@ core then dispatches any path that subclass claims.
 Google Drive API v3 calls, which are fileId-addressed and HTTP-ranged.
 
 Everything layered on DuckDB's filesystem inherits the scheme without knowing
-it exists: `read_parquet`, `read_csv`, `COPY`, `glob`, `ATTACH`, and table
-formats such as DuckLake whose data files and cleanup routines go through the
-same interface. That inheritance is the reason to implement at this layer
+it exists: `read_parquet`, `read_csv`, `COPY`, `glob`, and table formats such
+as DuckLake whose data files and cleanup routines go through the same
+interface. (`ATTACH` of a DuckLake works for the same reason. `ATTACH` of a
+DuckDB *database file* does not: DuckDB opens those through a path that never
+reaches the virtual filesystem. This document said "`ATTACH`" unqualified
+until it was tested.) That inheritance is the reason to implement at this layer
 rather than inside any single consumer.
 
 ```
@@ -156,6 +159,12 @@ it is Entra-shaped and must be generalised on the way in (§5.4):
 - **Three creation providers** on one secret type — `client_credentials`,
   `config` (paste pre-obtained tokens), `authorization_code` (interactive).
   This maps one-to-one onto REQ-F-05.
+
+  > **Not what shipped.** `authorization_code` was withdrawn during
+  > implementation and is **not registered**: `CREATE SECRET ... PROVIDER
+  > authorization_code` is an error, and a test pins it that way. The design
+  > below is retained because it is the target for the library extraction
+  > (W6), not because it describes the current extension.
 - **`MicrosoftEntraTokenManager` → `OAuth2SecretTokenManager`** in the library,
   with the Entra token URL and client-credentials shape lifted out as inputs.
   The valuable part: `GetToken(context, secret)` returns a usable token,
@@ -169,6 +178,7 @@ it is Entra-shaped and must be generalised on the way in (§5.4):
 Resulting shape:
 
 ```sql
+-- DESIGN ONLY -- `authorization_code` is not registered; this errors today.
 -- interactive: browser flow, refresh token stored in the secret
 CREATE SECRET gdrive_user (
     TYPE gdrive, PROVIDER authorization_code,

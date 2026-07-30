@@ -13,9 +13,13 @@ Storage*) and plain HTTP. It cannot read from Google Drive, which is an
 unrelated product with a different API and access model.
 
 This proposes a DuckDB extension registering a `gdrive://` filesystem, so that
-any DuckDB path expression — `read_parquet`, `read_csv`, `COPY`, `ATTACH`,
-`glob` — can address a file in Google Drive directly, with no download or copy
-step.
+any DuckDB path expression — `read_parquet`, `read_csv`, `COPY`, `glob` — can
+address a file in Google Drive directly, with no download or copy step.
+
+*(As shipped, `ATTACH` is the exception: a DuckLake `DATA_PATH` on Drive works,
+but DuckDB opens database files through a path that never consults the virtual
+filesystem, so `ATTACH 'gdrive://x.duckdb'` is not supported. This proposal
+originally listed `ATTACH` without that qualification.)*
 
 ---
 
@@ -185,8 +189,9 @@ authorization-code + PKCE flow, the loopback redirect server that catches the
 callback, the cross-platform browser launcher and free-port finder, state/CSRF
 validation with timeout handling, and token expiry and refresh bookkeeping.
 
-**Reusable as a pattern:** the DuckDB secret shape — three creation providers
-(`client_credentials`, `config`, `authorization_code`) — and, most valuably,
+**Reusable as a pattern:** the DuckDB secret shape — creation providers
+(`client_credentials`, `config`, and an interactive `authorization_code` that
+was scoped out; see §0 of the implementation plan) — and, most valuably,
 the token manager that reads a token out of a secret, refreshes it
 transparently when expired, and writes the new tokens back. That machinery is
 the difference between "OAuth works once" and "OAuth keeps working".

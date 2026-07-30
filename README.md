@@ -225,6 +225,37 @@ Writing Parquet to Drive produces an opaque binary file. If you were hoping to
 *see* your data in Drive afterwards, you will be disappointed — export to CSV
 instead.
 
+## Known limitations
+
+Stated here rather than discovered later.
+
+**A failed write may or may not have happened.** Drive's simple upload is not
+idempotent: if it commits a `files.create` and the response is then lost to a
+network failure, retrying creates a *second* file with the same name. Because
+duplicate names in one folder are a hard error here (see *Addressing*), a
+blind retry can poison a path permanently — you would write once and read
+"ambiguous" forever.
+
+So transport failures are retried only for idempotent methods (`GET`,
+`DELETE`). A `COPY` that fails mid-flight returns an error saying the change
+may or may not have been applied, and does **not** retry. Check the path
+before re-running it. The real fix is Drive's resumable upload protocol, whose
+session URI makes a retry genuinely idempotent; that is not implemented yet.
+
+**Rate-limit errors are not covered by live tests.** Storage-quota errors are
+provoked against the real API; rate limits (403/429) are asserted only against
+captured Drive response bodies, because exhausting real quota needs a
+throwaway Google project and doing it to a real one degrades Drive for
+everyone on that account. The classification logic is tested; the live path
+through it is not.
+
+**`ATTACH` of a DuckDB database file does not work** — see *Addressing*. Only
+DuckLake `DATA_PATH` works.
+
+**Native Sheets and Docs are re-exported per open.** Two queries against the
+same Sheet cost two exports. Materialise into a table if you query it
+repeatedly.
+
 ## When you should NOT use this
 
 Being direct, because the alternatives are often better:
