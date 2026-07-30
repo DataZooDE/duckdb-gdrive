@@ -50,7 +50,11 @@ DUCKDB = REPO_ROOT / "build" / "release" / "duckdb"
 
 #: Timed runs per leg. Three is enough for a minimum to be stable and keeps a
 #: 100 MB cold scan over Drive inside a sane wall-clock.
-REPEATS = 3
+#: Overridable, because three was not enough. The gdrive leg is stable to
+#: ~9% but the gs leg swung 1.03-1.72 s across three full runs, and the 3x
+#: verdict flipped from FAIL to PASS on that alone -- the DENOMINATOR's noise,
+#: not any change in the subject. A gate decided by noise is not a gate.
+REPEATS = int(os.environ.get("GDRIVE_BENCH_REPEATS", "3"))
 
 #: The benchmark query. Deliberately NOT `count(*)`: Parquet answers that from
 #: the footer without reading a single column chunk, which would measure
@@ -82,9 +86,13 @@ def _run_duckdb(setup_sql: list[str], query: str) -> tuple[float, str]:
     """
     script = "\n".join(s.rstrip(";") + ";" for s in setup_sql + [query])
     started = time.perf_counter()
+    # Script on STDIN, deliberately, not `-c`. The gs leg's setup carries a
+    # GCS bearer token, and argv is world-readable through /proc -- `ps` on a
+    # shared box would show it. REQ-NF-03 is about the extension, but a
+    # benchmark that leaks a credential is still a leaked credential.
     proc = subprocess.run(
-        [str(DUCKDB), "-noheader", "-list", "-c", script],
-        capture_output=True, text=True,
+        [str(DUCKDB), "-noheader", "-list"],
+        input=script, capture_output=True, text=True,
     )
     elapsed = time.perf_counter() - started
     if proc.returncode != 0:
@@ -126,6 +134,45 @@ def _time_leg(name: str, setup_sql: list[str], uri: str) -> dict:
         "samples_s": [round(s, 3) for s in samples],
         "result": result,
     }
+
+
+def _gcs_setup() -> list[str]:
+    """Setup SQL for the gs:// leg, including credentials.
+
+    The first version of this leg was `INSTALL httpfs; LOAD httpfs` and
+    nothing else, which works only for a PUBLIC object. Against a private
+    bucket it fails with "No credentials provided" -- so the gate's
+    denominator could never be measured against a bucket you would actually
+    create for the purpose.
+
+    A short-lived OAuth2 bearer token from the ambient gcloud login, rather
+    than HMAC keys: nothing durable is minted, nothing is written to disk, and
+    it expires on its own within the hour. GDRIVE_BENCH_GCS_BEARER overrides
+    it for environments with no gcloud.
+
+    The token is never printed, never returned in the result dict, and never
+    reaches benchmark.json -- only this list, which goes straight to duckdb's
+    stdin.
+    """
+    token = os.environ.get("GDRIVE_BENCH_GCS_BEARER", "").strip()
+    if not token:
+        try:
+            token = subprocess.run(
+                ["gcloud", "auth", "print-access-token"],
+                capture_output=True, text=True, timeout=120, check=True,
+            ).stdout.strip()
+        except Exception as e:
+            raise BenchError(
+                "the gs:// leg needs credentials and none are available: "
+                f"`gcloud auth print-access-token` failed ({type(e).__name__}). "
+                "Run `gcloud auth login`, or set GDRIVE_BENCH_GCS_BEARER."
+            ) from e
+    if not token:
+        raise BenchError("gcloud returned an empty access token")
+    return [
+        "INSTALL httpfs", "LOAD httpfs",
+        f"CREATE SECRET gcs_bench (TYPE GCS, BEARER_TOKEN '{token}')",
+    ]
 
 
 def _local_copy(drive: Drive, file_id: str, dest: Path) -> int:
@@ -192,13 +239,28 @@ def main() -> int:
 
         if gcs_uri:
             print(f"==> leg: gs ({gcs_uri})")
-            legs.append(_time_leg("gs", ["INSTALL httpfs", "LOAD httpfs"], gcs_uri))
+            legs.append(_time_leg("gs", _gcs_setup(), gcs_uri))
         else:
             print("==> leg: gs SKIPPED -- GDRIVE_BENCH_GCS_URI is not set")
 
         print("==> leg: gdrive")
         legs.append(_time_leg("gdrive", _gdrive_setup(key_file, drive),
                               f"gdrive://id:{file_id}"))
+
+        # The same query with gdrive_block_size_bytes at 128 MiB -- the
+        # configuration docs/benchmark.md documents for large sequential
+        # scans. Measured here, in the SAME session and the same methodology,
+        # because the alternative is quoting a tuned number from one harness
+        # against a denominator from another, which is not a measurement.
+        #
+        # It does NOT decide the gate. The gate is about what a user gets out
+        # of the box, and out of the box this is 16 MiB.
+        print("==> leg: gdrive_tuned (128 MiB blocks)")
+        legs.append(_time_leg(
+            "gdrive_tuned",
+            _gdrive_setup(key_file, drive) + [
+                f"SET gdrive_block_size_bytes={128 * 1024 * 1024}"],
+            f"gdrive://id:{file_id}"))
 
     # Every leg must have computed the SAME answer. This is what makes the
     # ratio meaningful: without it, a gs:// leg pointed at a different (say,
@@ -223,9 +285,14 @@ def main() -> int:
     verdict = "NOT EVALUATED"
     ratio = None
     if "gs" in by_name:
-        ratio = gdrive_s / by_name["gs"]["min_s"]
+        gs_s = by_name["gs"]["min_s"]
+        ratio = gdrive_s / gs_s
         verdict = "PASS" if ratio <= 3.0 else "FAIL"
         print(f"\n  gdrive / gs = {ratio:.2f}x   gate <= 3.00x   {verdict}")
+        if "gdrive_tuned" in by_name:
+            tuned = by_name["gdrive_tuned"]["min_s"] / gs_s
+            print(f"  tuned  / gs = {tuned:.2f}x   (128 MiB blocks; "
+                  f"informational, not the gate)")
     else:
         print("\n  gate NOT EVALUATED: no gs:// leg. Set GDRIVE_BENCH_GCS_URI to")
         print("  the same parquet file in a bucket you can read.")

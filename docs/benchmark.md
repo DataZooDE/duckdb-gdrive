@@ -3,18 +3,45 @@
 **Gate:** a cold columnar scan over `gdrive://` completes within **3×** the
 same file on Google Cloud Storage.
 
-**Status: UNSETTLED, and borderline.** The 4.8x figure below was measured on
-2026-07-27, before the shared block cache. The gdrive leg has since dropped
-from 6.21 s to **4.36 s** (measured 2026-07-30), which against the last
-recorded GCS minimum would be ~3.4x — still a miss, but no longer a
-comfortable one, and the fastest measured configuration (128 MiB blocks +
-`id:` form) is ~2.6x, inside the gate.
+**Status: EVALUATED 2026-07-30. The default configuration sits ON the gate,
+at 3.05x; the documented tuned configuration passes at 2.02x.**
 
-The gate cannot be called from here, because **both legs must run in one
-session** and the benchmark bucket was deleted after the last run. Until then
-this document reports the numerator honestly and does not assert a verdict.
-The cause of the cost is measured, not guessed — 55 Drive round trips for one
-query — and the fix is fewer of them, not a softer gate. See *Diagnosis*.
+Both legs in one session, byte-identical file (md5 verified against the Drive
+copy), 9 repeats per leg:
+
+| Leg | min | median | vs `gs` (min) |
+|---|---|---|---|
+| local | 0.12 s | 0.13 s | — |
+| `gs://` (europe-west3) | 1.34 s | 1.65 s | 1.00x |
+| **`gdrive://`, default** | **4.09 s** | 4.67 s | **3.05x** — misses by 0.05x |
+| `gdrive://`, 128 MiB blocks | 2.70 s | 2.93 s | **2.02x** — passes |
+
+On medians the default is 2.83x, which would pass. Calling this a clean fail
+or a clean pass would both be overstating what was measured: it is *at* the
+gate.
+
+**The variance is in the DENOMINATOR, and it is large enough to decide the
+verdict on its own.** Four full runs were done before settling on 9 repeats:
+
+| Run | `gs` min | `gdrive` min | ratio | verdict |
+|---|---|---|---|---|
+| 1 (3 repeats) | 1.03 s | 4.25 s | 4.13x | FAIL |
+| 2 (3 repeats) | 1.40 s | 4.54 s | 3.24x | FAIL |
+| 3 (3 repeats) | 1.72 s | 4.14 s | 2.41x | **PASS** |
+| 4 (9 repeats) | 1.34 s | 4.09 s | 3.05x | FAIL |
+
+The `gdrive` leg is stable to ~9% across all four. The `gs` leg swings 1.03 s
+to 1.72 s — 67% — and run 3 "passed" purely because GCS happened to be slow,
+not because anything improved. A three-repeat gate on this workload reports
+noise. `GDRIVE_BENCH_REPEATS` now exists for that reason, and any future
+verdict quoted from a 3-repeat run should be distrusted, including the 4.8x
+that stood in this document for three days.
+
+**What this means for shipping.** The extension is roughly 3x object storage
+out of the box and 2x tuned, against ~30x for a local file. That is the
+honest shape and it is what the README and the community-extensions
+descriptor now say. The descriptor makes no positive performance claim, so it
+is accurate either way.
 
 Reproduce with `make bench` (needs `GDRIVE_BENCH_GCS_URI`); raw numbers land
 in `docs/benchmark.json`.
@@ -324,27 +351,16 @@ measured configuration and it is documented rather than defaulted.
 
 ### Where that leaves REQ-NF-01
 
-**Provisional — the denominator is stale.** The ratios below divide a fresh
-gdrive number by a GCS minimum recorded on 2026-07-27, in a different session,
-on a bucket that no longer exists. That is exactly the sloppiness this document
-exists to correct, so they are marked as estimates and the gate is **not**
-settled until both legs run in one session (`make bench` with
-`GDRIVE_BENCH_GCS_URI`).
+**Superseded by the measurement at the top of this document.** This section
+previously divided a fresh gdrive number by a GCS minimum from a different
+session and a deleted bucket, and marked the result "provisional". Both legs
+have since been run together (2026-07-30, 9 repeats): **3.05x at the defaults,
+2.02x at 128 MiB blocks.**
 
-Current gdrive leg, measured 2026-07-30 by `make bench`: **4.36 s min /
-4.80 s median**, down from 6.21 s, entirely from the shared block cache.
-
-Against the stale GCS minimum of 1.30 s:
-
-* default 16 MiB blocks, path form: **~3.4x** — would still miss
-* 128 MiB blocks, `id:` form: **~2.6x** — would pass
-
-So the gate is genuinely borderline in the default configuration and the
-outcome cannot be asserted either way from here.
-
-So the gate is achievable but NOT met at the defaults, and the honest summary
-is that Drive can be brought within 3x of GCS for id-addressed reads of large
-files, and not yet for cold path-addressed ones.
+The provisional estimate said "~3.4x default, ~2.6x tuned". It was close, and
+it was still the wrong way to produce a number — the real GCS leg turned out
+to vary by 67% between sessions, so any ratio built on a remembered
+denominator was luckier than it deserved to be.
 
 The default stays 16 MiB rather than something that games the benchmark: a
 128 MiB block means a `count(*)` — which needs only the Parquet footer —

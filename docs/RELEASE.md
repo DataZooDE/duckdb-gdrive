@@ -85,20 +85,20 @@ storage and quantifies the ranged-read cost from `make latency`. That is true
 whichever way REQ-NF-01 lands, so the descriptor does not block on it. What
 still blocks is the decision below.
 
-- **REQ-NF-01 is UNRESOLVED, and the last number is stale.** Measured
-  2026-07-27 against GCS: **4.8×**, where the gate is 3×. That predates the
-  shared block cache; the best observation since was ~2.6×, which would pass.
-  So the outcome is genuinely unknown in both directions and must be
-  re-measured before tagging — `make bench` with `GDRIVE_BENCH_GCS_URI`
-  pointing at the same Parquet in a bucket you can read. If it still misses,
-  **remove the performance claim from `extended_description`** rather than
-  soften the gate. Do not ship a description that implies a target the
-  benchmark says is missed.
+- **REQ-NF-01: SETTLED 2026-07-30, and it is a marginal miss at the
+  defaults.** Both legs in one session, 9 repeats: `gdrive://` 4.09 s against
+  GCS 1.34 s = **3.05x**, where the gate is 3x. On medians 2.83x. With
+  `gdrive_block_size_bytes` at 128 MiB it is 2.02x, a clear pass.
 
-  The `extended_description` no longer makes a *positive* performance claim —
-  it says Drive is slower than object storage and quantifies the ranged-read
-  cost, which the latency probe measures. That is safe to ship either way; the
-  gate still needs settling for the README's Status section.
+  This does **not** block submission. `extended_description` makes no positive
+  performance claim — it states that Drive is slower than object storage and
+  quantifies the ranged-read cost — so it is accurate whichever side of the
+  gate the default lands on. The README reports the number and the caveat.
+
+  If you re-measure, use `GDRIVE_BENCH_REPEATS=9` or higher. The GCS leg
+  varied 1.03–1.72 s between sessions, which is enough to flip a 3-repeat
+  verdict; three of four runs said FAIL and one said PASS on the same code.
+
 - **Retries can duplicate a create.** Mitigated — writes are no longer
   retried after an ambiguous transport failure — but the real fix is Drive's
   resumable upload protocol. See

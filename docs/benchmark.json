@@ -2,37 +2,85 @@
   "fixture": "fixtures/wide.parquet",
   "file_id": "17AVQ4WlKaPE3hFxpuoljHLpe3nXI0qsQ",
   "size_bytes": 87025665,
-  "repeats": 3,
+  "repeats": 9,
   "query": "SELECT count(*), sum(id), sum(h1::HUGEINT), min(s1), max(s1) FROM read_parquet('{uri}')",
   "legs": [
     {
       "leg": "local",
-      "uri": "/tmp/tmpcqwhagig/wide.parquet",
-      "min_s": 0.12829430773854256,
-      "median_s": 0.13669404853135347,
+      "uri": "/tmp/tmp22qa6nmb/wide.parquet",
+      "min_s": 0.115389552898705,
+      "median_s": 0.12996959779411554,
       "samples_s": [
-        0.169,
+        0.154,
+        0.127,
+        0.13,
+        0.115,
+        0.125,
         0.137,
-        0.128
+        0.129,
+        0.135,
+        0.13
+      ],
+      "result": "2000000|1999999000000|18442665268270631852892036|00000f7264c27ba6fea0c837ed6aa0aa|fffffe98d0963d27015c198262d97221"
+    },
+    {
+      "leg": "gs",
+      "uri": "gs://dz-gdrive-bench-202607301624/wide.parquet",
+      "min_s": 1.3410557666793466,
+      "median_s": 1.6518941801041365,
+      "samples_s": [
+        1.635,
+        1.835,
+        1.53,
+        1.652,
+        1.772,
+        1.341,
+        1.701,
+        1.4,
+        2.041
       ],
       "result": "2000000|1999999000000|18442665268270631852892036|00000f7264c27ba6fea0c837ed6aa0aa|fffffe98d0963d27015c198262d97221"
     },
     {
       "leg": "gdrive",
       "uri": "gdrive://id:17AVQ4WlKaPE3hFxpuoljHLpe3nXI0qsQ",
-      "min_s": 4.357634712941945,
-      "median_s": 4.796032816171646,
+      "min_s": 4.085162676870823,
+      "median_s": 4.674738793633878,
       "samples_s": [
-        4.933,
-        4.358,
-        4.796
+        5.425,
+        4.803,
+        4.597,
+        4.778,
+        5.146,
+        4.454,
+        4.636,
+        4.085,
+        4.675
+      ],
+      "result": "2000000|1999999000000|18442665268270631852892036|00000f7264c27ba6fea0c837ed6aa0aa|fffffe98d0963d27015c198262d97221"
+    },
+    {
+      "leg": "gdrive_tuned",
+      "uri": "gdrive://id:17AVQ4WlKaPE3hFxpuoljHLpe3nXI0qsQ",
+      "min_s": 2.703481486067176,
+      "median_s": 2.925312557257712,
+      "samples_s": [
+        2.912,
+        2.822,
+        3.118,
+        2.877,
+        3.236,
+        2.703,
+        2.966,
+        2.925,
+        3.054
       ],
       "result": "2000000|1999999000000|18442665268270631852892036|00000f7264c27ba6fea0c837ed6aa0aa|fffffe98d0963d27015c198262d97221"
     }
   ],
-  "gdrive_over_gs": null,
+  "gdrive_over_gs": 3.046228783599576,
   "gate": {
     "limit": 3.0,
-    "verdict": "NOT EVALUATED"
+    "verdict": "FAIL"
   }
 }

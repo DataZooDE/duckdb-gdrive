@@ -250,26 +250,23 @@ Being direct, because the alternatives are often better:
 Reads are ranged, so a Parquet scan fetches footers and column chunks rather
 than whole files.
 
-> **The performance target is UNSETTLED, and Drive is slow either way.** The
+> **The performance target is met only marginally, and only when tuned.** The
 > goal is a cold columnar scan within **3×** the same file on object storage.
-> On an 87 MB Parquet the `gdrive://` leg is **4.36 s** against a local
-> **0.14 s** (measured 2026-07-30). The last GCS measurement, 1.30 s, is from
-> an earlier session and a bucket that no longer exists, so the ratio is an
-> estimate — ~3.4×, a near miss — and is not asserted as a result.
+> Measured 2026-07-30 on an 87 MB Parquet, both legs in one session, 9 repeats:
+> local **0.12 s**, GCS **1.34 s**, `gdrive://` **4.09 s** — **3.05×**, which
+> misses the gate by 0.05×. On medians it is 2.83×, which would pass. It is
+> *at* the gate, not comfortably inside it.
 >
-> The cause is measured rather than assumed: one such query costs **55 Drive
-> round trips** (35 data, 18 metadata, 2 path resolution). A ranged media
-> request costs ~1.3 s and a metadata call ~0.3 s (`make latency`), so that
-> latency *is* the runtime. Two fixes are identified —
-> coalescing adjacent range requests, and eliminating redundant per-open
-> metadata calls — and neither is done yet. `docs/benchmark.md` has the
-> numbers and the reasoning.
+> Setting `gdrive_block_size_bytes` to 128 MiB brings it to **2.70 s — 2.02×**,
+> a clear pass, at the cost of ~0.8 s on footer-only queries like `count(*)`.
+> That is why the knob exists and why 16 MiB remains the default.
 >
-> Budget accordingly: Drive is currently ~30× a local file for a cold scan.
-> Setting `gdrive_block_size_bytes` to 128 MiB and addressing files by
-> `gdrive://id:` is the fastest measured configuration — 3.34 s, ~2.6× the
-> stale GCS figure — at the cost of ~0.8 s on footer-only queries like
-> `count(*)`. See `docs/benchmark.md` for the sweep.
+> One caveat worth knowing: the GCS leg itself varied 1.03–1.72 s across runs,
+> enough to flip a 3-repeat verdict between PASS and FAIL. Treat any single
+> run of this benchmark, including this one, as indicative rather than exact.
+>
+> Budget accordingly: for a cold scan Drive is ~30× a local file and ~2–3×
+> object storage. See `docs/benchmark.md` for the full numbers.
 
 Drive enforces per-user API quotas. A query that looks unremarkable against S3
 can hit them, so the extension caches path resolution aggressively and reports
