@@ -79,11 +79,22 @@ Keep the tag in step with `version:` in
 ## Submitting
 
 1. Copy `docs/community-extension-description.yml` to
-   `community-extensions/extensions/gdrive/description.yml`.
+   `community-extensions/extensions/gdrive/description.yml`, dropping the
+   staging header (it is instructions to us, not content).
 2. Set `repo.ref` to the **tagged commit SHA** — not the tag name, and not
    `main`. It is `PLACEHOLDER_SET_AT_RELEASE` on purpose so that submitting
    without thinking about it fails loudly.
+
+   **Validate the SHAPE of what you substituted, not just that the
+   placeholder is gone.** On the 0.1.0 submission the SHA was looked up with
+   `git rev-list -n1 v0.1.0` while the shell was inside the *community-extensions*
+   clone, which has no such tag. The command failed, the variable was empty,
+   the placeholder was duly replaced with nothing, and `ref:` parsed as valid
+   YAML with a null value. Require 40 hex characters.
 3. Open the PR.
+
+**0.1.0 was submitted 2026-07-30 as duckdb/community-extensions#2407**, ref
+`181b851`.
 
 ## What must be true first
 

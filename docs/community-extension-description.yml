@@ -1,12 +1,20 @@
 # Staged submission for duckdb/community-extensions.
 #
-# NOT yet submitted. `ref` must point at a tagged commit whose live suite has
-# passed against a real Drive account -- submitting before that would be
-# publishing an unverified filesystem, and the community build runs no live
-# tests of ours. See docs/implementation-plan.md §6, criterion 8.
+# SUBMITTED 2026-07-30 as duckdb/community-extensions#2407, with `ref` set to
+# 181b851 (the v0.1.0 tag). This file remains the source of truth: edit it,
+# then copy to community-extensions/extensions/gdrive/description.yml and
+# substitute the ref.
 #
-# When ready: copy to community-extensions/extensions/gdrive/description.yml,
-# set `ref` to the release commit SHA, and open the PR.
+# `ref` must point at a tagged commit whose live suite has passed against a
+# real Drive account -- the community build runs no live tests of ours, so
+# whatever is broken at tag time ships. See docs/implementation-plan.md §6,
+# criterion 8, and docs/RELEASE.md.
+#
+# The placeholder below is deliberate. Substituting it is the one step that
+# must not be forgotten, and on the 0.1.0 submission the substitution silently
+# produced an EMPTY ref (the SHA was looked up in the wrong repository). YAML
+# accepts an empty value happily. Validate the shape -- 40 hex characters --
+# not just that the placeholder is gone.
 
 extension:
   name: gdrive
