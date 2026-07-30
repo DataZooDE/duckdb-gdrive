@@ -51,9 +51,22 @@ Windows and both macOS architectures.
 
 ## Tagging
 
-The extension's own version comes from `git describe` on THIS repo. Untagged,
-DuckDB substitutes a dummy `v0.0.1` — which is what CI reported for a long
-time and is fine there, but is not what you want on a published artifact.
+The extension's own version comes from `git describe` on THIS repo — but
+**not** via DuckDB's own helper, which cannot ever return a tag. Its
+`duckdb_extension_generate_version()` runs
+
+    git describe --tags --always --match '${VERSIONING_TAG_MATCH}'
+
+and those single quotes are literal, so git is handed `'v*.*.*'` with the
+quotes and matches nothing; `--always` then falls back to the short commit
+hash. Measured on this repo at v0.1.0: the quoted form returns `40c9822`, the
+unquoted form returns `v0.1.0`.
+
+This section previously claimed that tagging produces `v0.1.0` on the
+artifact. It never did, and nothing noticed because `check_extension_stamp.sh`
+only validated the DuckDB version field. `extension_config.cmake` now computes
+the version itself and passes `EXTENSION_VERSION` explicitly, and the stamp
+check asserts it whenever HEAD is exactly on a tag.
 
 ```bash
 git tag -a v0.1.0 -m "gdrive 0.1.0"

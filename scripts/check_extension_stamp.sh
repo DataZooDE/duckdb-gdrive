@@ -80,4 +80,36 @@ MSG
     exit 1
 fi
 
+# ---------------------------------------------------------------------------
+# field[4] -- the EXTENSION's own version. On a tagged commit this must be the
+# tag, not a commit hash.
+#
+# This went unchecked and was wrong the whole time. DuckDB computes it with
+#     git describe --tags --always --match '${VERSIONING_TAG_MATCH}'
+# whose single quotes are literal, so git matches no tag and --always falls
+# back to the short hash. RELEASE.md promised that tagging yields v0.1.0 on
+# the artifact; it never did. extension_config.cmake now computes it properly
+# and passes EXTENSION_VERSION explicitly -- and this asserts the result, so
+# a regression there cannot ship silently.
+#
+# Only enforced ON a tag: an untagged development build legitimately carries
+# a hash, and failing those would just train people to ignore this script.
+repo_describe="$(git describe --tags --exact-match 2>/dev/null || true)"
+if [[ -n "$repo_describe" ]]; then
+    if [[ "$ext_version" != "$repo_describe" ]]; then
+        cat >&2 <<MSG
+FAIL: HEAD is tagged $repo_describe but the artifact is stamped
+      "$ext_version" as its extension version.
+
+A commit hash here means the EXTENSION_VERSION passed in
+extension_config.cmake was lost -- see the comment there. Published artifacts
+would report a hash instead of the release they came from.
+
+    rm -rf build/release && GEN=ninja make
+MSG
+        exit 1
+    fi
+    echo "OK: extension version $ext_version matches the tag"
+fi
+
 echo "OK: extension built for DuckDB $stamp ($platform, extension version $ext_version)"

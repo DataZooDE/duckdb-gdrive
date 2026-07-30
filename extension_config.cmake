@@ -45,9 +45,49 @@ if(_gdrive_ddb_ver MATCHES "^v?1\\.4\\.")
   message(STATUS "gdrive: DuckDB ${_gdrive_ddb_ver} (1.4 LTS) -- defining _HAS_STD_BYTE=0")
 endif()
 
+# ---------------------------------------------------------------------------
+# Extension version, computed here rather than left to DuckDB.
+#
+# duckdb_extension_generate_version() runs
+#
+#     git describe --tags --always --match '${VERSIONING_TAG_MATCH}'
+#
+# and those single quotes are LITERAL: CMake passes `'v*.*.*'` to git, quotes
+# included, which matches no tag. `--always` then falls back to the short
+# commit hash, so the extension version is the hash on every build, tagged or
+# not. Verified against this repo at v0.1.0:
+#
+#     --match "'v*.*.*'"  ->  40c9822      (what DuckDB computes)
+#     --match  'v*.*.*'   ->  v0.1.0       (what it meant to compute)
+#
+# docs/RELEASE.md used to promise that tagging produces v0.1.0 on the
+# artifact. It does not, and did not; the promise was never checked because
+# check_extension_stamp.sh verifies the DUCKDB version field, not this one.
+#
+# So compute it correctly and pass it explicitly. Not hardcoded: a literal
+# "v0.1.0" here would silently ship a stale version the first time someone
+# tags without remembering to edit this file.
+execute_process(
+    COMMAND ${GIT_EXECUTABLE} describe --tags --always --match v*.*.*
+    WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}
+    OUTPUT_VARIABLE GDRIVE_GIT_DESCRIBE
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+if(NOT GDRIVE_GIT_DESCRIBE)
+    find_package(Git QUIET)
+    execute_process(
+        COMMAND ${GIT_EXECUTABLE} describe --tags --always --match v*.*.*
+        WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}
+        OUTPUT_VARIABLE GDRIVE_GIT_DESCRIBE
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET)
+endif()
+message(STATUS "gdrive extension version: ${GDRIVE_GIT_DESCRIBE}")
+
 # Extension from this repo.
 duckdb_extension_load(gdrive
     SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}
+    EXTENSION_VERSION "${GDRIVE_GIT_DESCRIBE}"
 )
 
 # Needed by the live SQL tests: `COPY ... TO 'gdrive://...' (FORMAT parquet)`
