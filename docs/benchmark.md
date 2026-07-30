@@ -81,8 +81,12 @@ The same query through this extension issues **55 Drive API round trips**:
 | `files.list` (path resolution) | 2 |
 | `files.get?alt=media` (data) | 35 |
 
-At Drive's ~150 ms per round trip that is roughly 8 s of pure latency, which
-is essentially the whole measurement. GCS moves the same bytes in ~1.2 s.
+At the ~150 ms per round trip assumed at the time that is roughly 8 s of pure
+latency, which is essentially the whole measurement. GCS moves the same bytes
+in ~1.2 s. (The 150 ms was itself wrong — see *Per-request latency* below. The
+arithmetic here is left as it was written because the conclusion it led to,
+"the request COUNT is the problem", survived the correction; the real figures
+make the case more strongly, not less.)
 
 Two things stand out, and neither is "Drive is slow":
 
@@ -92,7 +96,8 @@ Two things stand out, and neither is "Drive is slow":
 2. **35 data requests, uncoalesced.** Adjacent or near-adjacent column
    chunks are fetched as separate ranged GETs. Coalescing them trades a
    little wasted bandwidth for a large latency saving — the right trade when
-   a round trip costs 150 ms.
+   a ranged media request costs ~1.3 s regardless of how few bytes it asks
+   for.
 
 Plan section S-4.2 anticipated exactly this: *"If it misses, the fix is fewer
 round trips (prefetch/coalesce adjacent ranges), not a relaxed gate."* That
@@ -123,13 +128,18 @@ footnote.
 
 Per plan §S-4.2 the fix is **fewer round trips** — prefetching and coalescing
 adjacent byte ranges so a Parquet scan issues fewer, larger requests — not a
-relaxed gate. Drive's per-request latency (~150 ms) dominates, so request
-count is the lever that matters.
+relaxed gate. Drive's per-request latency dominates (see *Per-request latency*
+below: 0.3–2.1 s depending on the request shape), so request count is the
+lever that matters.
 
 ## Where the time actually goes (measured 2026-07-27)
 
 The first diagnosis above — "55 round trips at ~150 ms" — was directionally
 right and quantitatively wrong. Measuring properly changed the conclusion.
+Where the ~150 ms came from is not recorded anywhere; it appears to have been
+assumed. It was published in the README, the BRD and the community-extensions
+descriptor for as long as it existed. See *Per-request latency* below for what
+it actually is.
 
 ### Drive's media endpoint has a ~1.2 s floor per request
 
@@ -152,6 +162,41 @@ with no handshake.
 **The consequence is counterintuitive and it drives the design: on Drive,
 fetching MORE data in FEWER requests is faster.** One 87 MB request (2.06 s)
 beats 35 ranged requests totalling 54.9 MB (4.94 s) by 2.4x.
+
+### Per-request latency, by endpoint and request shape (measured 2026-07-30)
+
+`make latency` (`e2e/helpers/latency.py`), warm keep-alive `requests.Session`,
+service-account identity, p50 of 5–10 samples:
+
+| Request | min | **p50** | p90 |
+|---|---|---|---|
+| `files.list` (one path segment) | 291 ms | **330 ms** | 486 ms |
+| `files.get` (metadata) | 263 ms | **293 ms** | 326 ms |
+| `files.get?alt=media`, whole 100-byte file | 509 ms | **569 ms** | 730 ms |
+| `files.get?alt=media`, 1 KiB range of the 87 MB file | 1223 ms | **1348 ms** | 2491 ms |
+| `files.get?alt=media`, 1 MiB range of the 87 MB file | 1297 ms | **1375 ms** | 2342 ms |
+| `files.get?alt=media`, 16 MiB range of the 87 MB file | 1599 ms | **2103 ms** | 2488 ms |
+
+Three things this settles.
+
+**The `~150 ms` figure was wrong by 2–14x, and always in the flattering
+direction.** No endpoint is anywhere near it. It is corrected in the README,
+`docs/brd.md` and the community-extensions descriptor.
+
+**Request SHAPE matters more than request size.** A 1 KiB range and a 1 MiB
+range of the same large object cost the same (1348 vs 1375 ms) — but a whole
+read of a *small* file costs 569 ms, less than half. The cost is not "a Drive
+round trip"; it is "a ranged read of a large object", and that is the request
+a Parquet scan is made of. Quoting one number for both is precisely the
+mistake that produced the original claim.
+
+**This reconciles the ~1.2 s floor table below with the 569 ms small-body row
+above.** They disagree by 2x and both are correct: the floor table measured
+ranged reads of the 87 MB file, the small-body row measures a whole small
+file. Neither generalises to "a Drive API round trip".
+
+Metadata calls, at ~300 ms, are the cheap ones — which is why the R-1 path
+cache is worth having but was never where the time went.
 
 ### What the request pattern actually looks like
 

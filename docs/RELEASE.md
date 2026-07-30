@@ -20,7 +20,8 @@ GEN=ninja make
 make check_stamp        # artifact built for the DuckDB we target
 make smoke_loadable     # artifact LOADS into a stock duckdb
 make smoke_static       # only platform libraries dynamically linked
-make verify_readme      # the README documents things that exist
+make verify_readme      # README <-> code agree in BOTH directions
+make latency            # per-request Drive latency; the figures the docs quote
 make unit_test
 make check_credentials
 
@@ -77,12 +78,20 @@ Do not submit while any of these is open. The first two are honesty
 obligations: the descriptor's `extended_description` makes claims, and a
 reviewer will test them.
 
-- **REQ-NF-01 FAILS.** Measured 2026-07-27 against GCS: **4.8×**, where the
-  gate is 3×. Not marginal, and the cause is known — 55 Drive round trips per
-  query, of which 18 are redundant metadata calls. Either fix it (coalesce
-  ranges, drop the per-open metadata refresh) or **remove the performance
-  claim from `extended_description` before submitting**. Do not ship a
-  description that implies a target the benchmark says is missed.
+- **REQ-NF-01 is UNRESOLVED, and the last number is stale.** Measured
+  2026-07-27 against GCS: **4.8×**, where the gate is 3×. That predates the
+  shared block cache; the best observation since was ~2.6×, which would pass.
+  So the outcome is genuinely unknown in both directions and must be
+  re-measured before tagging — `make bench` with `GDRIVE_BENCH_GCS_URI`
+  pointing at the same Parquet in a bucket you can read. If it still misses,
+  **remove the performance claim from `extended_description`** rather than
+  soften the gate. Do not ship a description that implies a target the
+  benchmark says is missed.
+
+  The `extended_description` no longer makes a *positive* performance claim —
+  it says Drive is slower than object storage and quantifies the ranged-read
+  cost, which the latency probe measures. That is safe to ship either way; the
+  gate still needs settling for the README's Status section.
 - **Retries can duplicate a create.** Mitigated — writes are no longer
   retried after an ambiguous transport failure — but the real fix is Drive's
   resumable upload protocol. See

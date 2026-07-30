@@ -31,13 +31,18 @@ repo:
 
 docs:
   hello_world: |
-    -- Unattended: a service account. Needs a Shared Drive, because service
-    -- accounts have no personal Drive storage quota.
+    -- Unattended: a service account. To WRITE you need a Shared Drive --
+    -- service accounts have no personal Drive storage quota and get
+    -- 403 storageQuotaExceeded anywhere else. Reading a shared folder is fine.
+    --
+    -- DRIVE_ID is a SHARED DRIVE id; ROOT_FOLDER_ID is a FOLDER id. They are
+    -- not interchangeable: passing a folder id as DRIVE_ID fails with
+    -- "Shared drive not found". Use whichever matches what was shared.
     CREATE SECRET gdrive (
         TYPE gdrive,
         PROVIDER service_account,
         KEY_FILE '/etc/creds/sa.json',
-        DRIVE_ID '0ABcDeFgHiJkLmNoPQ',
+        DRIVE_ID '0ABcDeFgHiJkLmNoPQ',       -- or ROOT_FOLDER_ID '1a2b3c...'
         DRIVE_SCOPE 'https://www.googleapis.com/auth/drive.readonly'
     );
 
@@ -68,7 +73,13 @@ docs:
     address a file in Google Drive with no download or copy step. Because
     DuckDB dispatches file access through its virtual filesystem, everything
     layered on it inherits the scheme: `read_parquet`, `read_csv`, `COPY`,
-    `glob`, `ATTACH`, and table formats such as DuckLake.
+    `glob`, and table formats such as DuckLake — attaching a DuckLake whose
+    `DATA_PATH` is on Drive works and is tested live.
+
+    `ATTACH` of a DuckDB **database file** on `gdrive://` is NOT supported.
+    DuckDB opens database files through a different path that does not consult
+    the virtual filesystem, so the attempt fails immediately rather than
+    half-working.
 
     This is **Google Drive**, not Google Cloud Storage — a different product
     with a different API and access model. For `gs://` buckets use the `gcs`
@@ -85,9 +96,10 @@ docs:
     is an error naming both file ids. And Drive cannot write at a byte offset,
     so positional writes raise an error instead of silently corrupting a file.
 
-    Drive enforces per-user API quotas that object storage does not, and a
-    round trip is ~150 ms against ~1 ms for S3/GCS. Use this when Drive is the
-    system of record for data you want to query and you would rather not
-    maintain a second copy — not as a substitute for object storage under a
-    hot workload. On a workstation, Google Drive for desktop plus ordinary
-    local paths is simpler and faster.
+    Drive is slower than object storage by a wide margin, and enforces
+    per-user API quotas that object storage does not. A ranged read costs
+    ~1.3 s regardless of how few bytes it requests, against ~1 ms for S3/GCS.
+    Use this when Drive is the system of record for data you want to query and
+    you would rather not maintain a second copy — not as a substitute for
+    object storage under a hot workload. On a workstation, Google Drive for
+    desktop plus ordinary local paths is simpler and faster.

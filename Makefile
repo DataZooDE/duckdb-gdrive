@@ -85,6 +85,13 @@ e2e: release
 # REQ-NF-01 benchmark: cold 100MB Parquet scan over gdrive:// vs gs:// vs
 # local. Gate is 3x GCS. Result is committed to docs/benchmark.md.
 # ---------------------------------------------------------------------------
+# Per-request Drive API latency, by endpoint AND request shape. The two
+# differ by 5x, which is how "a round trip is ~150 ms" survived in three
+# documents while the benchmark measured ~1.2 s for the shape that matters.
+.PHONY: latency
+latency:
+	@cd e2e && uv run --frozen python -m helpers.latency
+
 .PHONY: bench
 bench: release
 	@cd e2e && uv run python -m helpers.bench

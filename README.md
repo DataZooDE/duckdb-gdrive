@@ -25,9 +25,18 @@ anything built on that layer inherits the scheme for free — `read_parquet`,
 
 `ATTACH` is the exception, in both directions. Attaching a **DuckLake** whose
 `DATA_PATH` is on Drive works and is tested. Attaching a **DuckDB database
-file** on `gdrive://` does not — DuckDB's storage manager needs atomic
-renames and byte-offset writes, and Drive offers neither, so the attempt
-fails early rather than corrupting anything.
+file** on `gdrive://` does not, and the reason is worth stating precisely
+because it is not the one you would guess: DuckDB opens database files
+through a path that never consults the virtual filesystem, so `gdrive://` is
+normalised to `gdrive:/` and handed to the LOCAL filesystem, which reports
+`No such file or directory`. This extension is never called at all.
+
+That it fails is fine — Drive has neither atomic renames nor byte-offset
+writes, so a database file there could not work regardless — but it fails
+before reaching us, which is why the guard rails in this filesystem
+(`Truncate`, `Trim`, positional `Write`) are unreachable from SQL and
+therefore untested. Stated rather than implied; see `docs/benchmark.md` and
+the plan's coverage table.
 
 ## DuckLake on Drive
 
@@ -229,9 +238,10 @@ Being direct, because the alternatives are often better:
   to provision and monitor on every host, and behaviour under concurrency and
   partial reads that is outside your control. This extension needs nothing on
   the host but the extension itself.
-- **A large, hot dataset queried constantly?** Copy it to object storage. Drive
-  round trips are ~150 ms against ~1 ms for S3/GCS, and Drive enforces per-user
-  API quotas that object storage does not. This is the right tool when Drive is
+- **A large, hot dataset queried constantly?** Copy it to object storage. A
+  ranged read from Drive costs ~1.3 s regardless of how few bytes it asks for,
+  against ~1 ms for S3/GCS, and Drive enforces per-user API quotas that object
+  storage does not. This is the right tool when Drive is
   the *system of record* and you want to stop maintaining a copy — not when you
   want a fast warehouse.
 
@@ -245,8 +255,9 @@ than whole files.
 > Parquet: local 0.14 s, GCS 1.30 s, `gdrive://` 6.21 s — **4.8×**, not 3×.
 >
 > The cause is measured rather than assumed: one such query costs **55 Drive
-> round trips** (35 data, 18 metadata, 2 path resolution). At Drive's ~150 ms
-> per round trip that latency *is* the runtime. Two fixes are identified —
+> round trips** (35 data, 18 metadata, 2 path resolution). A ranged media
+> request costs ~1.3 s and a metadata call ~0.3 s (`make latency`), so that
+> latency *is* the runtime. Two fixes are identified —
 > coalescing adjacent range requests, and eliminating redundant per-open
 > metadata calls — and neither is done yet. `docs/benchmark.md` has the
 > numbers and the reasoning.
@@ -270,6 +281,24 @@ not about rate, and telling someone to "retry later" would waste their day.
 > API quota needs a throwaway Google project, and provoking it against a real
 > one degrades Drive for everyone on that account. Stating this rather than
 > letting the suite imply coverage it does not have.
+
+## Settings
+
+Every setting the extension registers, and what it is for. `scripts/verify_readme.py`
+checks this table in **both** directions — nothing here that does not exist,
+and nothing registered that is not here.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `gdrive_docs_export_mime` | `text/plain` | Export format for a Google **Doc**. `text/markdown` keeps structure. Sheets are always `text/csv`. |
+| `gdrive_permanent_delete` | `false` | `false` moves a deleted file to the Drive trash (recoverable); `true` deletes it outright. |
+| `gdrive_block_size_bytes` | 16 MiB | Read granularity. Drive charges ~1.3 s per ranged request regardless of size, so larger blocks mean fewer, faster requests — but a `count(*)` over a Parquet footer then pays for a whole block it does not need. 16 MiB is the compromise; see `docs/benchmark.md` for the sweep. |
+| `gdrive_block_cache_bytes` | 256 MiB | Total cap on the shared block cache, across all files and handles. Blocks are keyed by identity + file id + revision, so a file changing on Drive cannot be served stale. |
+| `gdrive_path_cache_entries` | 4096 | Cap on cached `path -> file id` mappings, LRU. `0` is unbounded. Drive has no path addressing, so each dropped mapping costs one `files.list` per segment to rebuild — cheap, which is why this cache may be evicted and the block cache is bounded separately. |
+
+```sql
+SELECT name, value FROM duckdb_settings() WHERE name LIKE 'gdrive%';
+```
 
 ## Development
 

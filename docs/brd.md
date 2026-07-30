@@ -99,7 +99,7 @@ exactly when that is true, and not otherwise.
 
 | # | Requirement |
 |---|---|
-| **REQ-NF-01** | **Latency.** A Drive API round trip is ~150 ms against ~1 ms for object storage. Repeated reads of one file within a query must be served from cache; a cold columnar scan must cost a bounded number of round trips, not one per column chunk. |
+| **REQ-NF-01** | **Latency.** A Drive API round trip costs 0.3–2.1 s depending on the request shape — ~0.3 s for metadata, ~1.3 s for a ranged read of a large file — against ~1 ms for object storage (measured, `docs/benchmark.md`; an earlier "~150 ms" here was an assumption and was wrong by up to 14x). Repeated reads of one file within a query must be served from cache; a cold columnar scan must cost a bounded number of round trips, not one per column chunk. |
 | **REQ-NF-02** | **Quota.** Drive enforces per-user API quotas, unlike object storage. A single query must not amplify into hundreds of metadata calls, and hitting a limit must produce a clear error rather than silent throttling. |
 | **REQ-NF-03** | **Credential handling.** No credential is written to disk by the extension, logged, or included in an error message. No credential file is ever committed to the repository. |
 | **REQ-NF-04** | **Least privilege.** Request the narrowest workable Drive scope; read-only configurations request a read-only scope. |

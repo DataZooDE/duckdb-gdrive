@@ -200,7 +200,24 @@ def main() -> int:
     # how the README came to advertise `authorization_code`, a provider that
     # is not registered and errors on use. A feature table is a promise; check
     # it like one.
-    provider_rows = re.findall(r"^\|\s*`([a-z_]+)`\s*\|", text, re.MULTILINE)
+    # Anchored to the table under a "| Provider |" header, NOT to every table
+    # in the file. The unanchored version matched any backticked first column,
+    # so adding a settings table made this report five settings as bogus
+    # providers -- a false alarm, but the same looseness would just as happily
+    # SKIP a provider table that did not lead with a backtick.
+    # EVERY provider-headed table, unioned -- there are two (one for what each
+    # provider is for, one for how the default scope behaves per provider) and
+    # taking only the first would leave the second unchecked forever.
+    provider_tables = re.findall(
+        r"^\|\s*Provider\s*\|.*?\n(?:\|.*\n)+", text, re.MULTILINE | re.IGNORECASE)
+    provider_rows = [name
+                     for tbl in provider_tables
+                     for name in re.findall(r"^\|\s*`([a-z_]+)`\s*\|", tbl, re.MULTILINE)]
+    if not provider_tables:
+        failures.append(
+            "no provider table found in the README (expected a table whose "
+            "first column header is 'Provider'). The check that guards against "
+            "advertising an unregistered provider cannot run without it.")
     if provider_rows:
         rc, out = run_sql(
             "SELECT DISTINCT provider FROM duckdb_secret_types() WHERE type = 'gdrive'"
@@ -242,6 +259,30 @@ def main() -> int:
                 failures.append(f"README documents SET {s} but no such setting is registered")
         print(f"    settings: {', '.join(named_settings)} -> "
               f"{len([s for s in named_settings if s in have])}/{len(named_settings)} exist")
+
+    # --- and the REVERSE: every registered setting must be documented --------
+    #
+    # The check above only ever ran README -> code. It therefore could not
+    # see the actual failure mode, which is a setting that EXISTS and is
+    # undocumented -- and it did not: gdrive_block_cache_bytes,
+    # gdrive_block_size_bytes and gdrive_path_cache_entries were all
+    # registered, all user-facing, all absent from the README, and this
+    # script printed OK on every run.
+    #
+    # A user cannot set what they cannot find. Matching on the bare name
+    # anywhere in the text (not just `SET x=`) because the settings table
+    # lists names in a column, which is the right way to document them.
+    rc, out = run_sql("SELECT name FROM duckdb_settings() WHERE name LIKE 'gdrive%'")
+    if rc == 0:
+        registered = sorted(n for n in out.splitlines() if n.strip())
+        undocumented = [n for n in registered if n not in text]
+        for n in undocumented:
+            failures.append(
+                f"setting {n} is registered but appears nowhere in the README")
+        print(f"    registered settings documented: "
+              f"{len(registered) - len(undocumented)}/{len(registered)}")
+    else:
+        failures.append("could not list registered settings")
 
     # --- plain SELECTs must parse -------------------------------------------
     #
