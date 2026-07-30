@@ -250,9 +250,12 @@ Being direct, because the alternatives are often better:
 Reads are ranged, so a Parquet scan fetches footers and column chunks rather
 than whole files.
 
-> **The performance target is currently MISSED.** The goal is a cold columnar
-> scan within **3×** the same file on object storage. Measured on an 87 MB
-> Parquet: local 0.14 s, GCS 1.30 s, `gdrive://` 6.21 s — **4.8×**, not 3×.
+> **The performance target is UNSETTLED, and Drive is slow either way.** The
+> goal is a cold columnar scan within **3×** the same file on object storage.
+> On an 87 MB Parquet the `gdrive://` leg is **4.36 s** against a local
+> **0.14 s** (measured 2026-07-30). The last GCS measurement, 1.30 s, is from
+> an earlier session and a bucket that no longer exists, so the ratio is an
+> estimate — ~3.4×, a near miss — and is not asserted as a result.
 >
 > The cause is measured rather than assumed: one such query costs **55 Drive
 > round trips** (35 data, 18 metadata, 2 path resolution). A ranged media
@@ -262,8 +265,11 @@ than whole files.
 > metadata calls — and neither is done yet. `docs/benchmark.md` has the
 > numbers and the reasoning.
 >
-> Budget accordingly: Drive is currently ~45× a local file and ~5× object
-> storage for a cold scan.
+> Budget accordingly: Drive is currently ~30× a local file for a cold scan.
+> Setting `gdrive_block_size_bytes` to 128 MiB and addressing files by
+> `gdrive://id:` is the fastest measured configuration — 3.34 s, ~2.6× the
+> stale GCS figure — at the cost of ~0.8 s on footer-only queries like
+> `count(*)`. See `docs/benchmark.md` for the sweep.
 
 Drive enforces per-user API quotas. A query that looks unremarkable against S3
 can hit them, so the extension caches path resolution aggressively and reports

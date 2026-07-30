@@ -3,9 +3,18 @@
 **Gate:** a cold columnar scan over `gdrive://` completes within **3×** the
 same file on Google Cloud Storage.
 
-**Status: EVALUATED, and the gate FAILS at 4.8x–5.7x.** REQ-NF-01 is not
-met. The cause is measured, not guessed — 55 Drive round trips for one query
-— and the fix is fewer of them, not a softer gate. See *Diagnosis*.
+**Status: UNSETTLED, and borderline.** The 4.8x figure below was measured on
+2026-07-27, before the shared block cache. The gdrive leg has since dropped
+from 6.21 s to **4.36 s** (measured 2026-07-30), which against the last
+recorded GCS minimum would be ~3.4x — still a miss, but no longer a
+comfortable one, and the fastest measured configuration (128 MiB blocks +
+`id:` form) is ~2.6x, inside the gate.
+
+The gate cannot be called from here, because **both legs must run in one
+session** and the benchmark bucket was deleted after the last run. Until then
+this document reports the numerator honestly and does not assert a verdict.
+The cause of the cost is measured, not guessed — 55 Drive round trips for one
+query — and the fix is fewer of them, not a softer gate. See *Diagnosis*.
 
 Reproduce with `make bench` (needs `GDRIVE_BENCH_GCS_URI`); raw numbers land
 in `docs/benchmark.json`.
@@ -276,12 +285,62 @@ Three things this says, none of them obvious beforehand:
    addressing. It is the strongest argument for the documented `id:` fast
    path.
 
+### The sweep above was under-sampled — resampled 2026-07-30
+
+"Best of two" is not enough to separate 4.62 s from 4.70 s. Re-run with five
+samples per cell, reporting both min and median, and adding the counterweight
+the first sweep never measured: what a **footer-only** query (`count(*)`,
+which Parquet answers without reading a column chunk) costs at each size.
+
+| `gdrive_block_size_bytes` | scan min | scan median | `count(*)` min | `count(*)` median |
+|---|---|---|---|---|
+| **16 MiB (default)** | 5.01 s | **5.43 s** | 2.31 s | **2.61 s** |
+| 32 MiB | 4.75 s | 5.47 s | 2.81 s | 2.85 s |
+| 64 MiB | 4.69 s | 5.05 s | 2.73 s | 2.82 s |
+| 128 MiB | **3.34 s** | **3.49 s** | 3.23 s | **3.40 s** |
+
+(Higher than the table above because each run includes process start-up and
+`CREATE SECRET`; the comparison between rows is what matters.)
+
+**32 MiB was noise.** The first sweep's 4.62 s made it look like a free 0.08 s
+over the default; at five samples its median is *worse* than 16 MiB and its
+footer cost is 0.24 s higher. A default was nearly changed on that. Two
+samples cannot distinguish an 80 ms effect on a workload whose median moves by
+400 ms between runs.
+
+**128 MiB is a real trade, not a free win, and smaller than previously
+believed.** It buys ~1.9 s on a full scan and costs ~0.8 s on a footer query.
+The earlier reasoning for keeping 16 MiB — that a large block would make
+`count(*)` "download the whole file" — overstated it: the footer read is a
+single media request at every block size, so the cost is transferring one
+larger block, not the file. The conclusion survives the correction anyway:
+
+**The 16 MiB default stands.** A footer-only query is the cheap thing users
+expect to be cheap, and 128 MiB also fits only two blocks inside the 256 MiB
+`gdrive_block_cache_bytes` cap, so a multi-file scan would thrash. Users whose
+workload is large sequential scans should set `gdrive_block_size_bytes` to
+128 MiB and use the `gdrive://id:` form; that combination is the fastest
+measured configuration and it is documented rather than defaulted.
+
 ### Where that leaves REQ-NF-01
 
-Against the recorded GCS minimum of 1.30 s:
+**Provisional — the denominator is stale.** The ratios below divide a fresh
+gdrive number by a GCS minimum recorded on 2026-07-27, in a different session,
+on a bucket that no longer exists. That is exactly the sloppiness this document
+exists to correct, so they are marked as estimates and the gate is **not**
+settled until both legs run in one session (`make bench` with
+`GDRIVE_BENCH_GCS_URI`).
 
-* default 16 MiB blocks, path form: **~3.5x** — still misses
-* 128 MiB blocks, `id:` form: **~2.6x** — inside the gate
+Current gdrive leg, measured 2026-07-30 by `make bench`: **4.36 s min /
+4.80 s median**, down from 6.21 s, entirely from the shared block cache.
+
+Against the stale GCS minimum of 1.30 s:
+
+* default 16 MiB blocks, path form: **~3.4x** — would still miss
+* 128 MiB blocks, `id:` form: **~2.6x** — would pass
+
+So the gate is genuinely borderline in the default configuration and the
+outcome cannot be asserted either way from here.
 
 So the gate is achievable but NOT met at the defaults, and the honest summary
 is that Drive can be brought within 3x of GCS for id-addressed reads of large
