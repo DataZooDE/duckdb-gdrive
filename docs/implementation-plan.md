@@ -82,6 +82,24 @@
 > (unreachable from SQL — `COPY` is sequential and `ATTACH` does not route
 > here), and the REQ-NF-01 performance gate (needs a GCS denominator).
 >
+> **Publication readiness audit (2026-07-30).** "Are we ready for
+> community-extensions?" was asked and answered by testing the DESCRIPTOR,
+> not the README — it is the text a reviewer reads. Three false claims in it,
+> all shipped-ready until checked:
+>
+> | Claim | Reality |
+> |---|---|
+> | "a round trip is ~150 ms" | 0.29–2.10 s depending on request shape. Never measured; `benchmark.md` had already contradicted it and kept quoting it. |
+> | "`ATTACH` inherits the scheme" | Not for database files. DuckDB normalises `gdrive://` to `gdrive:/` and uses the LOCAL filesystem; this extension is never called. |
+> | `hello_world` shows only `DRIVE_ID` | A shared FOLDER needs `ROOT_FOLDER_ID`. The common case fails with "Shared drive not found" on the first copied statement. |
+>
+> Also: three registered settings were undocumented, because
+> `verify_readme.py` only ever checked README -> code. Both directions now.
+>
+> The lesson, again and more specifically than last time: the README had been
+> audited and the descriptor had not, so the descriptor was where the false
+> claims lived. Audit the artefact the AUDIENCE reads.
+
 > **Backlog closed 2026-07-28** — the remaining un-slices, done red/green:
 >
 > | Slice | Status |

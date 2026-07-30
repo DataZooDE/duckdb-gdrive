@@ -78,6 +78,13 @@ Do not submit while any of these is open. The first two are honesty
 obligations: the descriptor's `extended_description` makes claims, and a
 reviewer will test them.
 
+**Descriptor status (2026-07-30): clear.** Every claim in `hello_world` was
+executed against real Drive, and `extended_description` no longer makes a
+positive performance claim — it states that Drive is slower than object
+storage and quantifies the ranged-read cost from `make latency`. That is true
+whichever way REQ-NF-01 lands, so the descriptor does not block on it. What
+still blocks is the decision below.
+
 - **REQ-NF-01 is UNRESOLVED, and the last number is stale.** Measured
   2026-07-27 against GCS: **4.8×**, where the gate is 3×. That predates the
   shared block cache; the best observation since was ~2.6×, which would pass.
