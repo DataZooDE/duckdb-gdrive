@@ -133,6 +133,7 @@ extension fails and names both file ids so you can use the `id:` form.
 |---|---|
 | `credential_chain` | **default.** Application Default Credentials — your `gcloud` login, or `GOOGLE_APPLICATION_CREDENTIALS` |
 | `service_account` | unattended: servers, CI, scheduled jobs |
+| `authorization_code` | interactive browser consent, with your own OAuth client |
 | `config` | you already hold an access/refresh token |
 
 ### `credential_chain` — the default
@@ -163,18 +164,47 @@ application-default login` writes) refreshes access tokens as it goes, and a
 Workload identity federation (`external_account`) is not supported; the
 extension names it explicitly rather than failing obscurely.
 
-### `config`
+### `config` — a token you already have
 
-`config` also covers the interactive case: obtain a refresh token once (any
-OAuth2 client will do — see `scripts/oauth_consent.py` for a working example)
-and hand it to the secret, which refreshes access tokens itself.
+For a token obtained elsewhere. `ACCESS_TOKEN` alone is used as-is and never
+refreshed; `REFRESH_TOKEN` with `CLIENT_ID` and `CLIENT_SECRET` is refreshed
+as needed.
 
-> **No `authorization_code` provider yet.** An in-process browser consent flow
-> is designed (`docs/hld.md` §5) and the machinery exists in the
-> `datazoo-oauth2` library, but it is **not registered**, so `PROVIDER
-> authorization_code` is an error. It was listed here before it existed; that
-> was a documentation bug, and `make verify_readme` now checks this table
-> against the providers actually registered.
+This is the right provider when consent happened on a *different* machine —
+do the browser flow on your laptop, then copy the refresh token to the server.
+For consent on *this* machine, use `authorization_code` below, which does the
+same thing without the copying.
+
+### `authorization_code` — browser consent
+
+```sql
+CREATE SECRET my_drive (
+    TYPE gdrive, PROVIDER authorization_code,
+    CLIENT_ID '…apps.googleusercontent.com',
+    CLIENT_SECRET '…',
+    DRIVE_SCOPE 'https://www.googleapis.com/auth/drive'
+);
+```
+
+Creating the secret stores configuration only. On first use a browser opens,
+you consent, and a loopback redirect hands the code back. **The refresh token
+is stored in the secret**, so that is the last time you see a consent screen —
+not once per hour.
+
+> **You bring your own OAuth client**, and that is a deliberate trade. Create
+> one of type *Desktop app* in the Google Cloud console (enable the Drive API
+> first). We could instead compile a DataZoo-owned client id into the
+> extension and make this a zero-argument statement — that is how the
+> `gsheets` extension manages `CREATE SECRET (TYPE gsheet);` — but it would
+> put our name on your consent screen, cap usage at 100 test users until
+> Google verification completes, and Drive scopes are "restricted", so full
+> verification means a third-party security assessment. If you want zero
+> setup, use `credential_chain` above: it reuses the `gcloud` login you
+> already have.
+
+On a machine with no display the flow fails immediately and says so, rather
+than opening nothing and timing out. `REDIRECT_PORT` (default `8020`) changes
+the loopback port if that one is taken.
 
 **A service account needs a Shared Drive to write.** Service accounts have no
 personal Drive storage quota, so they cannot own files in a My Drive — Google
@@ -209,6 +239,7 @@ the difference is not ours to fix:
 | `service_account` | **Enforced.** The scope is a claim in the signed assertion, so Google refuses a write with *"Request had insufficient authentication scopes"* — tested. |
 | `config` | **Advisory.** A refresh-token exchange returns an access token carrying the scopes granted at *consent* time; asking for a narrower one does not narrow it. If the token was consented for full Drive access, it keeps it. |
 | `credential_chain` | **Depends on what was found.** A `service_account` document behaves as the first row; an `authorized_user` document behaves as the second, so the scope is fixed by the `--scopes` you passed to `gcloud`. |
+| `authorization_code` | **Enforced at consent.** `DRIVE_SCOPE` is what the consent screen asks for, so this is the one interactive case where the default genuinely narrows access. |
 
 So with `config` — and with a `gcloud` credential — restrict at consent time;
 `DRIVE_SCOPE` cannot claw back access the refresh token already carries.

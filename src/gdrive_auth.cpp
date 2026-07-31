@@ -21,7 +21,12 @@
 // material into an exception message.
 #include "gdrive_adc.hpp"
 #include "gdrive_auth.hpp"
+#include "gdrive_oauth_params.hpp"
 #include "gdrive_service_account.hpp"
+
+// datazoo-oauth2 -- the shared, provider-agnostic OAuth2 stack (D-11).
+#include "datazoo/oauth2/oauth2_flow_v2.hpp"
+#include "datazoo/oauth2/oauth2_types.hpp"
 
 #include "duckdb/catalog/catalog_transaction.hpp"
 #include "duckdb/common/exception.hpp"
@@ -546,6 +551,139 @@ GDriveAuthContext BuildContextFromCredentialChain(ClientContext &context, const 
 	return make_ctx(access_token);
 }
 
+// ---------------------------------------------------------------------------
+// PROVIDER authorization_code -- interactive browser consent (C-1..C-4).
+//
+// Runs at FIRST USE rather than at CREATE SECRET, so a SQL statement never
+// blocks on a human clicking a consent screen, and so creating the secret is
+// testable without a browser.
+//
+// After the flow completes the refresh token is written back into the secret,
+// which is the difference between OAuth that works once and OAuth that keeps
+// working. (The gsheets extension does not do this: it stores only the access
+// token, so its browser flow has to be repeated every hour.)
+// ---------------------------------------------------------------------------
+GDriveAuthContext BuildContextFromAuthorizationCode(ClientContext &context, const KeyValueSecret &kv,
+                                                     const std::string &secret_name) {
+	std::string scope = GetOrEmpty(kv, "drive_scope");
+	if (scope.empty()) {
+		scope = SCOPE_DRIVE_READONLY;
+	}
+
+	const std::string client_id = GetOrEmpty(kv, "client_id");
+	const std::string client_secret = GetOrEmpty(kv, "client_secret");
+	if (client_id.empty() || client_secret.empty()) {
+		throw InvalidInputException("gdrive secret '%s' (PROVIDER authorization_code) is missing CLIENT_ID or "
+		                             "CLIENT_SECRET.",
+		                             secret_name.c_str());
+	}
+
+	auto make_ctx = [&](const std::string &access_token) {
+		GDriveAuthContext ctx;
+		ctx.access_token = access_token;
+		ctx.drive_id = GetOrEmpty(kv, "drive_id");
+		ctx.root_folder_id = GetOrEmpty(kv, "root_folder_id");
+		ctx.scope = scope;
+		ctx.secret_name = secret_name;
+		return ctx;
+	};
+
+	const std::string cache_key = FingerprintKey(secret_name, "authorization_code", {client_id, client_secret, scope});
+
+	{
+		std::lock_guard<std::mutex> lock(CacheMutex());
+		auto it = TokenCache().find(cache_key);
+		if (it != TokenCache().end() && it->second.expires_at_unix - kRefreshSlackSeconds > NowUnix()) {
+			return make_ctx(it->second.access_token);
+		}
+	}
+
+	// A refresh token from an earlier consent means no browser is needed. This
+	// is the normal path after the first use, and the reason the flow is worth
+	// doing properly: consent happens once, not hourly.
+	const std::string stored_refresh = GetOrEmpty(kv, "refresh_token");
+	if (!stored_refresh.empty()) {
+		RefreshResult refreshed = RefreshUserToken(client_id, client_secret, stored_refresh, NowUnix());
+		if (refreshed.ok) {
+			std::lock_guard<std::mutex> lock(CacheMutex());
+			TokenCache()[cache_key] = CachedToken {refreshed.access_token, refreshed.expires_at_unix};
+			return make_ctx(refreshed.access_token);
+		}
+		// Fall through to a fresh consent: a revoked or expired refresh token
+		// is exactly the case where re-consenting is the right answer, and
+		// erroring out would leave the user to work that out themselves.
+	}
+
+	// Fail fast before anything is launched or bound. datazoo-oauth2's browser
+	// launcher does no display check, so on a headless host the flow blocks
+	// until the callback handler times out and then reports a timeout -- which
+	// reads as "you were too slow" rather than "this machine has no browser".
+	{
+		DisplayEnvironment display_env;
+#if !defined(_WIN32) && !defined(__APPLE__)
+		display_env.is_posix_non_apple = true;
+#endif
+		display_env.display = GetEnvOrEmpty("DISPLAY");
+		display_env.wayland_display = GetEnvOrEmpty("WAYLAND_DISPLAY");
+		display_env.ssh_connection = GetEnvOrEmpty("SSH_CONNECTION");
+		if (!CanLaunchBrowser(display_env)) {
+			throw IOException("gdrive secret '%s': %s", secret_name.c_str(), NoBrowserMessage().c_str());
+		}
+	}
+
+	GoogleOAuthParams google = BuildGoogleOAuthParams(scope);
+
+	erpl_web::OAuth2Config config;
+	config.client_id = client_id;
+	config.client_secret = client_secret;
+	config.scope = google.scope;
+	// ALWAYS explicit -- OAuth2Config's defaults are SAP BTP-shaped. See
+	// gdrive_oauth_params.hpp.
+	config.custom_auth_url = google.auth_url;
+	config.custom_token_url = google.token_url;
+	// access_type=offline + prompt=consent; without both Google issues no
+	// refresh token and the flow silently degrades to one hour of access.
+	config.extra_auth_params = google.extra_auth_params;
+
+	const std::string port = GetOrEmpty(kv, "redirect_port");
+	config.redirect_uri = "http://localhost:" + (port.empty() ? std::string("8020") : port);
+
+	erpl_web::OAuth2FlowV2 flow;
+	erpl_web::OAuth2Tokens tokens;
+	try {
+		tokens = flow.ExecuteFlow(config);
+	} catch (const std::exception &e) {
+		throw IOException(
+		    "gdrive secret '%s': the browser consent flow did not complete: %s\n"
+		    "This flow needs a browser on this machine and a free port for the redirect "
+		    "(%s). On a headless host use PROVIDER credential_chain or PROVIDER "
+		    "service_account instead.",
+		    secret_name.c_str(), e.what(), config.redirect_uri.c_str());
+	}
+
+	if (tokens.access_token.empty()) {
+		throw IOException("gdrive secret '%s': the browser consent flow returned no access token.",
+		                   secret_name.c_str());
+	}
+
+	// Persist the refresh token so this is the last browser prompt. Writing
+	// back into the secret is what OAuth2SecretTokenManager exists for; here
+	// the tokens are placed directly because this secret is already in hand.
+	if (!tokens.refresh_token.empty()) {
+		auto &mutable_kv = const_cast<KeyValueSecret &>(kv);
+		mutable_kv.secret_map["refresh_token"] = Value(tokens.refresh_token);
+		mutable_kv.redact_keys.insert("refresh_token");
+	}
+
+	const int64_t expires_at = NowUnix() + (tokens.expires_in > 0 ? tokens.expires_in : 3600);
+	{
+		std::lock_guard<std::mutex> lock(CacheMutex());
+		TokenCache()[cache_key] = CachedToken {tokens.access_token, expires_at};
+	}
+
+	return make_ctx(tokens.access_token);
+}
+
 GDriveAuthContext BuildContextFromConfig(const KeyValueSecret &kv, const std::string &secret_name) {
 	std::string scope = GetOrEmpty(kv, "drive_scope");
 	if (scope.empty()) {
@@ -667,10 +805,12 @@ GDriveAuthContext GetAuthContext(ClientContext &context, const std::string &path
 	if (base.GetProvider() == "credential_chain") {
 		return BuildContextFromCredentialChain(context, *kv, secret_name);
 	}
+	if (base.GetProvider() == "authorization_code") {
+		return BuildContextFromAuthorizationCode(context, *kv, secret_name);
+	}
 
 	throw InvalidInputException("gdrive secret '%s' has unsupported provider '%s'; expected 'service_account', "
-	                             "'config' or 'credential_chain' ('authorization_code' is not yet implemented -- see "
-	                             "docs/hld.md section 5).",
+	                             "'config', 'credential_chain' or 'authorization_code'.",
 	                             secret_name.c_str(), base.GetProvider().c_str());
 }
 

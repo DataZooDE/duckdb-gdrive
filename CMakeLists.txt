@@ -91,6 +91,7 @@ file(GLOB PURE_SOURCES CONFIGURE_DEPENDS
     src/gdrive_glob.cpp
     src/gdrive_service_account_pure.cpp
     src/gdrive_adc.cpp
+    src/gdrive_oauth_params.cpp
 )
 
 # ---------------------------------------------------------------------------
@@ -123,8 +124,8 @@ target_compile_features(${EXTENSION_NAME} PRIVATE cxx_std_17)
 target_compile_features(${LOADABLE_EXTENSION_NAME} PRIVATE cxx_std_17)
 
 if(NOT EMSCRIPTEN)
-    target_link_libraries(${EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto jwt-cpp::jwt-cpp posthog_telemetry)
-    target_link_libraries(${LOADABLE_EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto jwt-cpp::jwt-cpp posthog_telemetry)
+    target_link_libraries(${EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto jwt-cpp::jwt-cpp posthog_telemetry datazoo_oauth2)
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto jwt-cpp::jwt-cpp posthog_telemetry datazoo_oauth2)
 else()
     target_link_libraries(${EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto jwt-cpp::jwt-cpp)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto jwt-cpp::jwt-cpp)
