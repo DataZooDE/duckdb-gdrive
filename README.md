@@ -202,9 +202,22 @@ not once per hour.
 > setup, use `credential_chain` above: it reuses the `gcloud` login you
 > already have.
 
+**Make it a *Desktop app* client, not a *Web application* one.** For desktop
+clients Google accepts a loopback redirect on any port, so there is nothing to
+register and `REDIRECT_PORT` can be changed freely. A web client checks the
+redirect URI exactly, and you would have to register
+
+```
+http://localhost:8020
+```
+
+— note the bare path. Get either detail wrong and Google answers
+`Error 400: redirect_uri_mismatch` before the consent screen appears.
+
 On a machine with no display the flow fails immediately and says so, rather
 than opening nothing and timing out. `REDIRECT_PORT` (default `8020`) changes
-the loopback port if that one is taken.
+the loopback port if that one is taken; on a web client it has to match what
+you registered.
 
 **A service account needs a Shared Drive to write.** Service accounts have no
 personal Drive storage quota, so they cannot own files in a My Drive — Google
