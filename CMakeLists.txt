@@ -47,6 +47,28 @@ if(NOT EMSCRIPTEN)
 endif()
 
 # ---------------------------------------------------------------------------
+# datazoo-oauth2 (D-11, REQ-A-01/A-02; design in docs/hld.md section 5.4).
+#
+# The shared OAuth2 stack: authorization-code + PKCE, the loopback redirect
+# server, cross-platform browser launch, and get-token-with-refresh against a
+# DuckDB secret. Extracted from erpl-web, which now consumes it too, so there
+# is one implementation rather than a fork.
+#
+# Pinned by commit, not tracked by branch: each consumer pins its own, so
+# neither is forced to upgrade on the other's schedule (R-9).
+#
+# Native only, like posthog-telemetry: the loopback server and the browser
+# launcher have no meaning under emscripten.
+#
+# NOT wired into the extension's sources yet -- PROVIDER authorization_code is
+# the next slice. This pins and builds the dependency so that landing it is a
+# code change rather than a build-system change.
+# ---------------------------------------------------------------------------
+if(NOT EMSCRIPTEN)
+    add_subdirectory(datazoo-oauth2)
+endif()
+
+# ---------------------------------------------------------------------------
 # Pure-logic sources: no `#include "duckdb.hpp"`, no I/O. Compiled into BOTH
 # the extension and the Catch2 unit-test binary. See docs/implementation-plan
 # .md section 1 -- these are the only things Catch2 is allowed to test, and
