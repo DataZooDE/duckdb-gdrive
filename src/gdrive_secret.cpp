@@ -232,6 +232,14 @@ unique_ptr<BaseSecret> CreateAuthorizationCodeSecret(ClientContext &, CreateSecr
 	CopyOption(input, *result, "client_id");
 	CopyOption(input, *result, "client_secret");
 	CopyOption(input, *result, "redirect_port");
+	// Optional: a refresh token you already hold. Supplying one skips the
+	// browser entirely -- the flow only runs when there is nothing to refresh.
+	//
+	// This is not only a convenience. Without it, everything after the consent
+	// click is reachable only by a human clicking, so the refresh and
+	// write-back paths could not be tested automatically at all. With it, CI
+	// covers all of it and the manual step shrinks to the click itself.
+	CopyOption(input, *result, "refresh_token");
 	CopyOption(input, *result, "drive_id");
 	CopyOption(input, *result, "root_folder_id");
 	CopyOption(input, *result, "drive_scope");
@@ -312,6 +320,7 @@ void RegisterGDriveSecrets(ExtensionLoader &loader) {
 	authcode_fn.named_parameters["client_id"] = LogicalType(LogicalTypeId::VARCHAR);
 	authcode_fn.named_parameters["client_secret"] = LogicalType(LogicalTypeId::VARCHAR);
 	authcode_fn.named_parameters["redirect_port"] = LogicalType(LogicalTypeId::VARCHAR);
+	authcode_fn.named_parameters["refresh_token"] = LogicalType(LogicalTypeId::VARCHAR);
 	RegisterCommonParameters(authcode_fn);
 	loader.RegisterFunction(authcode_fn);
 }

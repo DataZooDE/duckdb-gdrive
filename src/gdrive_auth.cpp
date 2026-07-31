@@ -26,6 +26,7 @@
 
 // datazoo-oauth2 -- the shared, provider-agnostic OAuth2 stack (D-11).
 #include "datazoo/oauth2/oauth2_flow_v2.hpp"
+#include "datazoo/oauth2/oauth2_secret_token_manager.hpp"
 #include "datazoo/oauth2/oauth2_types.hpp"
 
 #include "duckdb/catalog/catalog_transaction.hpp"
@@ -666,13 +667,18 @@ GDriveAuthContext BuildContextFromAuthorizationCode(ClientContext &context, cons
 		                   secret_name.c_str());
 	}
 
-	// Persist the refresh token so this is the last browser prompt. Writing
-	// back into the secret is what OAuth2SecretTokenManager exists for; here
-	// the tokens are placed directly because this secret is already in hand.
+	// Persist the refresh token so this is the last browser prompt.
+	//
+	// This MUST go through the secret manager. Mutating the KeyValueSecret we
+	// were handed does nothing: SecretMatch's constructor copies the
+	// SecretEntry, whose copy constructor Clone()s the secret, so a lookup
+	// returns a deep copy that is destroyed when the match goes out of scope.
+	// Writing to it succeeds, changes nothing, and reports no error -- the
+	// flow appears to work and the next expiry silently prompts again.
 	if (!tokens.refresh_token.empty()) {
-		auto &mutable_kv = const_cast<KeyValueSecret &>(kv);
-		mutable_kv.secret_map["refresh_token"] = Value(tokens.refresh_token);
-		mutable_kv.redact_keys.insert("refresh_token");
+		erpl_web::OAuth2SecretTokenManager::UpdateSecretWithTokens(
+		    context, &kv, tokens.access_token, tokens.expires_in > 0 ? tokens.expires_in : 3600,
+		    tokens.refresh_token);
 	}
 
 	const int64_t expires_at = NowUnix() + (tokens.expires_in > 0 ? tokens.expires_in : 3600);
