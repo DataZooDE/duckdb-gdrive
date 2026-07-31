@@ -265,6 +265,30 @@ separate `GDriveErrorKind`. Without that split the message sends people to
 audit Drive sharing for a problem entirely inside their token. Fix is
 `--scopes=openid,https://www.googleapis.com/auth/drive`.
 
+**Consuming `datazoo-oauth2` has three traps, all hit for real.** The library
+was extracted from `erpl-web` and kept `namespace erpl_web`, so its headers
+collide with a consumer that still has its own copies of anything. (1) Its
+`tracing.hpp` defines `ERPL_TRACE_*` and an `erpl_web::ErplTracer` alias —
+define `DATAZOO_OAUTH2_USE_HOST_TRACING` if you have your own. (2) Its
+`http_client.hpp` does `using namespace duckdb;` at **global** scope; include
+it earlier than the previous order did and unqualified names start resolving
+into `duckdb::` — this made `EnumType` ambiguous in an erpl-web test file that
+neither header had ever been near. Include the tiny `odata_version.hpp` when
+that is all you need. (3) DuckDB *exports* the extension target, so any
+library it links must `install(... EXPORT "${DUCKDB_EXPORT_SET}")` or CMake
+refuses to generate. All three are fixed upstream now; the pattern is what to
+remember.
+
+**`OAuth2Browser` does not check for a display.** It shells out to `xdg-open`
+and hopes, so on a headless host the flow blocks until the callback handler
+times out and then reports a *timeout* — which reads as "you were too slow"
+rather than "this machine has no browser". `CanLaunchBrowser` in
+`gdrive_oauth_params.cpp` is checked before the flow starts. Note
+`SSH_CONNECTION` is deliberately not a veto: with X11 forwarding `DISPLAY` is
+set and the browser really does open, on the user's own machine. Its
+`IsPortAvailable*` are also stubs that always return true, on every platform —
+pinned by a regression test in the library, so do not "fix" them there.
+
 **Drive permits two files with the same name in one folder.** A path is
 therefore not a unique identifier (R-4). Multiple matches are an error naming
 both ids — silently picking one makes query results depend on Drive's
