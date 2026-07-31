@@ -19,6 +19,7 @@
 //
 // REQ-NF-03: no path in this file ever puts a token, a client secret, or key
 // material into an exception message.
+#include "gdrive_adc.hpp"
 #include "gdrive_auth.hpp"
 #include "gdrive_service_account.hpp"
 
@@ -42,6 +43,7 @@
 #include <openssl/evp.h>
 
 #include <chrono>
+#include <cstdlib>
 #include <fstream>
 #include <mutex>
 #include <sstream>
@@ -407,6 +409,143 @@ GDriveAuthContext BuildContextFromServiceAccount(const KeyValueSecret &kv, const
 	return ctx;
 }
 
+// ---------------------------------------------------------------------------
+// PROVIDER credential_chain -- Application Default Credentials (D-10).
+//
+// Resolution is deliberately thin: find the ADC document, decide which of the
+// two token strategies this extension ALREADY has applies to it, and hand
+// off. An `authorized_user` document carries exactly the triple that the
+// config provider's refresh path consumes; a `service_account` document is
+// exactly what the RFC 7523 minting path consumes. No third strategy exists,
+// and none should be added here.
+//
+// Everything about WHERE to look and WHAT a document means is pure and lives
+// in gdrive_adc.cpp; this function only touches the environment, the
+// filesystem, and the token cache.
+// ---------------------------------------------------------------------------
+
+//! Read an environment variable as a std::string, treating unset and empty
+//! the same -- an exported-but-empty GOOGLE_APPLICATION_CREDENTIALS is a
+//! shell accident, not a request to open a file called "".
+std::string GetEnvOrEmpty(const char *name) {
+	const char *value = std::getenv(name);
+	return value ? std::string(value) : std::string();
+}
+
+GDriveAuthContext BuildContextFromCredentialChain(ClientContext &context, const KeyValueSecret &kv,
+                                                   const std::string &secret_name) {
+	std::string scope = GetOrEmpty(kv, "drive_scope");
+	if (scope.empty()) {
+		scope = SCOPE_DRIVE_READONLY; // REQ-NF-04
+	}
+
+	AdcPathInputs inputs;
+	inputs.google_application_credentials = GetEnvOrEmpty("GOOGLE_APPLICATION_CREDENTIALS");
+	inputs.cloudsdk_config = GetEnvOrEmpty("CLOUDSDK_CONFIG");
+	inputs.home = GetEnvOrEmpty("HOME");
+	inputs.appdata = GetEnvOrEmpty("APPDATA");
+
+	// The gdrive_adc_file setting outranks the environment: a DuckDB session
+	// cannot export a variable to itself, so this is the only way to point one
+	// connection at a specific credential.
+	std::string adc_path;
+	Value setting;
+	if (context.TryGetCurrentSetting("gdrive_adc_file", setting) && !setting.IsNull() &&
+	    !setting.ToString().empty()) {
+		adc_path = setting.ToString();
+	} else {
+		adc_path = ResolveAdcPath(inputs);
+	}
+
+	if (adc_path.empty()) {
+		throw IOException("gdrive secret '%s': %s", secret_name.c_str(),
+		                   NoCredentialsMessage().c_str());
+	}
+
+	std::ifstream f(adc_path, std::ios::binary);
+	if (!f.good()) {
+		// The path is not secret, and naming it is what turns "no credentials"
+		// from a riddle into a fact the reader can check with `ls`.
+		throw IOException("gdrive secret '%s': no credentials file at '%s'.\n\n%s", secret_name.c_str(),
+		                   adc_path.c_str(), NoCredentialsMessage().c_str());
+	}
+	std::ostringstream ss;
+	ss << f.rdbuf();
+	std::string adc_json = ss.str();
+
+	AdcParse parsed = ParseAdcJson(adc_json);
+	adc_json.clear(); // never keep credential text around longer than needed
+	if (!parsed.ok) {
+		// ParseAdcJson guarantees its error quotes no credential material.
+		throw InvalidInputException("gdrive secret '%s': credentials file '%s' is unusable: %s",
+		                             secret_name.c_str(), adc_path.c_str(), parsed.error.c_str());
+	}
+
+	auto make_ctx = [&](const std::string &access_token) {
+		GDriveAuthContext ctx;
+		ctx.access_token = access_token;
+		ctx.drive_id = GetOrEmpty(kv, "drive_id");
+		ctx.root_folder_id = GetOrEmpty(kv, "root_folder_id");
+		ctx.scope = scope;
+		ctx.secret_name = secret_name;
+		return ctx;
+	};
+
+	// The cache key fingerprints the RESOLVED SOURCE, not the provider name.
+	// Keying on "credential_chain" alone would hand database A's token to
+	// database B in the same process whenever both hold a chain secret and
+	// point at different credentials -- the exact cross-tenant bug documented
+	// at FingerprintKey above, which this provider would otherwise reintroduce
+	// in its most tempting form (there are no user-supplied fields to key on).
+	const std::string cache_key =
+	    FingerprintKey(secret_name, "credential_chain", {KeyFileStamp(adc_path), scope});
+
+	{
+		std::lock_guard<std::mutex> lock(CacheMutex());
+		auto it = TokenCache().find(cache_key);
+		if (it != TokenCache().end() && it->second.expires_at_unix - kRefreshSlackSeconds > NowUnix()) {
+			return make_ctx(it->second.access_token);
+		}
+	}
+
+	std::string access_token;
+	int64_t expires_at = 0;
+
+	if (parsed.kind == AdcKind::AUTHORIZED_USER) {
+		RefreshResult refreshed = RefreshUserToken(parsed.user.client_id, parsed.user.client_secret,
+		                                            parsed.user.refresh_token, NowUnix());
+		if (!refreshed.ok) {
+			throw IOException("gdrive secret '%s': failed to refresh an access token from the "
+			                   "credentials at '%s': %s\n\nIf this credential was revoked, re-run "
+			                   "`gcloud auth application-default login`.",
+			                   secret_name.c_str(), adc_path.c_str(), refreshed.error.c_str());
+		}
+		access_token = refreshed.access_token;
+		expires_at = refreshed.expires_at_unix;
+	} else {
+		// SERVICE_ACCOUNT. Note this is the arm google-cloud-cpp gets wrong for
+		// Drive -- its token generator self-signs a JWT, which Drive rejects
+		// with 401. Minting a real access token via RFC 7523 is what works, and
+		// this extension already does it.
+		MintedToken minted =
+		    MintServiceAccountToken(parsed.service_account, scope, /*subject=*/"", NowUnix());
+		if (!minted.ok) {
+			throw IOException("gdrive secret '%s': failed to obtain an access token using the "
+			                   "service-account credentials at '%s': %s",
+			                   secret_name.c_str(), adc_path.c_str(), minted.error.c_str());
+		}
+		access_token = minted.access_token;
+		expires_at = minted.expires_at_unix;
+	}
+
+	{
+		std::lock_guard<std::mutex> lock(CacheMutex());
+		TokenCache()[cache_key] = CachedToken {access_token, expires_at};
+	}
+
+	return make_ctx(access_token);
+}
+
 GDriveAuthContext BuildContextFromConfig(const KeyValueSecret &kv, const std::string &secret_name) {
 	std::string scope = GetOrEmpty(kv, "drive_scope");
 	if (scope.empty()) {
@@ -525,9 +664,13 @@ GDriveAuthContext GetAuthContext(ClientContext &context, const std::string &path
 	if (base.GetProvider() == "config") {
 		return BuildContextFromConfig(*kv, secret_name);
 	}
+	if (base.GetProvider() == "credential_chain") {
+		return BuildContextFromCredentialChain(context, *kv, secret_name);
+	}
 
-	throw InvalidInputException("gdrive secret '%s' has unsupported provider '%s'; expected 'service_account' or "
-	                             "'config' ('authorization_code' is not yet implemented -- see docs/hld.md section 5).",
+	throw InvalidInputException("gdrive secret '%s' has unsupported provider '%s'; expected 'service_account', "
+	                             "'config' or 'credential_chain' ('authorization_code' is not yet implemented -- see "
+	                             "docs/hld.md section 5).",
 	                             secret_name.c_str(), base.GetProvider().c_str());
 }
 

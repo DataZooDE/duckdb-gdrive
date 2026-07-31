@@ -28,8 +28,19 @@ enum class GDriveErrorKind {
 	//! 401. Token missing, malformed, or expired. Actionable: re-auth.
 	UNAUTHENTICATED,
 	//! 403 insufficientPermissions / insufficientFilePermissions. The identity
-	//! is known but the granted scope or the file's sharing does not allow it.
+	//! is known but the file's sharing does not allow this operation.
 	PERMISSION_DENIED,
+	//! 403 whose details[] carry reason "ACCESS_TOKEN_SCOPE_INSUFFICIENT". The
+	//! identity is fine and the file may well be readable -- the TOKEN simply
+	//! was not granted the Drive scope.
+	//!
+	//! Split out from PERMISSION_DENIED because Google gives both the same
+	//! errors[0].reason ("insufficientPermissions"), so the generic message
+	//! sends the reader to audit Drive sharing for a problem that is entirely
+	//! in their credential. The common way to hit this is `gcloud auth
+	//! application-default login` without --scopes, whose default
+	//! (cloud-platform) does not include Drive.
+	INSUFFICIENT_SCOPE,
 	//! 403 storageQuotaExceeded and friends -- a *storage* limit, not a rate
 	//! limit. Notably what a service account hits when writing outside a
 	//! Shared Drive.

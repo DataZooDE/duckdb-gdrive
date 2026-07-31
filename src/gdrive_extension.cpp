@@ -66,6 +66,25 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "RemoveFile permanently deletes instead of moving to trash (default: false, trash).",
 	    LogicalType::BOOLEAN, Value::BOOLEAN(false));
 
+	// B-1 / D-10: an explicit override for Application Default Credentials
+	// discovery, used by PROVIDER credential_chain.
+	//
+	// Two reasons this exists rather than relying on the environment alone.
+	// A DuckDB session cannot set an environment variable for itself, so
+	// without this there is no way to point one connection at a different
+	// credential -- and no deterministic way to test the not-found path,
+	// which would otherwise depend on whether the machine running the suite
+	// happens to have a gcloud login.
+	//
+	// Takes precedence over GOOGLE_APPLICATION_CREDENTIALS and CLOUDSDK_CONFIG.
+	// The empty default means "resolve normally".
+	loader.GetDatabaseInstance().config.AddExtensionOption(
+	    "gdrive_adc_file",
+	    "Path to an Application Default Credentials JSON file, overriding normal discovery "
+	    "for PROVIDER credential_chain. Empty (default) resolves GOOGLE_APPLICATION_CREDENTIALS, "
+	    "then CLOUDSDK_CONFIG, then the well-known gcloud location.",
+	    LogicalType::VARCHAR, Value(""));
+
 	// D-7: Docs export to text/plain by default; text/markdown is not
 	// byte-stable across exports, which would make GetVersionTag-keyed
 	// caching lie. Sheets always export to text/csv regardless of this

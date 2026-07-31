@@ -4,10 +4,25 @@ A DuckDB extension that registers a `gdrive://` filesystem over **Google
 Drive**, so any DuckDB path expression can address a Drive file directly — no
 download, no copy step.
 
+If you already use `gcloud`, that is the whole setup:
+
+```bash
+gcloud auth application-default login \
+  --scopes=openid,https://www.googleapis.com/auth/drive
+```
+
 ```sql
 INSTALL gdrive FROM community;
 LOAD gdrive;
 
+CREATE SECRET (TYPE gdrive);
+
+SELECT count(*) FROM 'gdrive://Finance/2026/actuals.parquet';
+```
+
+For a server, CI job, or anything unattended, name a key file instead:
+
+```sql
 CREATE SECRET gdrive (
     TYPE gdrive,
     PROVIDER service_account,
@@ -15,8 +30,6 @@ CREATE SECRET gdrive (
     DRIVE_ID '0ABcDeFgHiJkLmNoPQ',
     DRIVE_SCOPE 'https://www.googleapis.com/auth/drive.readonly'
 );
-
-SELECT count(*) FROM 'gdrive://Finance/2026/actuals.parquet';
 ```
 
 Because DuckDB dispatches all file access through its virtual filesystem,
@@ -118,10 +131,41 @@ extension fails and names both file ids so you can use the `id:` form.
 
 | Provider | Use |
 |---|---|
+| `credential_chain` | **default.** Application Default Credentials — your `gcloud` login, or `GOOGLE_APPLICATION_CREDENTIALS` |
 | `service_account` | unattended: servers, CI, scheduled jobs |
 | `config` | you already hold an access/refresh token |
 
-`config` covers the interactive case today: obtain a refresh token once (any
+### `credential_chain` — the default
+
+Takes no arguments. On first use it looks for a credential in the order
+Google's own tooling uses:
+
+1. `gdrive_adc_file`, if that DuckDB setting is set
+2. `$GOOGLE_APPLICATION_CREDENTIALS`
+3. `$CLOUDSDK_CONFIG/application_default_credentials.json`
+4. `~/.config/gcloud/application_default_credentials.json`
+   (`%APPDATA%\gcloud\…` on Windows)
+
+Both document kinds are accepted: an `authorized_user` file (what `gcloud auth
+application-default login` writes) refreshes access tokens as it goes, and a
+`service_account` key file is used to mint them via RFC 7523.
+
+> **Request the Drive scope at login.** gcloud's default ADC scope is
+> `cloud-platform`, which does **not** include Drive, so a plain `gcloud auth
+> application-default login` produces a credential that fails every read with
+> a 403. Pass `--scopes=openid,https://www.googleapis.com/auth/drive`. The
+> extension detects this specific case and says so rather than reporting a
+> generic permission error.
+>
+> Note also that plain `gcloud auth login` is not enough — it configures the
+> CLI, not Application Default Credentials.
+
+Workload identity federation (`external_account`) is not supported; the
+extension names it explicitly rather than failing obscurely.
+
+### `config`
+
+`config` also covers the interactive case: obtain a refresh token once (any
 OAuth2 client will do — see `scripts/oauth_consent.py` for a working example)
 and hand it to the secret, which refreshes access tokens itself.
 
@@ -164,9 +208,10 @@ the difference is not ours to fix:
 |---|---|
 | `service_account` | **Enforced.** The scope is a claim in the signed assertion, so Google refuses a write with *"Request had insufficient authentication scopes"* — tested. |
 | `config` | **Advisory.** A refresh-token exchange returns an access token carrying the scopes granted at *consent* time; asking for a narrower one does not narrow it. If the token was consented for full Drive access, it keeps it. |
+| `credential_chain` | **Depends on what was found.** A `service_account` document behaves as the first row; an `authorized_user` document behaves as the second, so the scope is fixed by the `--scopes` you passed to `gcloud`. |
 
-So with `config`, restrict at consent time — `DRIVE_SCOPE` cannot claw back
-access that the refresh token already carries.
+So with `config` — and with a `gcloud` credential — restrict at consent time;
+`DRIVE_SCOPE` cannot claw back access the refresh token already carries.
 
 Tokens live in memory or in DuckDB secrets, are never written to disk by this
 extension, and never appear in an error message.

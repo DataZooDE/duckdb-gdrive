@@ -178,6 +178,36 @@ unique_ptr<BaseSecret> CreateServiceAccountSecret(ClientContext &, CreateSecretI
 	return std::move(result);
 }
 
+// ---------------------------------------------------------------------------
+// PROVIDER credential_chain -- Application Default Credentials (D-10).
+//
+// Takes no credential arguments at all, by design: a user who has already run
+// `gcloud auth application-default login` should type one statement and
+// nothing else. The secret is a MARKER -- discovery happens on first use, in
+// GetAuthContext, so that rotating the underlying credential (or logging in
+// after the secret was created) does not require recreating it.
+//
+// Nothing is validated here for the same reason. A CREATE SECRET that
+// succeeded and then failed on first read would be a worse experience than
+// either extreme, so the not-found message (NoCredentialsMessage) is the
+// single place this is reported, and it teaches the fix.
+// ---------------------------------------------------------------------------
+unique_ptr<BaseSecret> CreateCredentialChainSecret(ClientContext &, CreateSecretInput &input) {
+	auto result = make_uniq<KeyValueSecret>(input.scope, input.type, input.provider, input.name);
+
+	// Where the identity comes from is this provider's business; which Drive
+	// it addresses is not, so the root binding options still apply.
+	CopyOption(input, *result, "drive_id");
+	CopyOption(input, *result, "root_folder_id");
+	CopyOption(input, *result, "drive_scope");
+
+	ApplyDefaultScope(*result);
+
+	// No credential material is stored -- only a path is ever resolved, and
+	// only at use time. Nothing to redact.
+	return std::move(result);
+}
+
 void RegisterCommonParameters(CreateSecretFunction &function) {
 	function.named_parameters["drive_id"] = LogicalType(LogicalTypeId::VARCHAR);
 	function.named_parameters["root_folder_id"] = LogicalType(LogicalTypeId::VARCHAR);
@@ -194,7 +224,12 @@ void RegisterGDriveSecrets(ExtensionLoader &loader) {
 	SecretType type;
 	type.name = kSecretTypeName;
 	type.deserializer = KeyValueSecret::Deserialize<KeyValueSecret>;
-	type.default_provider = "config";
+	// B-4 / D-10: credential_chain is the default, so `CREATE SECRET (TYPE
+	// gdrive);` works with no arguments for anyone who has run `gcloud auth
+	// application-default login`. This changed from "config", which could
+	// never succeed argument-less (config demands a token), so no working
+	// statement changes meaning.
+	type.default_provider = "credential_chain";
 	loader.RegisterSecretType(type);
 
 	CreateSecretFunction config_fn = {kSecretTypeName, "config", CreateConfigSecret, {}};
@@ -209,6 +244,10 @@ void RegisterGDriveSecrets(ExtensionLoader &loader) {
 	sa_fn.named_parameters["key_file"] = LogicalType(LogicalTypeId::VARCHAR);
 	RegisterCommonParameters(sa_fn);
 	loader.RegisterFunction(sa_fn);
+
+	CreateSecretFunction chain_fn = {kSecretTypeName, "credential_chain", CreateCredentialChainSecret, {}};
+	RegisterCommonParameters(chain_fn);
+	loader.RegisterFunction(chain_fn);
 }
 
 } // namespace gdrive

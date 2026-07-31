@@ -30,5 +30,9 @@
   "export_non_native": {
     "status": 404,
     "body": "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"File not found: 1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.\",\n    \"errors\": [\n      {\n        \"message\": \"File not found: 1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.\",\n        \"domain\": \"global\",\n        \"reason\": \"notFound\",\n        \"location\": \"fileId\",\n        \"locationType\": \"parameter\"\n      }\n    ]\n  }\n}\n"
+  },
+  "insufficient_scope": {
+    "status": 403,
+    "body": "{\n  \"error\": {\n    \"code\": 403,\n    \"message\": \"Request had insufficient authentication scopes.\",\n    \"errors\": [\n      {\n        \"message\": \"Insufficient Permission\",\n        \"domain\": \"global\",\n        \"reason\": \"insufficientPermissions\"\n      }\n    ],\n    \"status\": \"PERMISSION_DENIED\",\n    \"details\": [\n      {\n        \"@type\": \"type.googleapis.com/google.rpc.ErrorInfo\",\n        \"reason\": \"ACCESS_TOKEN_SCOPE_INSUFFICIENT\",\n        \"domain\": \"googleapis.com\",\n        \"metadata\": {\n          \"method\": \"google.apps.drive.v3.DriveFiles.List\",\n          \"service\": \"drive.googleapis.com\"\n        }\n      }\n    ]\n  }\n}\n\n"
   }
 }

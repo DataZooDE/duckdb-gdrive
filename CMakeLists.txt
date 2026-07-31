@@ -68,6 +68,7 @@ file(GLOB PURE_SOURCES CONFIGURE_DEPENDS
     src/gdrive_errors.cpp
     src/gdrive_glob.cpp
     src/gdrive_service_account_pure.cpp
+    src/gdrive_adc.cpp
 )
 
 # ---------------------------------------------------------------------------

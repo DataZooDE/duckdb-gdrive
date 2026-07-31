@@ -23,6 +23,10 @@ the code that cites it.
 | **D-6** | **`RemoveFile` trashes by default**; `SET gdrive_permanent_delete=true` opts into `files.delete`. | Trash is recoverable; a table-format cleanup routine deleting the wrong thing on someone's own Drive is not. |
 | **D-7** | **Docs export to `text/plain`** by default (`gdrive_docs_export_mime` to change); Sheets always `text/csv`. | Markdown is not byte-stable across exports, which would make `GetVersionTag`-keyed caching lie. |
 | **D-8** | Owner of `datazoo-oauth2`: Joachim Rosskopf (REQ-NF-06). | — |
+| **D-9** | **No embedded OAuth client.** `PROVIDER authorization_code` will require the user's own `CLIENT_ID`/`CLIENT_SECRET`. | We deliberately do not match `gsheets`' `CREATE SECRET (TYPE gsheet);` one-liner, which is possible only because Evidence embeds a client id and hosts a redirect page. In exchange: no Google verification track, no CASA assessment for restricted Drive scopes, no 100-test-user cap, and nobody's consent screen says "DataZoo". The comfort gap is closed by D-10 instead. |
+| **D-10** | **`credential_chain` is the default provider**, resolving Application Default Credentials ourselves rather than via `google-cloud-cpp`. | `CREATE SECRET (TYPE gdrive);` works with no arguments after `gcloud auth application-default login`. See the pitfall below for why the SDK was rejected. The default provider changed from `config`, which could never succeed argument-less, so no working statement changed meaning. |
+| **D-11** | `datazoo-oauth2` is public at `github.com/DataZooDE/datazoo-oauth2`, consumed as a commit-pinned submodule. | Forced by community-extensions building this repo from source: a private submodule cannot be cloned by their builder. Reaffirms HLD §5.4's rejection of vendoring. |
+| **D-12** | The `erpl-web` migration gate runs that repo's **live** OAuth suites, not just its offline Catch2 binaries. | Needs real SAP Datasphere / Entra / Business Central credentials. Consistent with D-1: a suite that only proves the code compiles is not a gate. |
 
 Target name: **`gdrive`** — `INSTALL gdrive; LOAD gdrive;`, and `TARGET_NAME`
 in `CMakeLists.txt`.
@@ -237,6 +241,29 @@ on link order. Do not "fix" this per-file.
 **Drive API calls must set `supportsAllDrives` and
 `includeItemsFromAllDrives`.** Without them the API behaves as if Shared
 Drives do not exist and returns "not found" for files that plainly do.
+
+**`google-cloud-cpp` cannot authenticate to Drive with a service account.**
+Its `oauth2::MakeAccessTokenGenerator`, given service-account credentials,
+returns a **self-signed JWT** (RS256, three segments, ~750 chars) rather than
+an OAuth2 access token. Google *Cloud* APIs accept those; Drive — a Workspace
+API — answers `401 Invalid Credentials`. `ScopesOption` does not help: it is
+documented as configuring `MakeImpersonateServiceAccountCredentials()` only.
+Verified against the real API 2026-07-31 with a real key. The user-ADC arm is
+fine (a real 256-char `ya29.` token). This is why `credential_chain` resolves
+ADC itself (D-10) instead of following `northpolesec/duckdb-gcs` all the way —
+that extension only ever talks to GCS, where the self-signed JWT works.
+Diagnostic that makes this obvious in seconds: count the dots in the token.
+Two means JWT, one means `ya29.`.
+
+**gcloud's default ADC scope does not include Drive.** `gcloud auth
+application-default login` requests `cloud-platform`, so every Drive call
+returns `403` — and `errors[0].reason` is `insufficientPermissions`, exactly
+what a genuine file-sharing denial returns. The only discriminator is
+`error.details[].reason == "ACCESS_TOKEN_SCOPE_INSUFFICIENT"`, which is why
+`ParseErrorBody` reads `details[]` at all and why `INSUFFICIENT_SCOPE` is a
+separate `GDriveErrorKind`. Without that split the message sends people to
+audit Drive sharing for a problem entirely inside their token. Fix is
+`--scopes=openid,https://www.googleapis.com/auth/drive`.
 
 **Drive permits two files with the same name in one folder.** A path is
 therefore not a unique identifier (R-4). Multiple matches are an error naming

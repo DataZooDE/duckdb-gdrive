@@ -26,6 +26,12 @@ namespace {
 struct ParsedBody {
 	std::string reason;
 	std::string message;
+	//! `error.details[].reason` -- the google.rpc.ErrorInfo reason, which is a
+	//! DIFFERENT and more specific vocabulary than errors[0].reason. Notably
+	//! it is the only thing separating "your token lacks the Drive scope"
+	//! (ACCESS_TOKEN_SCOPE_INSUFFICIENT) from "you cannot read this file":
+	//! both carry errors[0].reason "insufficientPermissions".
+	std::string detail_reason;
 	bool ok = false;
 };
 
@@ -61,6 +67,25 @@ ParsedBody ParseErrorBody(const std::string &body) {
 			auto reason_it = first.find("reason");
 			if (reason_it != first.end() && reason_it->second.is<std::string>()) {
 				out.reason = reason_it->second.get<std::string>();
+			}
+		}
+	}
+
+	// error.details[] is an array of typed google.rpc payloads; we want the
+	// ErrorInfo one's `reason`. Scanning every element rather than assuming
+	// [0] because the array also carries Help/LocalizedMessage entries whose
+	// order Google does not document.
+	auto details_it = error_obj.find("details");
+	if (details_it != error_obj.end() && details_it->second.is<picojson::array>()) {
+		for (const auto &detail : details_it->second.get<picojson::array>()) {
+			if (!detail.is<picojson::object>()) {
+				continue;
+			}
+			const auto &detail_obj = detail.get<picojson::object>();
+			auto reason_it = detail_obj.find("reason");
+			if (reason_it != detail_obj.end() && reason_it->second.is<std::string>()) {
+				out.detail_reason = reason_it->second.get<std::string>();
+				break;
 			}
 		}
 	}
@@ -400,6 +425,15 @@ GDriveError ClassifyDriveError(int http_status, const std::string &body, const s
 	err.reason = parsed.reason;
 	err.message = parsed.message;
 
+	// Checked BEFORE errors[0].reason, because that reason
+	// ("insufficientPermissions") is shared with a genuine file-sharing
+	// denial and would otherwise win. The details[] reason is the only
+	// signal that separates them. See GDriveErrorKind::INSUFFICIENT_SCOPE.
+	if (parsed.detail_reason == "ACCESS_TOKEN_SCOPE_INSUFFICIENT") {
+		err.kind = GDriveErrorKind::INSUFFICIENT_SCOPE;
+		return err;
+	}
+
 	// 429 is unambiguous regardless of body: rate limit. Google's documented
 	// shape puts a `reason` in the body for this case too, but a proxy/load
 	// balancer can return 429 with no body or an HTML one, and the status
@@ -443,6 +477,21 @@ std::string FormatUserMessage(const GDriveError &error, const std::string &conte
 		out = "permission denied for " + context +
 		      ": the authenticated identity does not have sufficient access to this file";
 		break;
+	case GDriveErrorKind::INSUFFICIENT_SCOPE:
+		// The file is very likely fine; the token is not. Say so, and give the
+		// exact command -- this is the default outcome of `gcloud auth
+		// application-default login` without --scopes, so the reader has done
+		// nothing wrong and needs a fix, not a diagnosis.
+		out = "insufficient OAuth scope for " + context +
+		      ": the access token was not granted a Google Drive scope. This is not a "
+		      "file-sharing problem.\n"
+		      "If the credential came from gcloud, request the Drive scope explicitly:\n"
+		      "  gcloud auth application-default login \\\n"
+		      "    --scopes=openid,https://www.googleapis.com/auth/drive\n"
+		      "(gcloud's default scope, cloud-platform, does not include Drive.)\n"
+		      "For a gdrive secret, set DRIVE_SCOPE to a Drive scope such as "
+		      "'https://www.googleapis.com/auth/drive'.";
+		break;
 	case GDriveErrorKind::STORAGE_QUOTA:
 		out = "Drive storage quota exceeded while accessing " + context +
 		      ": the account has no storage quota available to complete this write "
@@ -481,6 +530,11 @@ std::string FormatUserMessage(const GDriveError &error, const std::string &conte
 GDriveExceptionType ExceptionTypeFor(GDriveErrorKind kind) {
 	switch (kind) {
 	case GDriveErrorKind::PERMISSION_DENIED:
+	case GDriveErrorKind::INSUFFICIENT_SCOPE:
+		// Both are PermissionException: DuckDB's exception taxonomy has no
+		// "your credential is under-scoped" type, and Permission is the
+		// closest honest fit. The distinction that matters is carried by the
+		// message, which is where the reader looks.
 		return GDriveExceptionType::PERMISSION;
 	case GDriveErrorKind::INVALID_REQUEST:
 		return GDriveExceptionType::INVALID_INPUT;

@@ -125,6 +125,33 @@ const char *kBadQuery = R"({
   }
 })";
 
+
+const char *kInsufficientScope = R"({
+  "error": {
+    "code": 403,
+    "message": "Request had insufficient authentication scopes.",
+    "errors": [
+      {
+        "message": "Insufficient Permission",
+        "domain": "global",
+        "reason": "insufficientPermissions"
+      }
+    ],
+    "status": "PERMISSION_DENIED",
+    "details": [
+      {
+        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+        "reason": "ACCESS_TOKEN_SCOPE_INSUFFICIENT",
+        "domain": "googleapis.com",
+        "metadata": {
+          "method": "google.apps.drive.v3.DriveFiles.List",
+          "service": "drive.googleapis.com"
+        }
+      }
+    ]
+  }
+})";
+
 const char *kStorageQuota = R"({
   "error": {
     "code": 403,
@@ -260,6 +287,63 @@ TEST_CASE("400 invalidParameter (bad_field) classifies as INVALID_REQUEST", "[er
 TEST_CASE("400 invalid query (bad_query) classifies as INVALID_REQUEST", "[errors]") {
 	auto err = ClassifyDriveError(400, kBadQuery);
 	REQUIRE(err.kind == GDriveErrorKind::INVALID_REQUEST);
+}
+
+
+// ---------------------------------------------------------------------------
+// INSUFFICIENT_SCOPE -- captured 2026-07-31 from a real `gcloud auth
+// application-default login` credential without the Drive scope (B-3).
+//
+// This is the trap the credential_chain provider walks into by default:
+// gcloud's ADC login requests cloud-platform, which does NOT include Drive.
+// Google answers 403 with errors[0].reason "insufficientPermissions" -- the
+// SAME reason a genuine file-sharing denial carries -- so the two are
+// indistinguishable at that level and the generic "you do not have access to
+// this file" message sends the reader off to check Drive sharing settings for
+// a problem that is entirely in their token.
+//
+// The discriminator is details[].reason == "ACCESS_TOKEN_SCOPE_INSUFFICIENT".
+// ---------------------------------------------------------------------------
+
+TEST_CASE("403 ACCESS_TOKEN_SCOPE_INSUFFICIENT is not a file-permission denial", "[errors]") {
+	auto err = ClassifyDriveError(403, kInsufficientScope);
+	REQUIRE(err.kind == GDriveErrorKind::INSUFFICIENT_SCOPE);
+	REQUIRE(err.kind != GDriveErrorKind::PERMISSION_DENIED);
+}
+
+TEST_CASE("INSUFFICIENT_SCOPE message blames the token, not the file sharing", "[errors]") {
+	auto err = ClassifyDriveError(403, kInsufficientScope);
+	auto msg = FormatUserMessage(err, "gdrive://fixtures/small.csv");
+
+	// Must name the cause...
+	REQUIRE(msg.find("scope") != std::string::npos);
+	// ...and the fix, verbatim enough to paste.
+	REQUIRE(msg.find("gcloud auth application-default login") != std::string::npos);
+	REQUIRE(msg.find("https://www.googleapis.com/auth/drive") != std::string::npos);
+	// ...and must NOT send the reader to check file sharing.
+	REQUIRE(msg.find("does not have sufficient access to this file") == std::string::npos);
+}
+
+TEST_CASE("a genuine insufficientPermissions denial still reads as a permission problem", "[errors]") {
+	// Same errors[0].reason, no ACCESS_TOKEN_SCOPE_INSUFFICIENT detail: this
+	// one really is about the file, and must not be rewritten into scope advice.
+	const char *file_denied = R"({
+  "error": {
+    "code": 403,
+    "message": "The user does not have sufficient permissions for this file.",
+    "errors": [
+      {
+        "message": "The user does not have sufficient permissions for this file.",
+        "domain": "global",
+        "reason": "insufficientFilePermissions"
+      }
+    ]
+  }
+})";
+	auto err = ClassifyDriveError(403, file_denied);
+	REQUIRE(err.kind == GDriveErrorKind::PERMISSION_DENIED);
+	auto msg = FormatUserMessage(err, "gdrive://fixtures/small.csv");
+	REQUIRE(msg.find("gcloud") == std::string::npos);
 }
 
 // ---------------------------------------------------------------------------
