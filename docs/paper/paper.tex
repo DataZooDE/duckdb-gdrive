@@ -64,8 +64,8 @@ protocol for each claim rather than asserting it. A cold columnar scan of an
 finding is that a lakehouse format is a better fit for Drive than a plain
 filesystem is, precisely because it never mutates a file --- and that this
 immutability is not merely a safety property but an exploitable one. Removing
-metadata round trips the system already had the answers to cuts a 150-file read
-by 47\%.
+metadata round trips that the system already had the answers to cuts a
+150-file read by 47\%.
 \end{abstract}
 
 \maketitle
@@ -83,7 +83,7 @@ by 47\%.
 %% Drafted last, after Sections 2-5 fix the terminology and the numbers.
 
 \textbf{Where the data actually is.}
-A great deal of the tabular data an organisation analyses does not live in an
+Much of the tabular data an organisation analyses does not live in an
 object store. It lives in Google Drive, because that is where the people who
 produced it put it: exports from operational systems, hand-maintained
 reference tables, monthly extracts, the spreadsheet that is the system of
@@ -103,13 +103,11 @@ Section~\ref{sec:background} measures all three.
 
 \textbf{Our approach.}
 \texttt{duckdb-gdrive} implements a DuckDB \texttt{FileSystem} for the
-\texttt{gdrive://} scheme. Because DuckDB dispatches all file access through
-its virtual filesystem, everything layered on top inherits the scheme:
-\texttt{read\_parquet}, \texttt{read\_csv}, \texttt{glob}, \texttt{COPY}, and
-the DuckLake lakehouse format. The design work is almost entirely in the
-caches and retry rules. Section~\ref{sec:design} describes both, and attaches
-each choice to the measurement that produced it, including the ones we got
-wrong first.
+\texttt{gdrive://} scheme, so \texttt{read\_parquet}, \texttt{read\_csv},
+\texttt{glob}, \texttt{COPY}, and the DuckLake lakehouse format all inherit it
+without change. The design work is almost entirely in the caches and retry
+rules; Section~\ref{sec:design} describes both, attaching each choice to the
+measurement that produced it, including the ones we got wrong first.
 
 \textbf{Why the guarantees are the interesting part.}
 A lakehouse format is a contract with its storage layer. DuckLake, Iceberg and
@@ -131,9 +129,8 @@ where Drive's documentation does not say and we have not yet measured it.
   DuckLake end to end over three storage backends
   (Section~\ref{sec:eval}).
 \item A set of negative results --- a read-ahead buffer that an external review
-  recommended and that measurement refuted, a block size that was noise, and a
-  per-request latency figure that was never measured and was wrong by up to
-  14$\times$ --- reported because each was the natural thing to believe.
+  recommended and that measurement refuted, and a block size that was noise ---
+  reported because each was the natural thing to believe.
 \end{itemize}
 
 %% =====================================================================
@@ -208,13 +205,6 @@ Drive, fetching more data in fewer requests is faster.} This inverts the
 object-store intuition that ranged reads are close to free, and it is the
 finding that shapes Section~\ref{sec:blockcache}.
 
-We note that the figure of ``$\sim$150\,ms per round trip'' appeared in our own
-design documents for the first months of the project. It was never measured.
-Every endpoint in Table~\ref{tab:latency} is 2--14$\times$ slower, and always
-in the flattering direction. We record this because the conclusion it
-supported --- that request \emph{count} is the problem --- survived the
-correction only by luck.
-
 \textbf{There is no atomic replace, and no way to pin a read to a revision.}
 An object store gives a single-object PUT that is atomic and, on the major
 providers, immediately visible; it gives conditional writes against an ETag or
@@ -288,17 +278,17 @@ write guard could then create a third duplicate.
 
 \textbf{The metadata cache is scoped to a query, not to a clock.}
 Opening a file needs its current size and \texttt{headRevisionId}. DuckDB
-opens one handle per scan thread, and on a 32-thread machine we measured 19
+opens one handle per scan thread. On a 32-thread machine we measured 19
 identical \texttt{files.get} calls for a single query, scaling with
 \texttt{SET threads} (1 thread $\rightarrow$ 3 calls, 4 $\rightarrow$ 6,
-32 $\rightarrow$ 19) while the number of data requests stayed at 35. The cache
+32 $\rightarrow$ 19), while the number of data requests stayed at 35. The cache
 is necessary; its scope is the design question.
 
 Our first implementation used a wall-clock TTL, and it was wrong in a way that
 took an out-of-process test to find. The metadata refresh on open is exactly
-the mechanism that detects a file id that has died --- Drive does not preserve
-an id across a delete-and-recreate --- so serving that refresh from a
-time-based cache lets a file deleted and recreated between two queries be read
+the mechanism that detects a file id that has died; Drive does not preserve
+an id across a delete-and-recreate. Serving that refresh from a time-based
+cache therefore lets a file deleted and recreated between two queries be read
 at its old size. We now scope the cache to DuckDB's active query number: a new
 query cannot see the previous query's metadata, and a query with no context
 caches nothing. Absent files are never cached, so a later create is
@@ -695,8 +685,8 @@ We never destroy data that has not already been replaced.
 \textbf{Stale identity is recovered at read time} (\expref{5}). A Drive file id
 does not survive a delete-and-recreate. Rather than validating at open, we
 detect the dead id on the failing read and re-resolve once. Read-time recovery
-covers strictly more than validating at open --- it also sees a file deleted
-\emph{after} the handle was opened --- but it is not strictly better, and
+covers strictly more than validating at open: it also sees a file deleted
+\emph{after} the handle was opened. It is not strictly better, though ---
 Section~\ref{sec:skiprefresh} explains why: DuckDB is told the file's size at
 open, and no read-time mechanism can retract a number already reported.
 
@@ -708,10 +698,10 @@ whose first error carries reason
 \texttt{ACCESS\_\allowbreak{}TOKEN\_\allowbreak{}SCOPE\_\allowbreak{}INSUFFICIENT}.
 This matters because \texttt{gcloud}'s default
 application-default login requests the \texttt{cloud-platform} scope, which
-omits Drive --- so the most likely
-first experience of the default credential provider is an error that, without
-the split, sends the user to audit Drive sharing for a problem entirely inside
-their token. Storage-quota errors are likewise kept distinct from rate limits:
+omits Drive. The most likely first experience of the default credential
+provider is therefore an error that, without the split, sends the user to
+audit Drive sharing for a problem entirely inside their token. Storage-quota
+errors are likewise kept distinct from rate limits:
 a service account writing outside a Shared Drive has no quota and never will,
 so ``retry later'' would waste a day.
 
@@ -945,11 +935,11 @@ the cause obvious: the writer is creating the data path one directory segment
 at a time, listing each parent first to see whether it already exists. Five
 listings and four creates, about 5.2\,s, elapse before the data file itself is
 written by the final 2.6\,s \texttt{files.create}. \textbf{Roughly three
-quarters of the write is directory scaffolding.} It is also one-off per data
-path rather than per row, which is why the effect would be invisible in a
-throughput number and why the recommendation it produces --- create the
-directory tree once, then write into it --- is not the one a bandwidth
-measurement would suggest.
+quarters of the write is directory scaffolding.} The cost is also one-off per
+data path rather than per row, so it would be invisible in a throughput
+number. The recommendation it produces --- create the directory tree once,
+then write into it --- is accordingly not the one a bandwidth measurement
+would suggest.
 
 Taken together the three panels answer the question
 Section~\ref{sec:ducklake}'s totals cannot: on Drive, a lakehouse workload is
@@ -1312,10 +1302,10 @@ per-handle. DuckDB's own \texttt{httpfs} addresses S3 and compatible stores,
 where every guarantee in Table~\ref{tab:guarantees} that Drive lacks is
 present and a ranged read costs milliseconds; the design space is genuinely
 different rather than merely tuned differently. Extensions exist for Google
-Cloud Storage and for Google Sheets; the former targets storage where a
+Cloud Storage and for Google Sheets. The former targets storage where a
 self-signed JWT authenticates successfully, which is precisely the assumption
-that fails for Drive as a Workspace API (Section~\ref{sec:auth}), and the
-latter addresses a single native format rather than a filesystem. Against
+that fails for Drive as a Workspace API (Section~\ref{sec:auth}); the latter
+addresses a single native format rather than a filesystem. Against
 lakehouse formats --- DuckLake, Iceberg, Delta Lake --- this work is
 complementary: we supply a storage layer, and Section~\ref{sec:thesis} argues
 their immutability discipline is what makes that layer viable.
@@ -1331,10 +1321,10 @@ that are missing. The result reaches 3.05$\times$ GCS at defaults and
 2.02$\times$ tuned on a cold columnar scan. More useful than either number is
 the structural finding, and it cuts twice. The guarantees Drive fails to
 provide are almost exactly the ones a lakehouse format does not use, so a table
-format on Drive is not a workaround but the natural fit --- and the same
-immutability that makes it correct is directly exploitable for speed, removing
-150 metadata round trips and, with the glob-cache fix alongside it, 47\% of
-wall-clock from a 150-file read. The
+format on Drive is not a workaround but the natural fit. The same immutability
+that makes it correct is directly exploitable for speed: removing 150 metadata
+round trips, with the glob-cache fix alongside it, cuts 47\% of wall-clock
+from a 150-file read. The
 tooling mattered as much as any single optimisation: the span timeline of
 Figure~\ref{fig:flame} is what revealed that a lakehouse workload on Drive is
 dominated by serialised metadata rather than transfer, which was invisible in

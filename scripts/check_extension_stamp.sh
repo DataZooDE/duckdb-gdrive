@@ -110,6 +110,26 @@ MSG
         exit 1
     fi
     echo "OK: extension version $ext_version matches the tag"
+
+    # gdrive_version() is a HARDCODED string, and nothing used to compare it
+    # with anything. It could drift from the tag silently and the only symptom
+    # would be SELECT gdrive_version() quietly lying in the field -- which is
+    # exactly where it is least likely to be noticed and most likely to matter
+    # (a user reporting a bug against the wrong release).
+    #
+    # The tag carries a leading v; the source string does not.
+    src_version="$(sed -n 's/.*return "\([^"]*\)";.*/\1/p' src/gdrive_version.cpp | head -1)"
+    if [[ "v$src_version" != "$repo_describe" ]]; then
+        cat >&2 <<MSG
+FAIL: HEAD is tagged $repo_describe but src/gdrive_version.cpp returns
+      "$src_version", so SELECT gdrive_version() would report the wrong release.
+
+Update the string in src/gdrive_version.cpp (and the expected value in
+test/sql/gdrive_load.test) to match the tag.
+MSG
+        exit 1
+    fi
+    echo "OK: gdrive_version() \"$src_version\" matches the tag"
 fi
 
 echo "OK: extension built for DuckDB $stamp ($platform, extension version $ext_version)"

@@ -19,7 +19,6 @@
 extension:
   name: gdrive
   description: Query files in Google Drive directly with a gdrive:// filesystem
-  version: 0.2.0
   language: C++
   build: cmake
   license: MIT

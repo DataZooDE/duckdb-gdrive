@@ -83,13 +83,34 @@ only validated the DuckDB version field. `extension_config.cmake` now computes
 the version itself and passes `EXTENSION_VERSION` explicitly, and the stamp
 check asserts it whenever HEAD is exactly on a tag.
 
+### Versioning: CalVer, `vYYYY.MM.DD`
+
+The scheme is **CalVer**, matching every other DataZoo extension (`erpl_*`,
+`anofox_*`, `quack_oauth`): the tag is the release date, and there is no
+separate version number to keep in step with anything.
+
+Two consequences worth knowing:
+
+* `docs/community-extension-description.yml` carries **no `version:` field**,
+  which is also what the sibling descriptors do. That is not an omission.
+  `2026.08.01` is not valid semver -- leading zeros are forbidden in numeric
+  identifiers -- so a descriptor that declared it could fail validation. The
+  tagged `ref` is the version.
+* `src/gdrive_version.cpp` holds the string that `SELECT gdrive_version()`
+  returns, and it is hardcoded. Nothing compared it with the tag until
+  2026-08-01, so the two could drift and the only symptom would be the
+  function quietly reporting the wrong release to a user filing a bug.
+  `make check_stamp` now fails when HEAD is on a tag and the string is not it.
+
 ```bash
-git tag -a v0.1.0 -m "gdrive 0.1.0"
-git push origin v0.1.0
+git tag -a v2026.08.01 -m "gdrive 2026.08.01"
+git push origin v2026.08.01
 ```
 
-Keep the tag in step with `version:` in
-`docs/community-extension-description.yml`.
+Before tagging, update **both**:
+
+* `src/gdrive_version.cpp`
+* the expected value in `test/sql/gdrive_load.test`
 
 ## Submitting
 
