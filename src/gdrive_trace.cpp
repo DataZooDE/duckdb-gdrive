@@ -2,6 +2,9 @@
 
 #include <atomic>
 #include <chrono>
+// Directly, not via gdrive_trace.hpp: this TU names uint64_t itself, and musl
+// does not transitively provide it the way glibc happens to. See CLAUDE.md.
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
