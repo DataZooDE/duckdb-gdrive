@@ -90,7 +90,7 @@ reference tables, monthly extracts, the spreadsheet that is the system of
 record for one department. The standard way to query it is to download it
 first --- by hand, or with a synchronisation client, or through a scheduled
 copy into a warehouse. Each of those makes a second copy that is immediately
-stale, and each adds a component that has to be provisioned and watched.
+stale, and each adds a component to provision and watch.
 
 \textbf{Drive is not an object store.}
 The obvious fix is to treat Drive as remote storage and read it in place, the
@@ -98,9 +98,8 @@ way DuckDB's \texttt{httpfs} reads S3. That fails on three structural
 differences. Drive has no path addressing, so a path costs one listing request
 per segment. It permits duplicate names, so a path is not a key. And its
 ranged reads cost 1.2--2.1\,s almost regardless of how many bytes they request,
-which makes the fine-grained ranged access that Parquet is designed around the
-worst possible request pattern. Section~\ref{sec:background} measures all
-three.
+which makes Parquet's fine-grained ranged access the worst request pattern.
+Section~\ref{sec:background} measures all three.
 
 \textbf{Our approach.}
 \texttt{duckdb-gdrive} implements a DuckDB \texttt{FileSystem} for the
@@ -108,19 +107,18 @@ three.
 its virtual filesystem, everything layered on top inherits the scheme:
 \texttt{read\_parquet}, \texttt{read\_csv}, \texttt{glob}, \texttt{COPY}, and
 the DuckLake lakehouse format. The design work is almost entirely in the
-caches and in the rules about what may be retried;
-Section~\ref{sec:design} describes both, and every choice is attached to the
-measurement that produced it, including the ones we got wrong first.
+caches and retry rules. Section~\ref{sec:design} describes both, and attaches
+each choice to the measurement that produced it, including the ones we got
+wrong first.
 
 \textbf{Why the guarantees are the interesting part.}
 A lakehouse format is a contract with its storage layer. DuckLake, Iceberg and
 Delta Lake were designed against object-store semantics: unique keys, atomic
 single-object writes, strongly consistent listing. Running one on Drive is
-therefore not a performance question but a correctness question, and it is not
-answered by observing that the tests pass. Section~\ref{sec:guarantees} sets
-out the two contracts side by side and attaches a verification experiment to
-every row, including the rows where the honest answer is that Drive's
-documentation does not say and we have not yet measured it.
+therefore a correctness question before it is a performance question. Passing
+tests do not answer it. Section~\ref{sec:guarantees} sets the contracts side
+by side and attaches a verification experiment to every row, including rows
+where Drive's documentation does not say and we have not yet measured it.
 
 \textbf{Contributions.}
 \begin{itemize}
@@ -145,7 +143,7 @@ documentation does not say and we have not yet measured it.
 Google Drive exposes a REST API over a hierarchical, user-facing document
 store. It is tempting to read that API as an object store with unusual
 spelling. It is not one, and four differences matter enough that every design
-decision in Section~\ref{sec:design} follows from one of them.
+decision in Section~\ref{sec:design} follows from them.
 
 \textbf{There is no path addressing.}
 Drive addresses content by opaque file id. There is no endpoint that accepts
@@ -153,9 +151,9 @@ Drive addresses content by opaque file id. There is no endpoint that accepts
 root to find \texttt{a}, listing \texttt{a} to find \texttt{b}, and listing
 \texttt{b} to find \texttt{c.parquet} --- one \texttt{files.list} per segment,
 each costing a network round trip. A filesystem interface, meanwhile, is
-defined entirely in terms of paths. Bridging that gap cheaply is the single
-largest source of avoidable work in the system, and it is the risk we
-identified as most likely to sink the project before we wrote any code.
+defined entirely in terms of paths. Bridging that gap cheaply is the largest source
+of avoidable work in the system, and it was the risk we thought most likely to
+sink the project before we wrote code.
 
 \textbf{A path is not a key.}
 Drive permits two files with the same name in the same folder. This is not a
@@ -175,13 +173,12 @@ read of an 87\,MB object costs 1348\,ms at the median; a 1\,MiB ranged read of
 the same object costs 1375\,ms. Asking for a thousand times more data is free.
 Yet a whole read of a \emph{small} file costs 569\,ms, less than half of
 either. The unit of cost is therefore not ``a Drive round trip'' --- a figure
-that does not exist --- but ``a ranged read of a large object'', and that is
-precisely the request a Parquet scan is made of. A total, though, does not say
-whether the cost is addressable. Section~\ref{sec:breakdown} therefore
-decomposes each request kind into connection setup, server time and transfer,
-and places the resulting spans on a wall-clock timeline; that decomposition,
-not the totals here, is what tells us which part of the floor is ours to
-remove and which belongs to Google.
+that does not exist --- but ``a ranged read of a large object'', the request a
+Parquet scan is made of. A total does not say whether the cost is addressable.
+Section~\ref{sec:breakdown} decomposes each request kind into connection
+setup, server time and transfer, and places the resulting spans on a
+wall-clock timeline. That decomposition, not the totals here, tells us which
+part of the floor is ours to remove and which belongs to Google.
 
 \begin{table}[t]
 \caption{Per-request latency by endpoint and request shape. Warm keep-alive
@@ -216,7 +213,7 @@ design documents for the first months of the project. It was never measured.
 Every endpoint in Table~\ref{tab:latency} is 2--14$\times$ slower, and always
 in the flattering direction. We record this because the conclusion it
 supported --- that request \emph{count} is the problem --- survived the
-correction, but only by luck.
+correction only by luck.
 
 \textbf{There is no atomic replace, and no way to pin a read to a revision.}
 An object store gives a single-object PUT that is atomic and, on the major
@@ -235,7 +232,7 @@ Google Docs, Sheets and Slides have no byte stream and no size. A
 \texttt{alt=media} request against one returns \texttt{403} with reason
 \texttt{fileNotDownloadable}; the content is reachable only through
 \texttt{files.export}, which converts to a requested MIME type and does not
-support \texttt{Range}. Any filesystem over Drive must therefore decide what a
+support \texttt{Range}. A filesystem over Drive must decide what a
 \texttt{Doc} \emph{is} before it can open one, and must accept that the answer
 cannot be read incrementally.
 
@@ -248,16 +245,15 @@ register a subsystem for a URI scheme. \texttt{duckdb-gdrive} registers a
 \texttt{GDriveFileSystem} for the \texttt{gdrive://} scheme, one per DuckDB
 database instance. Everything DuckDB builds on top of the filesystem
 inherits the scheme for free --- \texttt{read\_parquet}, \texttt{read\_csv},
-\texttt{glob}, \texttt{COPY}, and, importantly for this paper, DuckLake's
+\texttt{glob}, \texttt{COPY}, and DuckLake's
 \texttt{DATA\_PATH}. That inheritance is the reason the extension is small; it
 is also a claim about someone else's code, and Section~\ref{sec:eval} tests it
 rather than asserting it.
 
-One consequence of the per-instance registration is worth stating early
-because it constrains everything below: a single filesystem object serves
-every \texttt{ClientContext} in the process, so every cache it owns is shared
-across databases, users and credentials. Cache keys must therefore carry
-identity, not merely a path.
+One consequence of the per-instance registration constrains everything below:
+a single filesystem object serves every \texttt{ClientContext} in the process,
+so every cache it owns is shared across databases, users and credentials.
+Cache keys must carry identity, not merely a path.
 
 \subsection{Resolution and Identity-Scoped Caches}
 \label{sec:resolution}
@@ -271,8 +267,8 @@ may each hold a secret named \texttt{gdrive} pointing at different Drives, and
 a path-only key would serve one tenant's file id to the other. Invalidation
 drops a key and all of its descendants within the same identity. A dropped
 mapping costs one \texttt{files.list} per segment to rebuild, which at 330\,ms
-is cheap --- which is in turn why this cache is freely evictable while the
-block cache of Section~\ref{sec:blockcache} is capped separately.
+is cheap. That cost is why this cache is freely evictable while the block
+cache of Section~\ref{sec:blockcache} is capped separately.
 
 \textbf{Ambiguity is an error.}
 When resolution finds more than one child with the requested name, we raise an
@@ -288,15 +284,15 @@ ambiguity, permission denial, malformed responses and transient errors all
 throw. An earlier version wrapped it in \texttt{catch (...) \{ return false;
 \}}, with the effect that a \texttt{403} and a duplicate-name collision both
 reported ``the file does not exist''. A caller using \texttt{FileExists} as a
-write guard would then have created a third duplicate.
+write guard could then create a third duplicate.
 
 \textbf{The metadata cache is scoped to a query, not to a clock.}
 Opening a file needs its current size and \texttt{headRevisionId}. DuckDB
 opens one handle per scan thread, and on a 32-thread machine we measured 19
 identical \texttt{files.get} calls for a single query, scaling with
 \texttt{SET threads} (1 thread $\rightarrow$ 3 calls, 4 $\rightarrow$ 6,
-32 $\rightarrow$ 19) while the number of data requests stayed at 35. Caching
-metadata is obviously right; the interesting part is the scope.
+32 $\rightarrow$ 19) while the number of data requests stayed at 35. The cache
+is necessary; its scope is the design question.
 
 Our first implementation used a wall-clock TTL, and it was wrong in a way that
 took an out-of-process test to find. The metadata refresh on open is exactly
@@ -304,26 +300,25 @@ the mechanism that detects a file id that has died --- Drive does not preserve
 an id across a delete-and-recreate --- so serving that refresh from a
 time-based cache lets a file deleted and recreated between two queries be read
 at its old size. We now scope the cache to DuckDB's active query number: a new
-query cannot see the previous query's metadata, and a query executing with no
-context caches nothing at all. Absent files are never cached, so a later
-create is immediately visible.
+query cannot see the previous query's metadata, and a query with no context
+caches nothing. Absent files are never cached, so a later create is
+immediately visible.
 
 \textbf{Refreshing metadata that cannot have changed.}
 \label{sec:skiprefresh}
-Opening a file needs its current size and \texttt{headRevisionId}, and the
-obvious implementation asks Drive for them --- one \texttt{files.get}, 268\,ms
-(Figure~\ref{fig:breakdown}), per file per query. The timeline in
-Figure~\ref{fig:flame} is what showed this was often pure waste. DuckDB's
-multi-file reader \emph{globs} a path before opening it, and a glob is
+Opening a file asks Drive for its current size and \texttt{headRevisionId} ---
+one \texttt{files.get}, 268\,ms (Figure~\ref{fig:breakdown}), per file per
+query. Figure~\ref{fig:flame}'s timeline showed that request was often waste.
+DuckDB's multi-file reader \emph{globs} a path before opening it, and a glob is
 \texttt{files.list} calls whose field mask already returns size and
-\texttt{headRevisionId}. The refresh therefore re-asks, over a second round
-trip, for values the previous request already delivered.
+\texttt{headRevisionId}. The refresh re-asks, over a second round trip, for
+values the previous request already delivered.
 
 The cache records the query generation in which each path entry was stored
 from a live listing, and the open skips the refresh when that generation is the
 current one. Only an entry carried over from an \emph{earlier} query can be
-stale. This is unconditional and changes no semantics: within one query, a
-listed entry and a fetched one are the same bytes from the same source.
+stale. The skip is unconditional and changes no semantics: within one query,
+a listed entry and a fetched one are the same bytes from the same source.
 
 \textbf{Refreshing metadata that the user knows cannot change.}
 The residual case is a warm process re-reading a path it resolved in an earlier
@@ -332,18 +327,18 @@ in place, which is exactly the discipline a lakehouse format imposes on its own
 data files (Section~\ref{sec:thesis}). \texttt{gdrive\_immutable\_prefixes}
 lets a user declare such paths, and the refresh is skipped for them too.
 
-This one is a genuine trade and is off by default. The promise it asks for is
-stronger than it first appears, and an independent review of this change is
-what established how much stronger: not merely ``never overwritten in place''
-but never modified, replaced, \emph{or} deleted-and-recreated at that path
-while the process runs. Get it wrong and reads go stale with nothing to detect
-it: Drive keeps a file's id across an overwrite, so there is
-no \texttt{404}, and it offers no working validator either. We checked, because
-a cheap validator would have made the setting unnecessary: Drive returns no
-\texttt{ETag} on metadata or media responses, and an \texttt{If-Match} carrying
-a deliberately wrong value is \emph{silently ignored} --- \texttt{206} with the
-data, not \texttt{412}. Prefixes therefore match on whole path segments, never
-characters, so declaring \texttt{lake} cannot quietly exempt
+The setting is a real trade and is off by default. The promise it asks for is
+stronger than it first appears. An independent review established the full
+promise: not merely ``never overwritten in place'' but never modified,
+replaced, \emph{or} deleted-and-recreated at that path while the process runs.
+Get the promise wrong and reads go stale with nothing to detect it. Drive keeps
+a file's id across an overwrite, so there is no \texttt{404}, and it offers no
+working validator either. We checked, because a cheap validator would have made
+the setting unnecessary: Drive returns no \texttt{ETag} on metadata or media
+responses, and an \texttt{If-Match} carrying a deliberately wrong value is
+\emph{silently ignored} --- \texttt{206} with the data, not \texttt{412}.
+Prefixes therefore match on whole path segments, never characters, so
+declaring \texttt{lake} cannot quietly exempt
 \texttt{lakehouse}.
 
 \textbf{What review found, and what it cost.} The justification above --- that
@@ -353,7 +348,7 @@ we shipped. Read-time recovery existed only on the exact-range path, reachable
 solely with the block cache disabled; on the default 16\,MiB blocks a 404 threw
 straight out. Every existing stale-id test passed, because each happened to
 exercise the open-time refresh that this change had just removed. We found it
-by asking a reviewer that had not written the code, not by testing.
+by asking a reviewer who had not written the code, not by testing.
 
 Repairing it exposed a second, sharper limit. Recovery can redirect reads to
 the new file --- a trace shows \texttt{404} $\rightarrow$ \texttt{files.list}
@@ -362,8 +357,7 @@ open, and no read-time mechanism can retract a number already reported. A
 replacement of a different length is therefore read short. Read-time recovery
 covers strictly more situations than open-time validation (it sees deletions
 after the handle opened) and is strictly weaker on size. The comment in our own
-source claiming it was ``strictly better'' had been wrong since before this
-work began.
+source claiming it was ``strictly better'' was already wrong.
 
 \textbf{Single flight.}
 Both caches publish a \texttt{std::shared\_future} under the lock \emph{before}
@@ -398,7 +392,7 @@ than by coincidence. It is also why we export Google Docs as
 byte-stable across calls, which would make a revision-keyed cache report hits
 for content that had changed.
 
-\textbf{Two normalisations that are easy to get wrong.}
+\textbf{Two normalisations matter.}
 Drive may answer a \texttt{Range} request with \texttt{200} and the entire
 object rather than \texttt{206} and the requested window. Both read paths
 detect this and offset into the body. It would have been simpler to handle
@@ -408,7 +402,7 @@ positional reads must not advance the handle cursor. DuckDB's parallel Parquet
 reader issues \texttt{pread}-style reads from several threads against one
 handle; writing the cursor there was both a data race and semantically wrong.
 
-\textbf{The obvious alternative, measured and rejected.}
+\textbf{The alternative was measured and rejected.}
 The natural first optimisation is a per-handle read-ahead buffer, and an
 external review of Drive read performance recommended exactly that, proposing
 that coalescing adjacent ranges on a 10--16\,MB threshold ``will easily bridge
@@ -432,12 +426,11 @@ client, paying a TCP connect and a full TLS handshake every time: median
 request 1558\,ms, and a floor of 1298\,ms even for a 128\,KB read. Reuse
 brought the median to 1334\,ms. We long attributed that 224\,ms to the
 handshake; Figure~\ref{fig:breakdown} shows the handshake is closer to 35\,ms,
-so the reuse was worth having for reasons we had not correctly identified. The
-pool is per-thread rather than shared
-because the underlying HTTP client owns its socket and DuckDB already hands
-each thread its own file handle. The bearer token is a per-request header and
-never a property of the connection, so reuse across secrets carries no
-credential between identities.
+so reuse helped for reasons we had not correctly identified. The pool is
+per-thread because the underlying HTTP client owns its socket and DuckDB
+already hands each thread its own file handle. The bearer token is a
+per-request header and never a property of the connection, so reuse across
+secrets carries no credential between identities.
 
 \textbf{Every request is narrowed.}
 Field masks request exactly the six fields we consume, and every call sets
@@ -468,9 +461,8 @@ Drive offers \texttt{files.generateIds}, which reserves an id without creating
 anything. We reserve first and create with the reserved id, which makes the
 create idempotent: a retry either succeeds, or returns \texttt{409}, and the
 \texttt{409} is positive evidence that the first attempt landed. We convert it
-into success by re-fetching the metadata. This is the one place where we can
-recover the guarantee the transport does not give us, and it is worth the
-extra round trip.
+into success by re-fetching the metadata. Reserved ids recover the guarantee
+the transport does not give us, at the cost of an extra round trip.
 
 We do not use Drive's resumable upload protocol. Uploads are simple or
 multipart, which means a large upload interrupted mid-body is lost rather than
@@ -487,13 +479,13 @@ endpoint plus cache hits and retries; it is what the tests assert against
 cannot show \emph{overlap}, and on storage with a per-request floor above one
 second, overlap is what determines wall-clock time.
 
-So the client also emits one span per API attempt --- start, end, thread,
-call kind, HTTP status, response size, whether the attempt paid for a new
+The client also emits one span per API attempt --- start, end, thread, call
+kind, HTTP status, response size, whether the attempt paid for a new
 connection, and the retry number --- as JSON lines to the path in
 \texttt{GDRIVE\_TRACE\_FILE}. Figure~\ref{fig:flame} is a direct rendering of
 three such traces.
 
-\textbf{It must cost nothing when off.} The enable flag is a function-local
+\textbf{Tracing must cost nothing when off.} The enable flag is a function-local
 \texttt{static const bool} resolved once from the environment, and every clock
 read sits inside the guard, so an untraced query never calls
 \texttt{steady\_clock} on this path at all. Records are buffered and flushed at
@@ -516,9 +508,9 @@ beyond this extension.
 \textbf{A token cache keyed by name is a cross-tenant leak.}
 The token cache is process-wide, which follows from the filesystem being
 registered per \texttt{DatabaseInstance}. Keying it by secret name is the
-obvious thing and is unsafe: two databases in one process, each with a secret
-named \texttt{gdrive}, would share whichever token was minted first, while each
-applied its own \texttt{drive\_id}. We key on
+natural implementation and is unsafe: two databases in one process, each with
+a secret named \texttt{gdrive}, would share whichever token was minted first,
+while each applied its own \texttt{drive\_id}. We key on
 \texttt{provider\,$\vert$\,name\,$\vert$\,SHA256(material)}, where the material
 is the credential-defining subset for that provider --- for a service account,
 the key file's path, size and mtime plus scope and subject; for the credential
@@ -558,7 +550,7 @@ The general principle is that an error naming the limitation beats an
 emulation that is correct until it is not. The cost of the principle is
 visible in our own coverage: because DuckDB opens database files through a
 path that never consults the virtual filesystem, those guards are unreachable
-from SQL and therefore untested, which we would rather state than discover
+from SQL and therefore untested. We state that gap rather than discover it
 later.
 
 %% =====================================================================
@@ -702,9 +694,11 @@ We never destroy data that has not already been replaced.
 
 \textbf{Stale identity is recovered at read time} (\expref{5}). A Drive file id
 does not survive a delete-and-recreate. Rather than validating at open, we
-detect the dead id on the failing read and re-resolve once. Handling it at read
-time is strictly better: it also covers a file deleted \emph{after} the handle
-was opened, which open-time validation cannot see by construction.
+detect the dead id on the failing read and re-resolve once. Read-time recovery
+covers strictly more than validating at open --- it also sees a file deleted
+\emph{after} the handle was opened --- but it is not strictly better, and
+Section~\ref{sec:skiprefresh} explains why: DuckDB is told the file's size at
+open, and no read-time mechanism can retract a number already reported.
 
 \textbf{Scope exhaustion is not permission denial} (\expref{6}). A token
 lacking the Drive scope and a genuine sharing denial both return \texttt{403}
@@ -759,13 +753,13 @@ overwrites a data file, never renames one, and never needs a compare-and-swap,
 because the atomicity it requires is provided by a transaction in the catalog
 database rather than by the storage layer.
 
-Line those requirements up against the table. The rows Drive fails --- atomic
+Put those requirements beside the table. The rows Drive fails --- atomic
 overwrite, conditional write, consistent read during overwrite, atomic rename
 --- are precisely the rows a lakehouse does not exercise. The rows it needs ---
 ranged reads, idempotent creates, prefix listing, delete --- are rows Drive
-supplies, one of them (idempotent create) only because we reserve an id to get
-it. The remaining mismatch is duplicate names, and DuckLake's UUID-based file
-naming makes a collision vanishingly unlikely rather than merely rare.
+supplies, one of them (idempotent create) only because we reserve an id. The
+remaining mismatch is duplicate names, and DuckLake's UUID-based file naming
+makes a collision vanishingly unlikely rather than merely rare.
 
 This is why a DuckDB \emph{database file} on \texttt{gdrive://} is unsupported
 while a DuckLake \texttt{DATA\_PATH} on \texttt{gdrive://} works: the storage
@@ -779,10 +773,10 @@ Every freshness check the extension performs exists to catch an in-place
 overwrite. Where the format guarantees there is none, the check is dead
 weight --- and on Drive a dead check is a 268\,ms round trip per file per
 query. \texttt{gdrive\_immutable\_prefixes} (Section~\ref{sec:skiprefresh})
-turns the guarantee into a measurable saving rather than merely an absence of
-harm. We regard this as the practical payoff of the thesis: the same property
-that makes a lakehouse \emph{correct} on Drive is the one that makes it
-\emph{fast} on Drive, and neither follows from the other by accident.
+turns the guarantee into a measurable saving, not merely an absence of harm.
+The practical payoff is direct: the same property that makes a lakehouse
+\emph{correct} on Drive is the one that makes it \emph{fast} on Drive, and
+neither follows from the other by accident.
 
 The setting is opt-in because the extension cannot verify the claim. Nothing in
 a Drive path says whether a lakehouse owns it, and Table~\ref{tab:guarantees}'s
@@ -827,8 +821,8 @@ across every storage backend and verified by checksum against the Drive copy.
 \textbf{Cold means cold.} Each timed run is a fresh process against a fresh
 in-memory database, and the Drive legs additionally create a fresh secret, so
 no path resolution, no metadata, no block and no HTTP connection survives from
-the previous run. Warm numbers would be flattering and would not describe what
-a user experiences, which is the first scan.
+the previous run. Warm numbers would be flattering and would not describe a
+user's first scan.
 
 \textbf{The query is not \texttt{count(*)}.} We scan three of six columns with
 exact-integer aggregates. Parquet answers \texttt{count(*)} from the footer
@@ -844,10 +838,10 @@ missing leg: a benchmark that omits its own denominator and prints a green line
 is worse than no benchmark.
 
 \textbf{Nine repeats, reported by minimum.} On a shared machine the minimum is
-the closest available estimate of the true cost. Nine rather than three is not
-fussiness. The GCS denominator varies by 67\% between sessions --- we observed
-1.03\,s to 1.72\,s for an identical measurement --- which is enough to move a
-ratio by more than a full multiple and to flip a verdict on its own. Across
+the closest available estimate of the true cost. Nine repeats are necessary
+because the GCS denominator varies by 67\% between sessions --- we observed
+1.03\,s to 1.72\,s for an identical measurement. That spread is enough to move
+a ratio by more than a full multiple and flip a verdict on its own. Across
 four runs of an earlier three-repeat protocol, three reported failure and one
 reported success, on identical code. No cross-session ratio appears in this
 paper; legs that are compared were measured together.
@@ -891,8 +885,8 @@ improvement, but it cannot have been paying for what we said it was; the
 remainder is a difference between the two client configurations we did not
 isolate. The direct decomposition supersedes the inference.
 
-\textbf{What it means for optimisation.} The residual is Google's service
-time, not transfer, and that closes off an entire class of client-side work.
+\textbf{What the decomposition means.} The residual is Google's service time,
+not transfer, and that closes off an entire class of client-side work.
 No amount of connection pooling, pipelining or buffer tuning can move a number
 that is spent inside somebody else's service before the first byte leaves it.
 The only remaining lever is issuing fewer requests, which is precisely what the
@@ -919,10 +913,9 @@ Figure~\ref{fig:flame} is the same data arranged by time rather than by
 request. The distinction matters more here than it would against an object
 store: with a per-request floor above one second and eighteen concurrent
 handles, total runtime is governed by which requests overlap rather than by
-what each costs. That is exactly the question that killed the read-ahead
-buffer of Section~\ref{sec:blockcache}, where a per-handle optimisation was
-invisible to a workload whose adjacency lay across handles, and it is the
-question Table~\ref{tab:latency} cannot answer in principle.
+what each costs. The overlap view is what killed the read-ahead buffer of
+Section~\ref{sec:blockcache}: a per-handle optimisation cannot see locality
+spread across handles. Table~\ref{tab:latency} cannot answer that question.
 
 \textbf{A scan is a serial prologue followed by a parallel scan.}
 Panel (a) splits cleanly in two. For the first 3.0\,s --- 48\% of a 6.2\,s query
@@ -940,9 +933,9 @@ Panel (b) is more extreme. Of 3.2\,s, six sequential \texttt{files.list} calls
 consume the first 1.7\,s, a \texttt{files.get} takes another 0.2\,s, and a
 single 1.0\,s media request moves the only bytes in the query. \textbf{62\% of
 a cold DuckLake read is spent discovering where the data is}, on one thread,
-before any of it is requested. This is Drive's missing path addressing (R-1)
-appearing not as a request count but as a critical path, and it is the
-strongest available argument for the \texttt{gdrive://id:} form and for keeping
+before any of it is requested. Drive's missing path addressing (R-1) appears
+here as a critical path, not just a request count. This is the strongest
+available argument for the \texttt{gdrive://id:} form and for keeping
 DuckLake's data path shallow.
 
 \textbf{A DuckLake write is mostly scaffolding.}
@@ -1004,12 +997,12 @@ leaves individually. Caching what the glob already held takes 151 listings to
 The call count is exact and deterministic: 150 metadata requests become none.
 The wall-clock saving, 22\%, is smaller than $150 \times 268$\,ms because
 DuckDB opens files in parallel, so most of those requests were overlapping
-rather than serialised --- a reminder that Figure~\ref{fig:breakdown}'s
-per-request costs cannot be multiplied by a count to predict a total, which is
-the mistake that produced this paper's original round-trip estimate. The call
-count matters in its own right regardless: Drive enforces per-user API quotas
-that object stores do not, so a query that costs 150 fewer requests is not
-merely faster but cheaper against a limit users actually hit.
+rather than serialised. Figure~\ref{fig:breakdown}'s per-request costs cannot
+be multiplied by a count to predict a total; that mistake produced this
+paper's original round-trip estimate. The call count matters in its own right:
+Drive enforces per-user API quotas that object stores do not, so a query that
+costs 150 fewer requests is faster and cheaper against a limit users actually
+hit.
 
 Two effects that this table does not show. First, on a single-file cold scan
 the saving is one request, and it disappears into run-to-run variance; the
@@ -1064,10 +1057,10 @@ in 1.11\,s where GCS took 1.34\,s. The Drive numbers agree closely across the
 two sessions (3.86 vs 4.09\,s, within the 9\% run-to-run spread we see on that
 leg); the object stores do not. This is the same effect that made an earlier
 three-repeat protocol report PASS once and FAIL three times on identical code,
-and it is why we report two labelled sessions rather than one merged table with
-a single ratio. A paper that quoted ``2$\times$ object storage'' by pairing the
-best Drive run with the slowest denominator would not be wrong about any
-individual measurement, and would still be misleading.
+so we report two labelled sessions rather than one merged table with a single
+ratio. A paper that quoted ``2$\times$ object storage'' by pairing the best
+Drive run with the slowest denominator would not be wrong about any individual
+measurement, and would still be misleading.
 
 \subsection{Block-Size Sensitivity}
 
@@ -1112,8 +1105,8 @@ Block size & min & median & min & median \\
 \end{tabular}
 \end{table}
 
-Three findings, none of them obvious in advance. First, \textbf{fewer requests
-help far less than the per-request floor predicts}. Collapsing 35 requests to
+Three findings were not clear in advance. First, \textbf{fewer requests help
+far less than the per-request floor predicts}. Collapsing 35 requests to
 one removes about a second, not thirty, because the 35 were already spread
 across 18 threads --- the floor was being paid roughly twice in sequence, not
 thirty-five times. Second, \textbf{4\,MiB is worse than no cache at all}: small
@@ -1164,8 +1157,8 @@ in all three configurations; only the data path moves. That is the supported
 shape, and it is the shape Section~\ref{sec:thesis} argues for.
 
 Reporting API calls alongside wall-clock is what makes the table diagnostic
-rather than merely comparative: where Drive is slower, the count says whether
-that is per-request latency or a request pattern we could improve.
+rather than merely comparative. Where Drive is slower, the count says whether
+the cause is per-request latency or a request pattern we could improve.
 
 \subsection{The Effect of DuckLake's Local Cache}
 
