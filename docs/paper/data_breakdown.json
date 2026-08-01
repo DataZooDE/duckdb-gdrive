@@ -1,0 +1,134 @@
+{
+  "files.list": {
+    "cold": {
+      "dns": 0.7,
+      "tcp": 19.7,
+      "tls": 33.9,
+      "send": 0.0,
+      "ttfb": 325.3,
+      "body": 0.5,
+      "total": 380.1
+    },
+    "warm": {
+      "dns": 0.0,
+      "tcp": 0.0,
+      "tls": 0.0,
+      "send": 0.0,
+      "ttfb": 310.9,
+      "body": 0.5,
+      "total": 311.4
+    },
+    "bytes": 193,
+    "n": 5
+  },
+  "files.get": {
+    "cold": {
+      "dns": 0.7,
+      "tcp": 17.0,
+      "tls": 34.7,
+      "send": 0.0,
+      "ttfb": 288.9,
+      "body": 0.4,
+      "total": 341.7
+    },
+    "warm": {
+      "dns": 0.0,
+      "tcp": 0.0,
+      "tls": 0.0,
+      "send": 0.0,
+      "ttfb": 268.0,
+      "body": 0.4,
+      "total": 268.4
+    },
+    "bytes": 188,
+    "n": 5
+  },
+  "alt=media, whole small file": {
+    "cold": {
+      "dns": 0.7,
+      "tcp": 17.8,
+      "tls": 34.4,
+      "send": 0.0,
+      "ttfb": 562.5,
+      "body": 0.0,
+      "total": 615.4
+    },
+    "warm": {
+      "dns": 0.0,
+      "tcp": 0.0,
+      "tls": 0.0,
+      "send": 0.0,
+      "ttfb": 492.5,
+      "body": 0.0,
+      "total": 492.5
+    },
+    "bytes": 75,
+    "n": 5
+  },
+  "alt=media, 1 KiB range": {
+    "cold": {
+      "dns": 0.8,
+      "tcp": 18.3,
+      "tls": 34.5,
+      "send": 0.0,
+      "ttfb": 2044.8,
+      "body": 0.1,
+      "total": 2098.5
+    },
+    "warm": {
+      "dns": 0.0,
+      "tcp": 0.0,
+      "tls": 0.0,
+      "send": 0.0,
+      "ttfb": 1226.0,
+      "body": 0.2,
+      "total": 1226.2
+    },
+    "bytes": 1024,
+    "n": 5
+  },
+  "alt=media, 1 MiB range": {
+    "cold": {
+      "dns": 0.8,
+      "tcp": 14.7,
+      "tls": 35.0,
+      "send": 0.0,
+      "ttfb": 1257.7,
+      "body": 102.2,
+      "total": 1410.4
+    },
+    "warm": {
+      "dns": 0.0,
+      "tcp": 0.0,
+      "tls": 0.0,
+      "send": 0.0,
+      "ttfb": 1134.7,
+      "body": 87.5,
+      "total": 1222.2
+    },
+    "bytes": 1048576,
+    "n": 5
+  },
+  "alt=media, 16 MiB range": {
+    "cold": {
+      "dns": 0.7,
+      "tcp": 13.5,
+      "tls": 33.3,
+      "send": 0.0,
+      "ttfb": 1157.7,
+      "body": 253.2,
+      "total": 1458.4
+    },
+    "warm": {
+      "dns": 0.0,
+      "tcp": 0.0,
+      "tls": 0.0,
+      "send": 0.0,
+      "ttfb": 1257.9,
+      "body": 230.8,
+      "total": 1488.7
+    },
+    "bytes": 16777216,
+    "n": 5
+  }
+}
