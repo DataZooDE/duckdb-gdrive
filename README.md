@@ -4,10 +4,25 @@ A DuckDB extension that registers a `gdrive://` filesystem over **Google
 Drive**, so any DuckDB path expression can address a Drive file directly — no
 download, no copy step.
 
+If you already use `gcloud`, that is the whole setup:
+
+```bash
+gcloud auth application-default login \
+  --scopes=openid,https://www.googleapis.com/auth/drive
+```
+
 ```sql
 INSTALL gdrive FROM community;
 LOAD gdrive;
 
+CREATE SECRET (TYPE gdrive);
+
+SELECT count(*) FROM 'gdrive://Finance/2026/actuals.parquet';
+```
+
+For a server, CI job, or anything unattended, name a key file instead:
+
+```sql
 CREATE SECRET gdrive (
     TYPE gdrive,
     PROVIDER service_account,
@@ -15,8 +30,6 @@ CREATE SECRET gdrive (
     DRIVE_ID '0ABcDeFgHiJkLmNoPQ',
     DRIVE_SCOPE 'https://www.googleapis.com/auth/drive.readonly'
 );
-
-SELECT count(*) FROM 'gdrive://Finance/2026/actuals.parquet';
 ```
 
 Because DuckDB dispatches all file access through its virtual filesystem,
@@ -118,19 +131,101 @@ extension fails and names both file ids so you can use the `id:` form.
 
 | Provider | Use |
 |---|---|
+| `credential_chain` | **default.** Application Default Credentials — your `gcloud` login, or `GOOGLE_APPLICATION_CREDENTIALS` |
 | `service_account` | unattended: servers, CI, scheduled jobs |
+| `authorization_code` | interactive browser consent, with your own OAuth client |
 | `config` | you already hold an access/refresh token |
 
-`config` covers the interactive case today: obtain a refresh token once (any
-OAuth2 client will do — see `scripts/oauth_consent.py` for a working example)
-and hand it to the secret, which refreshes access tokens itself.
+### `credential_chain` — the default
 
-> **No `authorization_code` provider yet.** An in-process browser consent flow
-> is designed (`docs/hld.md` §5) and the machinery exists in the
-> `datazoo-oauth2` library, but it is **not registered**, so `PROVIDER
-> authorization_code` is an error. It was listed here before it existed; that
-> was a documentation bug, and `make verify_readme` now checks this table
-> against the providers actually registered.
+Takes no arguments. On first use it looks for a credential in the order
+Google's own tooling uses:
+
+1. `gdrive_adc_file`, if that DuckDB setting is set
+2. `$GOOGLE_APPLICATION_CREDENTIALS`
+3. `$CLOUDSDK_CONFIG/application_default_credentials.json`
+4. `~/.config/gcloud/application_default_credentials.json`
+   (`%APPDATA%\gcloud\…` on Windows)
+
+Both document kinds are accepted: an `authorized_user` file (what `gcloud auth
+application-default login` writes) refreshes access tokens as it goes, and a
+`service_account` key file is used to mint them via RFC 7523.
+
+> **Request the Drive scope at login.** gcloud's default ADC scope is
+> `cloud-platform`, which does **not** include Drive, so a plain `gcloud auth
+> application-default login` produces a credential that fails every read with
+> a 403. Pass `--scopes=openid,https://www.googleapis.com/auth/drive`. The
+> extension detects this specific case and says so rather than reporting a
+> generic permission error.
+>
+> Note also that plain `gcloud auth login` is not enough — it configures the
+> CLI, not Application Default Credentials.
+
+Workload identity federation (`external_account`) is not supported; the
+extension names it explicitly rather than failing obscurely.
+
+### `config` — a token you already have
+
+For a token obtained elsewhere. `ACCESS_TOKEN` alone is used as-is and never
+refreshed; `REFRESH_TOKEN` with `CLIENT_ID` and `CLIENT_SECRET` is refreshed
+as needed.
+
+This is the right provider when consent happened on a *different* machine —
+do the browser flow on your laptop, then copy the refresh token to the server.
+For consent on *this* machine, use `authorization_code` below, which does the
+same thing without the copying.
+
+### `authorization_code` — browser consent
+
+```sql
+CREATE SECRET my_drive (
+    TYPE gdrive, PROVIDER authorization_code,
+    CLIENT_ID '…apps.googleusercontent.com',
+    CLIENT_SECRET '…',
+    DRIVE_SCOPE 'https://www.googleapis.com/auth/drive'
+);
+```
+
+Creating the secret stores configuration only. On first use a browser opens,
+you consent, and a loopback redirect hands the code back. **The refresh token
+is stored in the secret**, so that is the last time you see a consent screen —
+not once per hour.
+
+**Use `CREATE PERSISTENT SECRET` if you want that to survive a restart.** A
+plain `CREATE SECRET` is temporary: the refresh token lives in the secret for
+the session and is gone when the process exits, so the next process prompts
+for consent again. A persistent secret is written by DuckDB to
+`~/.duckdb/stored_secrets`, which means a Drive refresh token sits on your
+disk in DuckDB's own store — the right trade for a workstation, the wrong one
+for a shared host. This extension itself never writes credentials to disk.
+
+> **You bring your own OAuth client**, and that is a deliberate trade. Create
+> one of type *Desktop app* in the Google Cloud console (enable the Drive API
+> first). We could instead compile a DataZoo-owned client id into the
+> extension and make this a zero-argument statement — that is how the
+> `gsheets` extension manages `CREATE SECRET (TYPE gsheet);` — but it would
+> put our name on your consent screen, cap usage at 100 test users until
+> Google verification completes, and Drive scopes are "restricted", so full
+> verification means a third-party security assessment. If you want zero
+> setup, use `credential_chain` above: it reuses the `gcloud` login you
+> already have.
+
+**Make it a *Desktop app* client, not a *Web application* one.** For desktop
+clients Google accepts a loopback redirect on any port, so there is nothing to
+register and `REDIRECT_PORT` can be changed freely. A web client checks the
+redirect URI exactly, and you would have to register
+
+```
+http://localhost:8020
+```
+
+— note the bare path. Get either detail wrong and Google answers
+`Error 400: redirect_uri_mismatch` before the consent screen appears.
+
+On a machine with no display the flow fails immediately and says so, rather
+than opening nothing and timing out. `REDIRECT_PORT` (default `8020`) changes
+the loopback port if that one is taken; on a web client it has to match what
+you registered.
 
 **A service account needs a Shared Drive to write.** Service accounts have no
 personal Drive storage quota, so they cannot own files in a My Drive — Google
@@ -164,9 +259,11 @@ the difference is not ours to fix:
 |---|---|
 | `service_account` | **Enforced.** The scope is a claim in the signed assertion, so Google refuses a write with *"Request had insufficient authentication scopes"* — tested. |
 | `config` | **Advisory.** A refresh-token exchange returns an access token carrying the scopes granted at *consent* time; asking for a narrower one does not narrow it. If the token was consented for full Drive access, it keeps it. |
+| `credential_chain` | **Depends on what was found.** A `service_account` document behaves as the first row; an `authorized_user` document behaves as the second, so the scope is fixed by the `--scopes` you passed to `gcloud`. |
+| `authorization_code` | **Enforced at consent.** `DRIVE_SCOPE` is what the consent screen asks for, so this is the one interactive case where the default genuinely narrows access. |
 
-So with `config`, restrict at consent time — `DRIVE_SCOPE` cannot claw back
-access that the refresh token already carries.
+So with `config` — and with a `gcloud` credential — restrict at consent time;
+`DRIVE_SCOPE` cannot claw back access the refresh token already carries.
 
 Tokens live in memory or in DuckDB secrets, are never written to disk by this
 extension, and never appear in an error message.
@@ -328,10 +425,31 @@ and nothing registered that is not here.
 | `gdrive_permanent_delete` | `false` | `false` moves a deleted file to the Drive trash (recoverable); `true` deletes it outright. |
 | `gdrive_block_size_bytes` | 16 MiB | Read granularity. Drive charges ~1.3 s per ranged request regardless of size, so larger blocks mean fewer, faster requests — but a `count(*)` over a Parquet footer then pays for a whole block it does not need. 16 MiB is the compromise; see `docs/benchmark.md` for the sweep. |
 | `gdrive_block_cache_bytes` | 256 MiB | Total cap on the shared block cache, across all files and handles. Blocks are keyed by identity + file id + revision, so a file changing on Drive cannot be served stale. |
+| `gdrive_immutable_prefixes` | *(empty)* | Comma-separated `gdrive://` prefixes whose files are **never overwritten in place** — typically a DuckLake/Iceberg `DATA_PATH`. Skips the per-open metadata refresh (~270 ms per file per query) for them. Matching is on whole path segments, so `gdrive://lake` does not cover `gdrive://lakehouse`. **Declaring a prefix whose files change causes stale reads that nothing can detect.** The promise you are making is stronger than "not overwritten": files under it must not be modified, replaced, *or* deleted-and-recreated at the same path while the process runs — Drive keeps a file's id across an overwrite, returns no ETag, and ignores `If-Match`. Leave empty unless you know the files are immutable. |
 | `gdrive_path_cache_entries` | 4096 | Cap on cached `path -> file id` mappings, LRU. `0` is unbounded. Drive has no path addressing, so each dropped mapping costs one `files.list` per segment to rebuild — cheap, which is why this cache may be evicted and the block cache is bounded separately. |
 
 ```sql
 SELECT name, value FROM duckdb_settings() WHERE name LIKE 'gdrive%';
+```
+
+### Diagnostics
+
+Two environment variables, both **off** unless set. Neither is a DuckDB
+setting: they are read once at first use, so a flag cannot flip underneath a
+running scan and leave a trace with holes in it.
+
+| Variable | What it does |
+|---|---|
+| `GDRIVE_TRACE_FILE` | Writes one JSON line per Drive API attempt to that path: start and end time (µs from process start), thread, call kind, HTTP status, response size, whether the attempt paid for a new TLS connection, and the retry number. This is what shows *overlap* — `gdrive_stats()` counts calls, but only a timeline shows that a cold DuckLake read spends its first 1.7 s on six sequential `files.list` calls before requesting a byte. |
+| `GDRIVE_TRACE_RANGES` | Older, media-only: prints `off=/len=/ms=` per ranged read to stderr. Kept because it is quoted in `docs/benchmark.md`; prefer `GDRIVE_TRACE_FILE`. |
+
+When unset the cost is one already-initialised `static const bool` and a
+predictable branch — the clock is never read. A span carries no URL, header,
+body or file id, so a trace can be shared without leaking a credential or the
+contents of a Drive.
+
+```bash
+GDRIVE_TRACE_FILE=/tmp/scan.jsonl duckdb -c "SELECT count(*) FROM 'gdrive://a/b.parquet'"
 ```
 
 ## Development

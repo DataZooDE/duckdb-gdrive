@@ -175,6 +175,58 @@ def _gcs_setup() -> list[str]:
     ]
 
 
+def _s3_setup() -> list[str]:
+    """Setup SQL for the s3:// leg, including credentials.
+
+    Same discipline as the gs:// leg: short-lived credentials from the ambient
+    login, nothing durable minted, nothing written to disk, and the values go
+    to duckdb's stdin rather than argv.
+
+    `aws configure export-credentials` resolves whatever the caller is using --
+    SSO, an assumed role, a profile, an instance role -- and hands back a
+    concrete triple. An assumed role yields a SESSION_TOKEN, which DuckDB's s3
+    secret needs and which is easy to forget: without it the request is signed
+    with a key that only exists inside a session, and S3 answers
+    `InvalidAccessKeyId`, which reads like a typo rather than a missing field.
+
+    Deliberately NOT `PROVIDER credential_chain`: that needs the `aws`
+    extension, which is another download inside a timed benchmark leg.
+    """
+    try:
+        blob = subprocess.run(
+            ["aws", "configure", "export-credentials", "--format", "process"],
+            capture_output=True, text=True, timeout=120, check=True,
+        ).stdout
+    except Exception as e:
+        raise BenchError(
+            "the s3:// leg needs credentials and none are available: "
+            f"`aws configure export-credentials` failed ({type(e).__name__}). "
+            "Run `aws sso login` (or set AWS_PROFILE), or unset "
+            "GDRIVE_BENCH_S3_URI to skip the leg."
+        ) from e
+    try:
+        creds = json.loads(blob)
+    except json.JSONDecodeError as e:
+        raise BenchError("aws returned no parseable credentials") from e
+
+    region = (os.environ.get("AWS_REGION")
+              or os.environ.get("AWS_DEFAULT_REGION")
+              or subprocess.run(["aws", "configure", "get", "region"],
+                                capture_output=True, text=True).stdout.strip())
+    if not region:
+        raise BenchError("no AWS region: set AWS_REGION or `aws configure set region`")
+
+    parts = [f"KEY_ID '{creds['AccessKeyId']}'",
+             f"SECRET '{creds['SecretAccessKey']}'",
+             f"REGION '{region}'"]
+    if creds.get("SessionToken"):
+        parts.append(f"SESSION_TOKEN '{creds['SessionToken']}'")
+    return [
+        "INSTALL httpfs", "LOAD httpfs",
+        f"CREATE SECRET s3_bench (TYPE S3, {', '.join(parts)})",
+    ]
+
+
 def _local_copy(drive: Drive, file_id: str, dest: Path) -> int:
     """Download the fixture once, so the local leg reads the identical bytes."""
     data = drive.download(file_id)
@@ -219,6 +271,7 @@ def main() -> int:
     key_file = str(Path(key_file).resolve())
 
     gcs_uri = os.environ.get("GDRIVE_BENCH_GCS_URI", "").strip()
+    s3_uri = os.environ.get("GDRIVE_BENCH_S3_URI", "").strip()
 
     print(f"==> resolving {FIXTURE}")
     file_id = drive.resolve_path(FIXTURE)
@@ -242,6 +295,15 @@ def main() -> int:
             legs.append(_time_leg("gs", _gcs_setup(), gcs_uri))
         else:
             print("==> leg: gs SKIPPED -- GDRIVE_BENCH_GCS_URI is not set")
+
+        # S3 is a second object-store reference point, not a second gate. The
+        # gate is against GCS and stays there; adding a leg is not a licence to
+        # pick whichever denominator flatters the result.
+        if s3_uri:
+            print(f"==> leg: s3 ({s3_uri})")
+            legs.append(_time_leg("s3", _s3_setup(), s3_uri))
+        else:
+            print("==> leg: s3 SKIPPED -- GDRIVE_BENCH_S3_URI is not set")
 
         print("==> leg: gdrive")
         legs.append(_time_leg("gdrive", _gdrive_setup(key_file, drive),

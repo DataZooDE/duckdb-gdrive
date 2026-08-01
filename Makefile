@@ -92,6 +92,28 @@ e2e: release
 latency:
 	@cd e2e && uv run --frozen python -m helpers.latency
 
+# Same requests, but timed PHASE BY PHASE with raw sockets: dns, tcp, tls,
+# send, server time-to-first-byte, body transfer. `latency` says what a
+# request costs; this says which part of it is ours. The answer decides what
+# is worth optimising -- and it already overturned one published claim, that
+# connection reuse was buying back ~224 ms of handshake (it is ~35 ms).
+# Regenerates the paper's Figure 1 from the measurement it just took.
+.PHONY: latency_breakdown
+latency_breakdown:
+	@cd e2e && uv run --frozen python -m helpers.latency_breakdown \
+	    --json ../docs/paper/data_breakdown.json > /dev/null
+	@cd e2e && uv run --frozen python -m helpers.plot_breakdown \
+	    ../docs/paper/data_breakdown.json > ../docs/paper/fig_breakdown.tex
+	@echo "==> refreshed docs/paper/{data_breakdown.json,fig_breakdown.tex}"
+
+# Capture the paper's Figure 2: every Drive call of a Parquet scan, a DuckLake
+# read and a DuckLake write, on a wall-clock axis. Needs the delegated user --
+# panel (c) writes. Traces land in docs/paper/data/ and are committed, so the
+# figure rebuilds offline afterwards.
+.PHONY: trace_figure
+trace_figure: release
+	@cd e2e && uv run --frozen python -m helpers.capture_traces
+
 .PHONY: bench
 bench: release
 	@cd e2e && uv run python -m helpers.bench

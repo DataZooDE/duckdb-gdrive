@@ -1,0 +1,26 @@
+{
+  "run_id": "run-paper-f7df9799",
+  "repeats": 3,
+  "write": [
+    {
+      "op": "Upload 1 MiB",
+      "min_s": 4.03,
+      "median_s": 5.31
+    },
+    {
+      "op": "Upload 16 MiB",
+      "min_s": 9.63,
+      "median_s": 12.61
+    },
+    {
+      "op": "Upload 128 MiB",
+      "min_s": 60.42,
+      "median_s": 62.07
+    },
+    {
+      "op": "Create one folder + tiny file",
+      "min_s": 3.92,
+      "median_s": 4.92
+    }
+  ]
+}

@@ -1,0 +1,36 @@
+{
+  "run_id": "run-paper-6cf5b1c9",
+  "repeats": 3,
+  "threads": [
+    {
+      "threads": 1,
+      "min_s": 9.1,
+      "median_s": 10.11,
+      "calls": 8
+    },
+    {
+      "threads": 4,
+      "min_s": 6.33,
+      "median_s": 6.48,
+      "calls": 8
+    },
+    {
+      "threads": 8,
+      "min_s": 5.27,
+      "median_s": 5.37,
+      "calls": 8
+    },
+    {
+      "threads": 16,
+      "min_s": 4.53,
+      "median_s": 4.58,
+      "calls": 8
+    },
+    {
+      "threads": 32,
+      "min_s": 4.18,
+      "median_s": 4.32,
+      "calls": 8
+    }
+  ]
+}

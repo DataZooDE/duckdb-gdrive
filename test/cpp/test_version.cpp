@@ -7,7 +7,11 @@
 
 using duckdb::gdrive::GdriveVersion;
 
-TEST_CASE("version is a non-empty semver-ish string", "[version]") {
+TEST_CASE("version is a non-empty dotted string", "[version]") {
+	// Shape only, deliberately format-agnostic: the project moved from semver
+	// to CalVer (vYYYY.MM.DD) and a test that pinned the old shape would have
+	// failed for a reason that has nothing to do with correctness. The tag and
+	// this string are kept in step by check_extension_stamp.sh instead.
 	const auto v = GdriveVersion();
 	REQUIRE_FALSE(v.empty());
 	REQUIRE(v.find('.') != std::string::npos);

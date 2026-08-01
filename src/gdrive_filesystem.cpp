@@ -205,6 +205,16 @@ std::vector<DriveFileMeta> ListChildren(GDriveClient &client, const std::string 
 
 } // namespace
 
+namespace {
+//! Defined below, next to the code they belong with; declared here because
+//! OpenFile and Read are above them and this file is ordered by narrative
+//! rather than by dependency.
+void ReadExactRangeTail(const std::string &path, void *buffer, int64_t nr_bytes, idx_t location,
+                        const DriveResponse &resp);
+} // namespace
+
+std::string BuildBlockKey(const GDriveAuthContext &auth, const DriveFileMeta &meta);
+
 std::string CanonicalPathOf(const GDriveUri &uri) {
 	if (uri.kind != GDriveUriKind::PATH) {
 		return "";
@@ -224,8 +234,14 @@ std::string CanonicalPathOf(const GDriveUri &uri) {
 //! failure into "zero matches" would be the same class of bug REQ-F-08 and
 //! R-2 exist to prevent, just one layer up.
 bool TryResolvePath(GDrivePathCache &cache, GDriveClient &client, const GDriveAuthContext &auth, const GDriveUri &uri,
-                    DriveFileMeta &out) {
+                    DriveFileMeta &out, bool *leaf_is_fresh) {
 	std::string context_path = uri.ToString();
+
+	// Default to "not fresh", the conservative answer: a caller skips its
+	// refresh only on positive evidence. Every early return leaves it false.
+	if (leaf_is_fresh) {
+		*leaf_is_fresh = false;
+	}
 
 	if (uri.kind == GDriveUriKind::FILE_ID) {
 		// Direct form: zero resolution (files.list) calls (S-2.9). The single
@@ -269,10 +285,16 @@ bool TryResolvePath(GDrivePathCache &cache, GDriveClient &client, const GDriveAu
 
 		CacheKey key {auth.secret_name, auth.drive_id, auth.root_folder_id, canonical};
 		DriveFileMeta cached;
-		if (cache.TryGet(key, cached)) {
+		bool cached_fresh = false;
+		if (cache.TryGet(key, cached, &cached_fresh)) {
 			meta = cached;
 			have_meta = true;
 			parent_id = meta.id;
+			if (is_last && leaf_is_fresh) {
+				// A hit on an entry this query's own glob just listed. Common:
+				// DuckDB's multi-file reader globs before it opens.
+				*leaf_is_fresh = cached_fresh;
+			}
 			continue;
 		}
 
@@ -287,6 +309,12 @@ bool TryResolvePath(GDrivePathCache &cache, GDriveClient &client, const GDriveAu
 		have_meta = true;
 		cache.Put(key, meta);
 		parent_id = meta.id;
+		if (is_last && leaf_is_fresh) {
+			// This leaf came straight off a files.list whose field mask
+			// includes size and headRevisionId, so it is as fresh as a
+			// files.get would be.
+			*leaf_is_fresh = true;
+		}
 	}
 
 	if (!have_meta) {
@@ -308,9 +336,9 @@ bool TryResolvePath(GDrivePathCache &cache, GDriveClient &client, const GDriveAu
 }
 
 DriveFileMeta ResolvePath(GDrivePathCache &cache, GDriveClient &client, const GDriveAuthContext &auth,
-                          const GDriveUri &uri) {
+                          const GDriveUri &uri, bool *leaf_is_fresh) {
 	DriveFileMeta meta;
-	if (!TryResolvePath(cache, client, auth, uri, meta)) {
+	if (!TryResolvePath(cache, client, auth, uri, meta, leaf_is_fresh)) {
 		throw IOException("gdrive: no such file or directory: '%s'", uri.ToString());
 	}
 	return meta;
@@ -385,35 +413,49 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 			// this; only writing does.
 			parent_id = RootFolderFor(auth);
 			std::string parent_path_accum;
+			// O-2: once a segment turns out to be missing, we CREATE it -- and
+			// nothing inside a folder that did not exist a moment ago can
+			// exist either. Every deeper existence probe is then answerable
+			// without asking Drive. Measured on a DuckLake CTAS: five listings
+			// where one is needed, each ~330 ms on the critical path.
+			bool parent_is_new = false;
 			for (size_t i = 0; i + 1 < parsed.uri.segments.size(); i++) {
 				const auto &segment = parsed.uri.segments[i];
 				parent_path_accum += (parent_path_accum.empty() ? "" : "/") + segment;
 
 				CacheKey key {auth.secret_name, auth.drive_id, auth.root_folder_id, parent_path_accum};
-				DriveFileMeta cached;
-				if (cache.TryGet(key, cached)) {
-					parent_id = cached.id;
-					continue;
+				if (!parent_is_new) {
+					DriveFileMeta cached;
+					if (cache.TryGet(key, cached)) {
+						parent_id = cached.id;
+						continue;
+					}
+					auto matches = ListByName(*client, parent_id, segment, /*require_folder=*/true, path);
+					if (matches.size() > 1) {
+						ThrowAmbiguous(matches, path);
+					}
+					if (!matches.empty()) {
+						cache.Put(key, matches[0]);
+						parent_id = matches[0].id;
+						continue;
+					}
+					// Missing. Fall through and create -- and remember, so the
+					// rest of the chain skips its probes.
 				}
 
-				auto matches = ListByName(*client, parent_id, segment, /*require_folder=*/true, path);
-				if (matches.empty()) {
-					auto resp = client->Upload("", parent_id, segment, "application/vnd.google-apps.folder", "");
-					if (!resp.ok) {
-						ThrowGDriveError(resp.error, path);
-					}
-					DriveFileMeta created;
-					if (!ParseFileMeta(resp.body, created)) {
-						throw IOException("gdrive: malformed metadata response creating folder for '%s'", path);
-					}
-					cache.Put(key, created);
-					parent_id = created.id;
-				} else if (matches.size() > 1) {
-					ThrowAmbiguous(matches, path);
-				} else {
-					cache.Put(key, matches[0]);
-					parent_id = matches[0].id;
+				auto resp = client->Upload("", parent_id, segment, "application/vnd.google-apps.folder", "");
+				if (!resp.ok) {
+					ThrowGDriveError(resp.error, path);
 				}
+				DriveFileMeta created;
+				if (!ParseFileMeta(resp.body, created)) {
+					throw IOException("gdrive: malformed metadata response creating folder for '%s'", path);
+				}
+				// O-3: cache the folder we just made, so a second write into
+				// the same directory re-walks nothing.
+				cache.Put(key, created);
+				parent_id = created.id;
+				parent_is_new = true;
 			}
 
 			// Overwrite semantics (S-3.9): if a file with this name already
@@ -421,11 +463,20 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 			// Close() updates it via files.update rather than creating a
 			// second file with the same name -- which would manufacture an
 			// R-4 collision.
-			auto existing_matches = ListByName(*client, parent_id, name, /*require_folder=*/false, path);
-			if (existing_matches.size() > 1) {
-				ThrowAmbiguous(existing_matches, path);
-			} else if (existing_matches.size() == 1) {
-				existing_id = existing_matches[0].id;
+			//
+			// Skipped when the parent folder was created moments ago by the
+			// walk above: an empty folder cannot already contain this name, so
+			// the probe has exactly one possible answer. This is the same
+			// evidence O-2 uses, applied one level further down. It must NOT
+			// be skipped on any other basis -- getting it wrong manufactures
+			// the R-4 duplicate the probe exists to prevent.
+			if (!parent_is_new) {
+				auto existing_matches = ListByName(*client, parent_id, name, /*require_folder=*/false, path);
+				if (existing_matches.size() > 1) {
+					ThrowAmbiguous(existing_matches, path);
+				} else if (existing_matches.size() == 1) {
+					existing_id = existing_matches[0].id;
+				}
 			}
 		}
 
@@ -452,19 +503,43 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 	}
 	cache.SetMaxEntries(static_cast<idx_t>(GetUBigIntSetting(opener, "gdrive_path_cache_entries", 4096)));
 
-	auto meta = ResolvePath(cache, *client, auth, parsed.uri);
+	bool leaf_is_fresh = false;
+	auto meta = ResolvePath(cache, *client, auth, parsed.uri, &leaf_is_fresh);
 
 	// The path-walk cache may serve a leaf entry captured during an earlier
-	// Glob/ListFiles call; OpenFile always re-fetches that leaf's own
-	// metadata fresh so size and GetVersionTag (headRevisionId) reflect
-	// Drive's CURRENT state (S-2.16). The FILE_ID form already did exactly
-	// this files.get inside ResolvePath, so skip the duplicate call there.
+	// Glob/ListFiles call; OpenFile re-fetches that leaf's own metadata fresh
+	// so size and GetVersionTag (headRevisionId) reflect Drive's CURRENT state
+	// (S-2.16). The FILE_ID form already did exactly this files.get inside
+	// ResolvePath, so skip the duplicate call there.
 	CacheKey meta_identity;
 	meta_identity.secret_name = auth.secret_name;
 	meta_identity.drive_id = auth.drive_id;
 	meta_identity.root_folder_id = auth.root_folder_id;
 
-	if (parsed.uri.kind != GDriveUriKind::FILE_ID) {
+	// Two ways the refresh is provably unnecessary.
+	//
+	// (1) The leaf was JUST listed. files.list carries the same size and
+	//     headRevisionId that files.get would return -- the field mask asks
+	//     for both -- so the refresh is a ~270 ms round trip that cannot
+	//     differ. This is pure win and is always on. Measured: it removes the
+	//     single files.get from a cold open, 0.23 s of a 3.2 s DuckLake read.
+	//
+	// (2) The user declared this path immutable. Then a CACHED leaf cannot be
+	//     stale either, because staleness requires an in-place overwrite and
+	//     the declaration says that does not happen here. This is opt-in and
+	//     off by default: get it wrong and a rewritten file is read at its old
+	//     size and old revision, silently. See the README's warning.
+	//
+	// Deletion is NOT a hazard for either: a dead file id surfaces as a 404 on
+	// the first read and TryRecoverStaleHandle re-resolves. Read-time recovery
+	// is strictly stronger than an open-time check anyway -- it also covers a
+	// file deleted AFTER the handle was opened, which no amount of validation
+	// at open can see.
+	const std::string immutable_prefixes = GetStringSetting(opener, "gdrive_immutable_prefixes", "");
+	const bool assume_immutable = !immutable_prefixes.empty() && PathMatchesAnyPrefix(path, immutable_prefixes);
+	const bool skip_refresh = leaf_is_fresh || assume_immutable;
+
+	if (parsed.uri.kind != GDriveUriKind::FILE_ID && !skip_refresh) {
 		// Single-flight: DuckDB opens a handle per thread, so a plain
 		// check-then-fetch lets every one of them miss together and issue the
 		// same files.get -- the exact amplification this cache exists to
@@ -513,8 +588,7 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 	auto handle = make_uniq<GDriveFileHandleImpl>(*this, path, flags, meta, auth);
 	handle->block_size = static_cast<idx_t>(GetUBigIntSetting(opener, "gdrive_block_size_bytes", 16ULL * 1024 * 1024));
 	blocks.SetCapacity(static_cast<idx_t>(GetUBigIntSetting(opener, "gdrive_block_cache_bytes", 256ULL * 1024 * 1024)));
-	handle->block_key = auth.secret_name + '\x1f' + auth.drive_id + '\x1f' + auth.root_folder_id + '\x1f' +
-	                    meta.id + '\x1f' + meta.head_revision_id;
+	handle->block_key = BuildBlockKey(auth, meta);
 
 	if (meta.IsNativeGoogleFormat()) {
 		// REQ-F-07 / D-7: native Google formats have no byte stream at all;
@@ -530,6 +604,18 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 	return std::move(handle);
 }
 
+//! The block cache key for one file under one identity.
+//!
+//! `head_revision_id` is load-bearing: Drive keeps a file's id across an
+//! overwrite, so a key without it would serve pre-overwrite bytes forever.
+//! Built in ONE place because it must be rebuilt whenever `h.meta` changes --
+//! it did not use to be, and a recovered handle kept reading the dead file's
+//! blocks out of cache.
+std::string BuildBlockKey(const GDriveAuthContext &auth, const DriveFileMeta &meta) {
+	return auth.secret_name + '\x1f' + auth.drive_id + '\x1f' + auth.root_folder_id + '\x1f' + meta.id + '\x1f' +
+	       meta.head_revision_id;
+}
+
 //! A cached file id can go dead under us: another client deletes the file and
 //! recreates one at the same path, which Drive gives a NEW id.
 //!
@@ -538,9 +624,14 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 //! failed immediately, which is the only reason this is here rather than
 //! shipped broken.
 //!
-//! Handling it at READ time is strictly better than the version it replaces:
-//! it also covers a file deleted AFTER the handle was opened, which no amount
-//! of validation at open could catch.
+//! Handling it at READ time covers MORE than the version it replaces -- a file
+//! deleted after the handle was opened is invisible to any validation at open
+//! -- but it is not strictly better, and the earlier comment here claiming so
+//! was wrong. DuckDB is told the file's size at OPEN. Recovery can redirect
+//! the reads to the new id (traceable as 404 -> files.list -> 206), but it
+//! cannot retract a size already reported, so a replacement of a different
+//! length is read short. It converts a hard failure into a bounded read; it
+//! does not make a stale open correct.
 //!
 //! Returns true if the handle now points at a live, different file id.
 bool GDriveFileSystem::TryRecoverStaleHandle(GDriveFileHandle &base) {
@@ -568,6 +659,11 @@ bool GDriveFileSystem::TryRecoverStaleHandle(GDriveFileHandle &base) {
 		return false; // same id -- the 404 was not staleness
 	}
 	h.meta = fresh;
+	// The block key embeds the id AND the revision, so it MUST be rebuilt here.
+	// Leaving it meant a recovered handle went on serving the dead file's
+	// blocks straight out of the cache -- a stale read rather than the error
+	// it replaced, which is worse than not recovering at all.
+	h.block_key = BuildBlockKey(h.auth_context, h.meta);
 	return true;
 }
 
@@ -610,6 +706,66 @@ void GDriveFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, 
 	// even though it transfers more. See GDriveBlockCache.
 	// -----------------------------------------------------------------------
 	if (h.block_size > 0 && h.meta.size > 0) {
+		// One retry, for the same reason the exact-range path below has one:
+		// the cached file id can be dead. This path used to have NO recovery at
+		// all, so on the DEFAULT configuration (16 MiB blocks) a
+		// delete-and-recreate under a live handle failed hard while the
+		// fallback path -- reachable only with the block cache switched off --
+		// recovered cleanly. Found in review, not by a test, because every
+		// existing stale-id test happened to exercise the open-time refresh
+		// instead.
+		//
+		// `not_found` is captured rather than inferred from the exception:
+		// ThrowGDriveError erases GDriveErrorKind into a DuckDB exception type,
+		// and matching on the message text would be worse than useless.
+		for (int attempt = 0;; attempt++) {
+			bool not_found = false;
+			try {
+				ReadViaBlockCache(h, buffer, nr_bytes, location, not_found);
+				return;
+			} catch (...) {
+				if (attempt == 0 && not_found && TryRecoverStaleHandle(h)) {
+					// TryRecoverStaleHandle rebuilds block_key, so the retry
+					// reads the NEW file rather than the dead one's blocks.
+					continue;
+				}
+				throw;
+			}
+		}
+	}
+
+	auto client = CreateGDriveClient(h.auth_context);
+	// Inclusive end, as HTTP Range and Drive both define it.
+	int64_t end = static_cast<int64_t>(location) + nr_bytes - 1;
+
+	auto resp = client->Download(h.meta.id, static_cast<int64_t>(location), end);
+	if (!resp.ok && resp.error.kind == GDriveErrorKind::NOT_FOUND && TryRecoverStaleHandle(h)) {
+		// The path still exists, under a new id. Retry ONCE against it: a
+		// loop here would spin against a file being rewritten repeatedly.
+		client = CreateGDriveClient(h.auth_context);
+		resp = client->Download(h.meta.id, static_cast<int64_t>(location), end);
+	}
+	if (!resp.ok) {
+		ThrowGDriveError(resp.error, h.path);
+	}
+	ReadExactRangeTail(h.path, buffer, nr_bytes, location, resp);
+
+	// Deliberately does NOT advance h.position.
+	//
+	// This overload is pread(2): it takes an explicit offset and must not
+	// disturb the shared cursor. DuckDB's parallel Parquet reader issues
+	// positional reads for different row groups against ONE handle from
+	// several threads at once, so writing h.position here was both a data
+	// race and semantically wrong. The sequential overload owns the cursor.
+}
+
+//! The block-cache read, factored out so Read() can wrap it in one retry.
+//! Sets `not_found` if a fetch failed specifically with NOT_FOUND, before
+//! rethrowing -- see the caller for why the flag rather than the exception.
+void GDriveFileSystem::ReadViaBlockCache(GDriveFileHandle &base, void *buffer, int64_t nr_bytes, idx_t location,
+                                          bool &not_found) {
+	auto &h = base.Cast<GDriveFileHandleImpl>();
+	{
 		auto client_for_block = CreateGDriveClient(h.auth_context);
 		idx_t remaining = static_cast<idx_t>(nr_bytes);
 		idx_t out_offset = 0;
@@ -623,6 +779,9 @@ void GDriveFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, 
 				    auto r = client_for_block->Download(h.meta.id, static_cast<int64_t>(start),
 				                                        static_cast<int64_t>(start + len - 1));
 				    if (!r.ok) {
+					    if (r.error.kind == GDriveErrorKind::NOT_FOUND) {
+						    not_found = true;
+					    }
 					    ThrowGDriveError(r.error, h.path);
 				    }
 				    // A 200 means the server IGNORED the Range and sent the
@@ -656,24 +815,16 @@ void GDriveFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, 
 			out_offset += take;
 			pos += take;
 		}
-		return;
 	}
+}
 
-	auto client = CreateGDriveClient(h.auth_context);
-	// Inclusive end, as HTTP Range and Drive both define it.
-	int64_t end = static_cast<int64_t>(location) + nr_bytes - 1;
+namespace {
 
-	auto resp = client->Download(h.meta.id, static_cast<int64_t>(location), end);
-	if (!resp.ok && resp.error.kind == GDriveErrorKind::NOT_FOUND && TryRecoverStaleHandle(h)) {
-		// The path still exists, under a new id. Retry ONCE against it: a
-		// loop here would spin against a file being rewritten repeatedly.
-		client = CreateGDriveClient(h.auth_context);
-		resp = client->Download(h.meta.id, static_cast<int64_t>(location), end);
-	}
-	if (!resp.ok) {
-		ThrowGDriveError(resp.error, h.path);
-	}
-
+//! Copy an exact-range response into the caller's buffer, applying the
+//! 200-vs-206 offset. A free function: it needs no filesystem state, and
+//! taking the path as a string keeps it off GDriveFileHandleImpl entirely.
+void ReadExactRangeTail(const std::string &path, void *buffer, int64_t nr_bytes, idx_t location,
+                        const DriveResponse &resp) {
 	// A 206 body starts at `location`. A 200 body is the WHOLE FILE -- the
 	// server (or an intermediary proxy) ignored the Range header, which it is
 	// permitted to do. Download() accepts both by design, so the offset must
@@ -689,7 +840,7 @@ void GDriveFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, 
 		if (avail <= static_cast<size_t>(location)) {
 			throw IOException("gdrive: server ignored Range on '%s' and returned %llu bytes, "
 			                  "which does not reach offset %llu",
-			                  h.path, static_cast<unsigned long long>(avail),
+			                  path, static_cast<unsigned long long>(avail),
 			                  static_cast<unsigned long long>(location));
 		}
 		src += location;
@@ -698,20 +849,13 @@ void GDriveFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, 
 
 	if (avail < static_cast<size_t>(nr_bytes)) {
 		throw IOException("gdrive: short read on '%s': requested %lld bytes at offset %llu, got %llu",
-		                  h.path, static_cast<long long>(nr_bytes), static_cast<unsigned long long>(location),
+		                  path, static_cast<long long>(nr_bytes), static_cast<unsigned long long>(location),
 		                  static_cast<unsigned long long>(avail));
 	}
 	memcpy(buffer, src, static_cast<size_t>(nr_bytes));
-
-
-	// Deliberately does NOT advance h.position.
-	//
-	// This overload is pread(2): it takes an explicit offset and must not
-	// disturb the shared cursor. DuckDB's parallel Parquet reader issues
-	// positional reads for different row groups against ONE handle from
-	// several threads at once, so writing h.position here was both a data
-	// race and semantically wrong. The sequential overload owns the cursor.
 }
+
+} // namespace
 
 int64_t GDriveFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes) {
 	auto &h = handle.Cast<GDriveFileHandleImpl>();
@@ -1030,6 +1174,73 @@ vector<OpenFileInfo> GDriveFileSystem::Glob(const string &path, FileOpener *open
 			}
 		};
 		list_folder(parent_id, "");
+
+		// O-1: cache what we just listed.
+		//
+		// Without this the listing is matched, returned, and thrown away, and
+		// DuckDB's multi-file reader then opens each match -- re-resolving
+		// every leaf with its own files.list. Measured: 151 listings to read
+		// 150 files, when all 150 came back in the first response, complete
+		// with the size and headRevisionId that OpenFile needs.
+		//
+		// ONLY unambiguous names. Drive allows two files to share a name in
+		// one folder; the loop below already detects that for DisambiguatePath.
+		// Caching one of a duplicate pair would make a later OpenFile silently
+		// pick it instead of raising the R-4 ambiguity error -- turning a
+		// loud, correct failure into results that depend on Drive's ordering.
+		{
+			std::unordered_map<std::string, int> rel_counts;
+			for (auto &entry : listing) {
+				rel_counts[entry.first]++;
+			}
+			// An ambiguous ANCESTOR poisons everything beneath it. With a
+			// recursive `**`, two folders sharing a name each contribute their
+			// own children, whose relative paths are individually unique -- so
+			// counting exact paths alone would cache `dup/only_a.csv` and
+			// `dup/only_b.csv` even though `dup` names two different folders.
+			//
+			// Today that is latent rather than live: TryResolvePath walks
+			// segment by segment, so it resolves `dup`, hits the R-4 ambiguity
+			// and throws long before the leaf entry is consulted. A review
+			// flagged it as an active bug; it is not, and a test
+			// (e2e/tests/test_glob_cache.py) confirms the error is raised with
+			// this guard removed.
+			//
+			// It is kept anyway, because the entry is simply WRONG DATA: it
+			// asserts that one path names one file when it names two. Any
+			// future fast path that resolves a full path without walking its
+			// ancestors -- exactly what a name-search optimisation would do --
+			// turns wrong data into a silently wrong answer. Cheap here (the
+			// ambiguous list is empty in every normal case), and it removes a
+			// trap from under the next optimisation.
+			std::vector<std::string> ambiguous_prefixes;
+			for (auto &kv : rel_counts) {
+				if (kv.second != 1) {
+					ambiguous_prefixes.push_back(kv.first);
+				}
+			}
+			auto under_ambiguous = [&ambiguous_prefixes](const std::string &rel) {
+				for (auto &amb : ambiguous_prefixes) {
+					if (rel.size() > amb.size() && rel.compare(0, amb.size(), amb) == 0 &&
+					    rel[amb.size()] == '/') {
+						return true;
+					}
+				}
+				return false;
+			};
+			for (auto &entry : listing) {
+				if (rel_counts[entry.first] != 1 || under_ambiguous(entry.first)) {
+					continue;
+				}
+				std::string full_rel = split.literal_prefix.empty()
+				                           ? entry.first
+				                           : (split.literal_prefix + "/" + entry.first);
+				// Must match CanonicalPathOf's form exactly, or this is a
+				// cache that can never be hit.
+				CacheKey key {auth.secret_name, auth.drive_id, auth.root_folder_id, full_rel};
+				cache.Put(key, entry.second);
+			}
+		}
 
 		for (auto &entry : listing) {
 			const std::string &rel_path = entry.first;

@@ -180,5 +180,54 @@ bool IsFileIdFallbackGlobProbe(const std::string &uri) {
 	return second_seg.size() > 2 && second_seg[0] == '*' && second_seg[1] == '.';
 }
 
+namespace {
+
+std::string TrimAscii(const std::string &s) {
+	const char *ws = " \t\r\n";
+	auto first = s.find_first_not_of(ws);
+	if (first == std::string::npos) {
+		return "";
+	}
+	return s.substr(first, s.find_last_not_of(ws) - first + 1);
+}
+
+} // namespace
+
+bool PathMatchesAnyPrefix(const std::string &path, const std::string &csv_prefixes) {
+	if (csv_prefixes.empty() || path.empty()) {
+		return false;
+	}
+	size_t pos = 0;
+	while (pos <= csv_prefixes.size()) {
+		auto comma = csv_prefixes.find(',', pos);
+		auto end = (comma == std::string::npos) ? csv_prefixes.size() : comma;
+		std::string prefix = TrimAscii(csv_prefixes.substr(pos, end - pos));
+		pos = end + 1;
+
+		// A trailing slash is presentation, not meaning: "lake/" and "lake"
+		// name the same directory, and requiring the user to guess which one
+		// we want is a setting that silently does nothing when guessed wrong.
+		while (prefix.size() > 1 && prefix.back() == '/') {
+			prefix.pop_back();
+		}
+		if (prefix.empty()) {
+			continue;
+		}
+		if (path == prefix) {
+			return true;
+		}
+		// Segment boundary required -- see the header's note on why a bare
+		// starts_with would let "lakehouse" inherit "lake"'s exemption.
+		if (path.size() > prefix.size() && path.compare(0, prefix.size(), prefix) == 0 &&
+		    path[prefix.size()] == '/') {
+			return true;
+		}
+		if (comma == std::string::npos) {
+			break;
+		}
+	}
+	return false;
+}
+
 } // namespace gdrive
 } // namespace duckdb

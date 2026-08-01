@@ -96,6 +96,76 @@ SELECT sum(d) FROM read_parquet('gdrive://scratch/${SCRATCH}/out.parquet')
 999000
 
 # ---------------------------------------------------------------------------
+# O-2/O-3 -- mkdir -p must not probe segments that CANNOT exist.
+#
+# The write path creates missing intermediate folders. It used to check each
+# segment for existence first, all the way down: a DuckLake CTAS trace showed
+# five listings and four creates, ~5.2 s, before a single data byte moved.
+# But once one segment is missing, every DEEPER segment is missing too -- a
+# child cannot live in a parent that does not exist -- so only the FIRST miss
+# needs a listing, and nor can the leaf file exist.
+#
+# Asserted as "cost does not grow with depth" rather than as an absolute count.
+# DuckDB probes a COPY target through the filesystem before opening it, and how
+# many times it does that is its business, not this extension's; an absolute
+# number would pin OUR behaviour to THEIRS and break on a DuckDB upgrade for a
+# reason unrelated to this optimisation. The depth-invariance is the property
+# the change actually delivers.
+# ---------------------------------------------------------------------------
+statement ok
+SELECT count(*) FROM glob('gdrive://scratch/${SCRATCH}/*');
+
+statement ok
+SELECT * FROM gdrive_reset_stats();
+
+statement ok
+COPY (SELECT 7 AS a) TO 'gdrive://scratch/${SCRATCH}/shallow/f.csv' (FORMAT csv, HEADER);
+
+statement ok
+CREATE TEMP TABLE o2_shallow AS SELECT value AS n FROM gdrive_stats() WHERE metric = 'files_list';
+
+statement ok
+SELECT * FROM gdrive_reset_stats();
+
+# Four new segments instead of one. Before O-2 this cost three extra listings.
+statement ok
+COPY (SELECT 7 AS a) TO 'gdrive://scratch/${SCRATCH}/deep/a/b/c/f.csv' (FORMAT csv, HEADER);
+
+query I
+SELECT (SELECT value FROM gdrive_stats() WHERE metric = 'files_list') = (SELECT n FROM o2_shallow)
+----
+true
+
+# The skipping must not have skipped the creating: 4 folders + 1 file.
+query I
+SELECT value FROM gdrive_stats() WHERE metric = 'files_create'
+----
+5
+
+query I
+SELECT a FROM read_csv('gdrive://scratch/${SCRATCH}/deep/a/b/c/f.csv')
+----
+7
+
+# O-3: a SECOND write into that same directory re-walks nothing -- the folders
+# created above are in the path cache, so no folder is listed or created again.
+statement ok
+SELECT * FROM gdrive_reset_stats();
+
+statement ok
+COPY (SELECT 8 AS a) TO 'gdrive://scratch/${SCRATCH}/deep/a/b/c/g.csv' (FORMAT csv, HEADER);
+
+query I
+SELECT value FROM gdrive_stats() WHERE metric = 'files_create'
+----
+1
+
+query I
+SELECT a FROM read_csv('gdrive://scratch/${SCRATCH}/deep/a/b/c/g.csv')
+----
+8
+
+# ---------------------------------------------------------------------------
 # S-3.9 -- overwriting an existing name must files.update the resolved id,
 # NOT create a second file with the same name. Creating a duplicate would
 # manufacture exactly the R-4 collision the resolver then refuses to read.

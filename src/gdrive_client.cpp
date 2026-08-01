@@ -276,6 +276,7 @@ bool ParseFileList(const std::string &json_body, std::vector<DriveFileMeta> &out
 #ifndef GDRIVE_CLIENT_PURE_ONLY
 
 #include "gdrive_stats.hpp"
+#include "gdrive_trace.hpp"
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "httplib.hpp"
@@ -570,12 +571,17 @@ public:
 	}
 
 	DriveResponse Download(const std::string &file_id, int64_t start, int64_t end) override {
+		// GDRIVE_TRACE_RANGES predates the span tracer and is kept working:
+		// it is quoted in docs/benchmark.md and in shell one-liners. For a
+		// timeline use GDRIVE_TRACE_FILE, which covers every call kind rather
+		// than media only, and records overlap rather than just duration.
 		const bool trace = getenv("GDRIVE_TRACE_RANGES") != nullptr;
 		auto t0 = std::chrono::steady_clock::now();
 		auto out = ExecuteWithRetry(HttpMethod::GET,
 		                            "/drive/v3/files/" + UrlEncode(file_id) + "?alt=media&" + AllDrivesParams(),
 		                            {{"Range", BuildRangeHeader(start, end)}}, "", "",
-		                            &DriveCallStats::files_media, {200, 206});
+		                            &DriveCallStats::files_media, {200, 206}, /*retry_non_idempotent=*/false,
+		                            /*trace_range_off=*/start, /*trace_range_len=*/end - start + 1);
 		if (trace) {
 			auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0)
 			              .count();
@@ -763,7 +769,39 @@ private:
 		int status = 0;
 		std::string body;
 		std::string retry_after;
+		//! True when this attempt was the first request on this thread, and so
+		//! paid DNS + TCP + TLS. Only meaningful under tracing; costs one bool.
+		bool fresh_conn = false;
 	};
+
+	//! Map the stats counter this call increments onto a stable name for the
+	//! trace. Derived from the counter rather than passed in at every call
+	//! site, so adding a traced call cannot silently mislabel itself -- the
+	//! counter is already mandatory.
+	static const char *TraceKind(int64_t DriveCallStats::*counter) {
+		if (counter == &DriveCallStats::files_get) {
+			return "files.get";
+		}
+		if (counter == &DriveCallStats::files_list) {
+			return "files.list";
+		}
+		if (counter == &DriveCallStats::files_media) {
+			return "files.media";
+		}
+		if (counter == &DriveCallStats::files_export) {
+			return "files.export";
+		}
+		if (counter == &DriveCallStats::files_create) {
+			return "files.create";
+		}
+		if (counter == &DriveCallStats::files_update) {
+			return "files.update";
+		}
+		if (counter == &DriveCallStats::files_delete) {
+			return "files.delete";
+		}
+		return "unknown";
+	}
 
 	RawResult DoHttp(HttpMethod method, const std::string &path_and_query,
 	                 const std::vector<std::pair<std::string, std::string>> &extra_headers, const std::string &body,
@@ -791,6 +829,10 @@ private:
 		// ---------------------------------------------------------------
 		static thread_local duckdb_httplib_openssl::SSLClient client(kDriveHost, kDrivePort);
 		static thread_local bool configured = false;
+		// Captured before the request: the FIRST call on this thread is the one
+		// that pays DNS + TCP + TLS, and a timeline that cannot distinguish it
+		// from a warm call misattributes the cost of a cold scan.
+		const bool fresh_conn = !configured;
 		if (!configured) {
 			client.enable_server_certificate_verification(true);
 			client.set_connection_timeout(std::chrono::seconds(10));
@@ -826,6 +868,7 @@ private:
 		}
 
 		RawResult out;
+		out.fresh_conn = fresh_conn;
 		if (!res) {
 			out.transport_ok = false;
 			return out;
@@ -844,14 +887,34 @@ private:
 	                               const std::vector<std::pair<std::string, std::string>> &extra_headers,
 	                               const std::string &body, const std::string &content_type,
 	                               int64_t DriveCallStats::*counter, const std::vector<int> &success_statuses,
-	                               bool retry_non_idempotent = false) {
+	                               bool retry_non_idempotent = false, int64_t trace_range_off = -1,
+	                               int64_t trace_range_len = -1) {
 		int attempt = 0;
 		for (;;) {
 			++attempt;
 			stats_.*counter += 1;
 			RecordGlobalCall(counter);
 
+			// Everything trace-related is inside this guard, including the
+			// clock reads -- a normal query never calls steady_clock here.
+			const bool tracing = trace::Enabled();
+			const uint64_t t_start = tracing ? trace::NowMicros() : 0;
+
 			RawResult raw = DoHttp(method, path_and_query, extra_headers, body, content_type);
+
+			if (tracing) {
+				trace::Span span;
+				span.kind = TraceKind(counter);
+				span.start_us = t_start;
+				span.end_us = trace::NowMicros();
+				span.attempt = attempt;
+				span.http_status = raw.transport_ok ? raw.status : 0;
+				span.bytes = raw.body.size();
+				span.fresh_conn = raw.fresh_conn;
+				span.range_off = trace_range_off;
+				span.range_len = trace_range_len;
+				trace::Emit(span);
+			}
 
 			if (!raw.transport_ok) {
 				// A transport-level failure (DNS, connect, TLS, timeout) never
@@ -917,7 +980,18 @@ private:
 
 			GDriveError err = ClassifyDriveError(raw.status, raw.body, raw.retry_after);
 			bool retryable = (err.kind == GDriveErrorKind::TRANSIENT || err.kind == GDriveErrorKind::RATE_LIMIT);
-			if (retryable && attempt < kMaxAttempts) {
+			// The SAME idempotency gate as the transport branch above, which it
+			// was missing. A 5xx is exactly as ambiguous as a dropped
+			// connection: Drive may have committed the change and failed only
+			// while telling us. Retrying a POST files.create then produces a
+			// SECOND file -- and because duplicate names in one folder are a
+			// hard error here (R-4), that permanently poisons the path.
+			//
+			// It matters most for FOLDER creation, which (unlike file creation)
+			// does not reserve an id first and so has no way to recognise its
+			// own retry. Found in review; the asymmetry between the two retry
+			// branches was not deliberate.
+			if (retryable && attempt < kMaxAttempts && (retry_non_idempotent || IsIdempotent(method))) {
 				stats_.retries += 1;
 				RecordGlobalRetry();
 				SleepBackoff(attempt, err.retry_after_seconds);

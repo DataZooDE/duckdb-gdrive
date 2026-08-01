@@ -1,0 +1,68 @@
+{
+  "fixture": "fixtures/wide.parquet",
+  "file_id": "17AVQ4WlKaPE3hFxpuoljHLpe3nXI0qsQ",
+  "size_bytes": 87025665,
+  "repeats": 9,
+  "query": "SELECT count(*), sum(id), sum(h1::HUGEINT), min(s1), max(s1) FROM read_parquet('{uri}')",
+  "legs": [
+    {
+      "leg": "local",
+      "uri": "/tmp/tmp5fwapm8w/wide.parquet",
+      "min_s": 0.12854872099705972,
+      "median_s": 0.13086358099826612,
+      "samples_s": [
+        0.177,
+        0.133,
+        0.129,
+        0.14,
+        0.131,
+        0.13,
+        0.13,
+        0.136,
+        0.13
+      ],
+      "result": "2000000|1999999000000|18442665268270631852892036|00000f7264c27ba6fea0c837ed6aa0aa|fffffe98d0963d27015c198262d97221"
+    },
+    {
+      "leg": "gdrive",
+      "uri": "gdrive://id:17AVQ4WlKaPE3hFxpuoljHLpe3nXI0qsQ",
+      "min_s": 3.913970084991888,
+      "median_s": 4.4651409680082,
+      "samples_s": [
+        4.142,
+        4.186,
+        4.69,
+        4.854,
+        4.278,
+        4.754,
+        4.465,
+        3.914,
+        4.651
+      ],
+      "result": "2000000|1999999000000|18442665268270631852892036|00000f7264c27ba6fea0c837ed6aa0aa|fffffe98d0963d27015c198262d97221"
+    },
+    {
+      "leg": "gdrive_tuned",
+      "uri": "gdrive://id:17AVQ4WlKaPE3hFxpuoljHLpe3nXI0qsQ",
+      "min_s": 2.5739161309902556,
+      "median_s": 2.694432438001968,
+      "samples_s": [
+        2.668,
+        2.772,
+        2.694,
+        2.654,
+        2.574,
+        2.61,
+        2.966,
+        2.931,
+        3.289
+      ],
+      "result": "2000000|1999999000000|18442665268270631852892036|00000f7264c27ba6fea0c837ed6aa0aa|fffffe98d0963d27015c198262d97221"
+    }
+  ],
+  "gdrive_over_gs": null,
+  "gate": {
+    "limit": 3.0,
+    "verdict": "NOT EVALUATED"
+  }
+}

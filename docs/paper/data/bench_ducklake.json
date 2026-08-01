@@ -1,0 +1,146 @@
+{
+  "run_id": "run-dl-61e49a84",
+  "repeats": 3,
+  "ducklake_version": "d8a1881e",
+  "duckdb": "v1.5.5",
+  "results": {
+    "gdrive": {
+      "cache_on": {
+        "CREATE TABLE AS": {
+          "min_s": 7.8,
+          "median_s": 8.19
+        },
+        "INSERT (append)": {
+          "min_s": 3.54,
+          "median_s": 3.63
+        },
+        "DELETE": {
+          "min_s": 6.39,
+          "median_s": 6.6
+        },
+        "Scan, cold": {
+          "min_s": 3.7,
+          "median_s": 3.85
+        },
+        "Time-travel read": {
+          "min_s": 2.61,
+          "median_s": 2.83
+        }
+      },
+      "cache_off": {
+        "CREATE TABLE AS": {
+          "min_s": 7.88,
+          "median_s": 7.91
+        },
+        "INSERT (append)": {
+          "min_s": 3.55,
+          "median_s": 3.57
+        },
+        "DELETE": {
+          "min_s": 6.38,
+          "median_s": 6.49
+        },
+        "Scan, cold": {
+          "min_s": 3.62,
+          "median_s": 3.7
+        },
+        "Time-travel read": {
+          "min_s": 2.62,
+          "median_s": 2.76
+        }
+      }
+    },
+    "gs": {
+      "cache_on": {
+        "CREATE TABLE AS": {
+          "min_s": 1.55,
+          "median_s": 1.62
+        },
+        "INSERT (append)": {
+          "min_s": 0.66,
+          "median_s": 0.67
+        },
+        "DELETE": {
+          "min_s": 1.03,
+          "median_s": 1.1
+        },
+        "Scan, cold": {
+          "min_s": 0.92,
+          "median_s": 0.92
+        },
+        "Time-travel read": {
+          "min_s": 0.25,
+          "median_s": 0.27
+        }
+      },
+      "cache_off": {
+        "CREATE TABLE AS": {
+          "min_s": 1.57,
+          "median_s": 1.58
+        },
+        "INSERT (append)": {
+          "min_s": 0.66,
+          "median_s": 0.67
+        },
+        "DELETE": {
+          "min_s": 0.96,
+          "median_s": 1.01
+        },
+        "Scan, cold": {
+          "min_s": 0.91,
+          "median_s": 0.92
+        },
+        "Time-travel read": {
+          "min_s": 0.24,
+          "median_s": 0.26
+        }
+      }
+    },
+    "s3": {
+      "cache_on": {
+        "CREATE TABLE AS": {
+          "min_s": 1.51,
+          "median_s": 1.53
+        },
+        "INSERT (append)": {
+          "min_s": 0.59,
+          "median_s": 0.6
+        },
+        "DELETE": {
+          "min_s": 0.68,
+          "median_s": 0.71
+        },
+        "Scan, cold": {
+          "min_s": 0.61,
+          "median_s": 0.63
+        },
+        "Time-travel read": {
+          "min_s": 0.24,
+          "median_s": 0.25
+        }
+      },
+      "cache_off": {
+        "CREATE TABLE AS": {
+          "min_s": 1.46,
+          "median_s": 1.59
+        },
+        "INSERT (append)": {
+          "min_s": 0.67,
+          "median_s": 0.71
+        },
+        "DELETE": {
+          "min_s": 0.71,
+          "median_s": 0.74
+        },
+        "Scan, cold": {
+          "min_s": 0.59,
+          "median_s": 0.62
+        },
+        "Time-travel read": {
+          "min_s": 0.18,
+          "median_s": 0.25
+        }
+      }
+    }
+  }
+}

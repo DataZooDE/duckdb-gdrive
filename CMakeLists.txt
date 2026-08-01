@@ -47,6 +47,28 @@ if(NOT EMSCRIPTEN)
 endif()
 
 # ---------------------------------------------------------------------------
+# datazoo-oauth2 (D-11, REQ-A-01/A-02; design in docs/hld.md section 5.4).
+#
+# The shared OAuth2 stack: authorization-code + PKCE, the loopback redirect
+# server, cross-platform browser launch, and get-token-with-refresh against a
+# DuckDB secret. Extracted from erpl-web, which now consumes it too, so there
+# is one implementation rather than a fork.
+#
+# Pinned by commit, not tracked by branch: each consumer pins its own, so
+# neither is forced to upgrade on the other's schedule (R-9).
+#
+# Native only, like posthog-telemetry: the loopback server and the browser
+# launcher have no meaning under emscripten.
+#
+# NOT wired into the extension's sources yet -- PROVIDER authorization_code is
+# the next slice. This pins and builds the dependency so that landing it is a
+# code change rather than a build-system change.
+# ---------------------------------------------------------------------------
+if(NOT EMSCRIPTEN)
+    add_subdirectory(datazoo-oauth2)
+endif()
+
+# ---------------------------------------------------------------------------
 # Pure-logic sources: no `#include "duckdb.hpp"`, no I/O. Compiled into BOTH
 # the extension and the Catch2 unit-test binary. See docs/implementation-plan
 # .md section 1 -- these are the only things Catch2 is allowed to test, and
@@ -68,6 +90,8 @@ file(GLOB PURE_SOURCES CONFIGURE_DEPENDS
     src/gdrive_errors.cpp
     src/gdrive_glob.cpp
     src/gdrive_service_account_pure.cpp
+    src/gdrive_adc.cpp
+    src/gdrive_oauth_params.cpp
 )
 
 # ---------------------------------------------------------------------------
@@ -87,6 +111,9 @@ file(GLOB DUCKDB_SOURCES CONFIGURE_DEPENDS
     src/gdrive_upload.cpp
     src/gdrive_mutate.cpp
     src/gdrive_stats.cpp
+    # Not PURE despite having no DuckDB dependency: it opens a file and writes
+    # to it, and the pure contract forbids I/O.
+    src/gdrive_trace.cpp
 )
 
 set(EXTENSION_SOURCES ${PURE_SOURCES} ${DUCKDB_SOURCES})
@@ -100,8 +127,8 @@ target_compile_features(${EXTENSION_NAME} PRIVATE cxx_std_17)
 target_compile_features(${LOADABLE_EXTENSION_NAME} PRIVATE cxx_std_17)
 
 if(NOT EMSCRIPTEN)
-    target_link_libraries(${EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto jwt-cpp::jwt-cpp posthog_telemetry)
-    target_link_libraries(${LOADABLE_EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto jwt-cpp::jwt-cpp posthog_telemetry)
+    target_link_libraries(${EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto jwt-cpp::jwt-cpp posthog_telemetry datazoo_oauth2)
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto jwt-cpp::jwt-cpp posthog_telemetry datazoo_oauth2)
 else()
     target_link_libraries(${EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto jwt-cpp::jwt-cpp)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto jwt-cpp::jwt-cpp)

@@ -66,6 +66,25 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "RemoveFile permanently deletes instead of moving to trash (default: false, trash).",
 	    LogicalType::BOOLEAN, Value::BOOLEAN(false));
 
+	// B-1 / D-10: an explicit override for Application Default Credentials
+	// discovery, used by PROVIDER credential_chain.
+	//
+	// Two reasons this exists rather than relying on the environment alone.
+	// A DuckDB session cannot set an environment variable for itself, so
+	// without this there is no way to point one connection at a different
+	// credential -- and no deterministic way to test the not-found path,
+	// which would otherwise depend on whether the machine running the suite
+	// happens to have a gcloud login.
+	//
+	// Takes precedence over GOOGLE_APPLICATION_CREDENTIALS and CLOUDSDK_CONFIG.
+	// The empty default means "resolve normally".
+	loader.GetDatabaseInstance().config.AddExtensionOption(
+	    "gdrive_adc_file",
+	    "Path to an Application Default Credentials JSON file, overriding normal discovery "
+	    "for PROVIDER credential_chain. Empty (default) resolves GOOGLE_APPLICATION_CREDENTIALS, "
+	    "then CLOUDSDK_CONFIG, then the well-known gcloud location.",
+	    LogicalType::VARCHAR, Value(""));
+
 	// D-7: Docs export to text/plain by default; text/markdown is not
 	// byte-stable across exports, which would make GetVersionTag-keyed
 	// caching lie. Sheets always export to text/csv regardless of this
@@ -75,6 +94,31 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "MIME type to export application/vnd.google-apps.document files as: "
 	    "'text/plain' (default) or 'text/markdown'. Sheets always export to text/csv.",
 	    LogicalType::VARCHAR, Value("text/plain"));
+
+	// An OPT-IN correctness/latency trade, off by default.
+	//
+	// Opening a file whose path came from the cache costs one files.get
+	// (~270 ms) purely to confirm size and headRevisionId are current. That
+	// confirmation is only meaningful if the file can be overwritten in place.
+	// A lakehouse data path is the case where it cannot: DuckLake, Iceberg and
+	// Delta all write NEW files and never rewrite one, so the check can never
+	// find anything, and it is paid per file per query -- a snapshot spanning
+	// 50 data files pays 50 of them.
+	//
+	// Declaring such a prefix immutable removes the call. Declaring a prefix
+	// that DOES get rewritten in place is a correctness bug the extension
+	// cannot detect for you: Drive keeps a file's id across an overwrite, so
+	// there is no 404 to catch, and Drive offers neither an ETag nor a working
+	// If-Match (verified against the live API 2026-08-01) that we could use
+	// to validate cheaply. It will read the old size and serve blocks from the
+	// old revision, silently. Hence: opt-in, per prefix, never a default.
+	loader.GetDatabaseInstance().config.AddExtensionOption(
+	    "gdrive_immutable_prefixes",
+	    "Comma-separated gdrive:// path prefixes whose files are never overwritten in place "
+	    "(e.g. a DuckLake DATA_PATH). Skips the per-open metadata refresh for them. Matching is "
+	    "on whole path segments. Empty (the default) disables it. Declaring a prefix whose files "
+	    "ARE rewritten in place causes stale reads that cannot be detected.",
+	    LogicalType::VARCHAR, Value(""));
 
 	// REQ-NF-01. Drive's media endpoint costs ~1.2 s per request REGARDLESS
 	// of size -- a 1 KB read and a 1 MB read measure the same, and the whole

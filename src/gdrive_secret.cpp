@@ -178,6 +178,103 @@ unique_ptr<BaseSecret> CreateServiceAccountSecret(ClientContext &, CreateSecretI
 	return std::move(result);
 }
 
+// ---------------------------------------------------------------------------
+// PROVIDER credential_chain -- Application Default Credentials (D-10).
+//
+// Takes no credential arguments at all, by design: a user who has already run
+// `gcloud auth application-default login` should type one statement and
+// nothing else. The secret is a MARKER -- discovery happens on first use, in
+// GetAuthContext, so that rotating the underlying credential (or logging in
+// after the secret was created) does not require recreating it.
+//
+// Nothing is validated here for the same reason. A CREATE SECRET that
+// succeeded and then failed on first read would be a worse experience than
+// either extreme, so the not-found message (NoCredentialsMessage) is the
+// single place this is reported, and it teaches the fix.
+// ---------------------------------------------------------------------------
+unique_ptr<BaseSecret> CreateCredentialChainSecret(ClientContext &, CreateSecretInput &input) {
+	auto result = make_uniq<KeyValueSecret>(input.scope, input.type, input.provider, input.name);
+
+	// Where the identity comes from is this provider's business; which Drive
+	// it addresses is not, so the root binding options still apply.
+	CopyOption(input, *result, "drive_id");
+	CopyOption(input, *result, "root_folder_id");
+	CopyOption(input, *result, "drive_scope");
+
+	ApplyDefaultScope(*result);
+
+	// No credential material is stored -- only a path is ever resolved, and
+	// only at use time. Nothing to redact.
+	return std::move(result);
+}
+
+// ---------------------------------------------------------------------------
+// PROVIDER authorization_code -- interactive browser consent (C-1).
+//
+// D-9: you bring your own OAuth client. No client id is compiled into this
+// extension, deliberately. Embedding one is what lets the gsheets extension
+// offer `CREATE SECRET (TYPE gsheet);` with no arguments, and it costs a
+// Google verification track (Drive scopes are "restricted", so full
+// verification means a CASA security assessment), a 100-test-user cap until
+// that completes, and every user's consent screen naming us. The zero-setup
+// path here is PROVIDER credential_chain instead, which reuses the `gcloud`
+// login a developer already has.
+//
+// Creation stores configuration ONLY -- no browser is launched here. The flow
+// runs on first use, in GetAuthContext. Two reasons: CREATE SECRET that
+// blocks on a human clicking a consent screen is a surprising thing for a SQL
+// statement to do, and doing it lazily is what makes creation testable
+// without a browser. This matches erpl-web's datasphere secret.
+// ---------------------------------------------------------------------------
+unique_ptr<BaseSecret> CreateAuthorizationCodeSecret(ClientContext &, CreateSecretInput &input) {
+	auto result = make_uniq<KeyValueSecret>(input.scope, input.type, input.provider, input.name);
+
+	CopyOption(input, *result, "client_id");
+	CopyOption(input, *result, "client_secret");
+	CopyOption(input, *result, "redirect_port");
+	// Optional: a refresh token you already hold. Supplying one skips the
+	// browser entirely -- the flow only runs when there is nothing to refresh.
+	//
+	// This is not only a convenience. Without it, everything after the consent
+	// click is reachable only by a human clicking, so the refresh and
+	// write-back paths could not be tested automatically at all. With it, CI
+	// covers all of it and the manual step shrinks to the click itself.
+	CopyOption(input, *result, "refresh_token");
+	CopyOption(input, *result, "drive_id");
+	CopyOption(input, *result, "root_folder_id");
+	CopyOption(input, *result, "drive_scope");
+
+	// Named individually so the reader is told WHICH half is missing. Google's
+	// token endpoint needs both, and finding that out on first query instead
+	// of here would mean a browser consent completing and then failing.
+	if (!HasNonEmptyOption(input, "client_id")) {
+		throw InvalidInputException(
+		    "gdrive secret (PROVIDER authorization_code) needs CLIENT_ID. Create an OAuth client of type "
+		    "'Desktop app' in the Google Cloud console, then:\n"
+		    "  CREATE SECRET gdrive_user (TYPE gdrive, PROVIDER authorization_code, CLIENT_ID '...', "
+		    "CLIENT_SECRET '...');\n"
+		    "If you would rather not create one, PROVIDER credential_chain uses your existing gcloud login.");
+	}
+	if (!HasNonEmptyOption(input, "client_secret")) {
+		throw InvalidInputException(
+		    "gdrive secret (PROVIDER authorization_code) needs CLIENT_SECRET as well as CLIENT_ID. Google's token "
+		    "endpoint requires both, even for a Desktop-app client. Example:\n"
+		    "  CREATE SECRET gdrive_user (TYPE gdrive, PROVIDER authorization_code, CLIENT_ID '...', "
+		    "CLIENT_SECRET '...');");
+	}
+
+	ApplyDefaultScope(*result);
+
+	// access_token/refresh_token are absent at creation and written back after
+	// the flow completes; they are redacted from the outset so there is no
+	// window in which a refreshed token could be displayed.
+	result->redact_keys.insert("client_secret");
+	result->redact_keys.insert("access_token");
+	result->redact_keys.insert("refresh_token");
+
+	return std::move(result);
+}
+
 void RegisterCommonParameters(CreateSecretFunction &function) {
 	function.named_parameters["drive_id"] = LogicalType(LogicalTypeId::VARCHAR);
 	function.named_parameters["root_folder_id"] = LogicalType(LogicalTypeId::VARCHAR);
@@ -194,7 +291,12 @@ void RegisterGDriveSecrets(ExtensionLoader &loader) {
 	SecretType type;
 	type.name = kSecretTypeName;
 	type.deserializer = KeyValueSecret::Deserialize<KeyValueSecret>;
-	type.default_provider = "config";
+	// B-4 / D-10: credential_chain is the default, so `CREATE SECRET (TYPE
+	// gdrive);` works with no arguments for anyone who has run `gcloud auth
+	// application-default login`. This changed from "config", which could
+	// never succeed argument-less (config demands a token), so no working
+	// statement changes meaning.
+	type.default_provider = "credential_chain";
 	loader.RegisterSecretType(type);
 
 	CreateSecretFunction config_fn = {kSecretTypeName, "config", CreateConfigSecret, {}};
@@ -209,6 +311,18 @@ void RegisterGDriveSecrets(ExtensionLoader &loader) {
 	sa_fn.named_parameters["key_file"] = LogicalType(LogicalTypeId::VARCHAR);
 	RegisterCommonParameters(sa_fn);
 	loader.RegisterFunction(sa_fn);
+
+	CreateSecretFunction chain_fn = {kSecretTypeName, "credential_chain", CreateCredentialChainSecret, {}};
+	RegisterCommonParameters(chain_fn);
+	loader.RegisterFunction(chain_fn);
+
+	CreateSecretFunction authcode_fn = {kSecretTypeName, "authorization_code", CreateAuthorizationCodeSecret, {}};
+	authcode_fn.named_parameters["client_id"] = LogicalType(LogicalTypeId::VARCHAR);
+	authcode_fn.named_parameters["client_secret"] = LogicalType(LogicalTypeId::VARCHAR);
+	authcode_fn.named_parameters["redirect_port"] = LogicalType(LogicalTypeId::VARCHAR);
+	authcode_fn.named_parameters["refresh_token"] = LogicalType(LogicalTypeId::VARCHAR);
+	RegisterCommonParameters(authcode_fn);
+	loader.RegisterFunction(authcode_fn);
 }
 
 } // namespace gdrive

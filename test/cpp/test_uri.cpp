@@ -9,6 +9,7 @@ using duckdb::gdrive::GDriveUriParse;
 using duckdb::gdrive::IsFileIdFallbackGlobProbe;
 using duckdb::gdrive::IsGDriveUri;
 using duckdb::gdrive::ParseGDriveUri;
+using duckdb::gdrive::PathMatchesAnyPrefix;
 
 // ---------------------------------------------------------------------------
 // IsGDriveUri -- cheap prefix test
@@ -310,4 +311,48 @@ TEST_CASE("IsFileIdFallbackGlobProbe rejects non-id: URIs and non-gdrive strings
 	REQUIRE_FALSE(IsFileIdFallbackGlobProbe("gdrive://id:abc")); // no segments at all
 	REQUIRE_FALSE(IsFileIdFallbackGlobProbe("s3://id:abc/**/*.csv"));
 	REQUIRE_FALSE(IsFileIdFallbackGlobProbe(""));
+}
+
+// ---------------------------------------------------------------------------
+// PathMatchesAnyPrefix -- backs `gdrive_immutable_prefixes`.
+//
+// This setting suppresses the per-open freshness check, so a false positive
+// does not merely waste time: it serves stale metadata for a path the user
+// never declared immutable. The boundary cases below are the ones that would
+// do that.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("PathMatchesAnyPrefix matches a path at or under a prefix", "[uri][immutable]") {
+	REQUIRE(PathMatchesAnyPrefix("gdrive://lake/data/a.parquet", "gdrive://lake"));
+	REQUIRE(PathMatchesAnyPrefix("gdrive://lake/data/a.parquet", "gdrive://lake/"));
+	REQUIRE(PathMatchesAnyPrefix("gdrive://lake/data/a.parquet", "gdrive://lake/data"));
+	// The prefix itself, exactly.
+	REQUIRE(PathMatchesAnyPrefix("gdrive://lake", "gdrive://lake"));
+	REQUIRE(PathMatchesAnyPrefix("gdrive://lake", "gdrive://lake/"));
+}
+
+TEST_CASE("PathMatchesAnyPrefix requires a SEGMENT boundary", "[uri][immutable]") {
+	// The whole reason this is not a starts_with. "lakehouse" must not inherit
+	// "lake"'s exemption -- it is a different directory.
+	REQUIRE_FALSE(PathMatchesAnyPrefix("gdrive://lakehouse/a.parquet", "gdrive://lake"));
+	REQUIRE_FALSE(PathMatchesAnyPrefix("gdrive://lake2/a.parquet", "gdrive://lake"));
+	REQUIRE_FALSE(PathMatchesAnyPrefix("gdrive://lakes", "gdrive://lake"));
+}
+
+TEST_CASE("PathMatchesAnyPrefix handles lists, spacing and empties", "[uri][immutable]") {
+	REQUIRE(PathMatchesAnyPrefix("gdrive://b/x", "gdrive://a,gdrive://b"));
+	REQUIRE(PathMatchesAnyPrefix("gdrive://b/x", " gdrive://a , gdrive://b/ "));
+	// Empty entries are ignored rather than matching everything -- a trailing
+	// comma is a typo, and treating it as "match all" would silently disable
+	// every freshness check in the process.
+	REQUIRE(PathMatchesAnyPrefix("gdrive://b/x", "gdrive://b,"));
+	REQUIRE_FALSE(PathMatchesAnyPrefix("gdrive://b/x", ",,"));
+	REQUIRE_FALSE(PathMatchesAnyPrefix("gdrive://b/x", "  "));
+}
+
+TEST_CASE("PathMatchesAnyPrefix is off by default and never matches nothing", "[uri][immutable]") {
+	// The default value of the setting is "", which must match no path at all.
+	REQUIRE_FALSE(PathMatchesAnyPrefix("gdrive://anything/at/all", ""));
+	REQUIRE_FALSE(PathMatchesAnyPrefix("", "gdrive://a"));
+	REQUIRE_FALSE(PathMatchesAnyPrefix("gdrive://other/x", "gdrive://a,gdrive://b"));
 }

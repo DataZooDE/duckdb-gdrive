@@ -1,0 +1,32 @@
+%% LOCAL STUB -- shadows psnfss/pifont.sty for this paper only.
+%%
+%% acmart loads pifont, and pifont selects the ZapfDingbats font (pzdr) at
+%% load time. pzdr.tfm lives in texlive-fontsrecommended, which is not part of
+%% every distribution's base install; where it is missing, the font selection
+%% is a hard LaTeX error and the build stops before producing a page.
+%%
+%% Nothing in this paper uses a dingbat. acmart's only use is a decorative
+%% superscript in the title block, which is suppressed anyway under
+%% `nonacm` with printacmref=false. So we satisfy the interface and draw
+%% nothing, rather than making the build depend on an optional package.
+%%
+%% If you would rather have the real thing, delete this file and install
+%% texlive-fontsrecommended (Debian/Ubuntu) or texlive-fontsrecommended
+%% (Arch); TEXINPUTS will then fall through to the system copy.
+
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{pifont}[2026/08/01 no-op pifont stub, see comment above]
+
+\newcommand{\Pifont}[1]{}
+\newcommand{\Pichar}[2]{}
+\newcommand{\Pisymbol}[2]{}
+\newcommand{\Piline}[2]{}
+\newcommand{\Pilist}[2]{}
+\newcommand{\Pifill}[2]{}
+\newcommand{\ding}[1]{}
+\newcommand{\dingline}[1]{}
+\newcommand{\dingfill}[1]{}
+\newenvironment{dinglist}[1]{\begin{itemize}}{\end{itemize}}
+\newenvironment{dingautolist}[1]{\begin{enumerate}}{\end{enumerate}}
+
+\endinput

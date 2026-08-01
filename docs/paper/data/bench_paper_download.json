@@ -1,0 +1,9 @@
+{
+  "run_id": "run-paper-12872b15",
+  "repeats": 3,
+  "download": {
+    "op": "Download, then query locally",
+    "min_s": 4.61,
+    "median_s": 4.71
+  }
+}

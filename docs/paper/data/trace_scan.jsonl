@@ -1,0 +1,9 @@
+{"record":"header","version":1,"epoch_unix_us":1785598490430843}
+{"kind":"files.list","t0_us":0,"t1_us":392102,"dur_us":392102,"thread":0,"attempt":1,"status":200,"bytes":213,"fresh_conn":true,"range_off":-1,"range_len":-1}
+{"kind":"files.list","t0_us":392290,"t1_us":682497,"dur_us":290207,"thread":0,"attempt":1,"status":200,"bytes":312,"fresh_conn":false,"range_off":-1,"range_len":-1}
+{"kind":"files.media","t0_us":682870,"t1_us":2112227,"dur_us":1429357,"thread":0,"attempt":1,"status":206,"bytes":3139585,"fresh_conn":false,"range_off":83886080,"range_len":3139585}
+{"kind":"files.media","t0_us":2116447,"t1_us":3696757,"dur_us":1580310,"thread":1,"attempt":1,"status":206,"bytes":16777216,"fresh_conn":true,"range_off":0,"range_len":16777216}
+{"kind":"files.media","t0_us":2117176,"t1_us":3746406,"dur_us":1629230,"thread":0,"attempt":1,"status":206,"bytes":16777216,"fresh_conn":false,"range_off":67108864,"range_len":16777216}
+{"kind":"files.media","t0_us":2116243,"t1_us":3943721,"dur_us":1827478,"thread":2,"attempt":1,"status":206,"bytes":16777216,"fresh_conn":true,"range_off":33554432,"range_len":16777216}
+{"kind":"files.media","t0_us":2116494,"t1_us":4133594,"dur_us":2017100,"thread":3,"attempt":1,"status":206,"bytes":16777216,"fresh_conn":true,"range_off":50331648,"range_len":16777216}
+{"kind":"files.media","t0_us":2114549,"t1_us":4175020,"dur_us":2060471,"thread":4,"attempt":1,"status":206,"bytes":16777216,"fresh_conn":true,"range_off":16777216,"range_len":16777216}
