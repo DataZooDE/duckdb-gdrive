@@ -191,6 +191,14 @@ you consent, and a loopback redirect hands the code back. **The refresh token
 is stored in the secret**, so that is the last time you see a consent screen —
 not once per hour.
 
+**Use `CREATE PERSISTENT SECRET` if you want that to survive a restart.** A
+plain `CREATE SECRET` is temporary: the refresh token lives in the secret for
+the session and is gone when the process exits, so the next process prompts
+for consent again. A persistent secret is written by DuckDB to
+`~/.duckdb/stored_secrets`, which means a Drive refresh token sits on your
+disk in DuckDB's own store — the right trade for a workstation, the wrong one
+for a shared host. This extension itself never writes credentials to disk.
+
 > **You bring your own OAuth client**, and that is a deliberate trade. Create
 > one of type *Desktop app* in the Google Cloud console (enable the Drive API
 > first). We could instead compile a DataZoo-owned client id into the
