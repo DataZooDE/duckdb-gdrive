@@ -224,3 +224,124 @@ true
 # resolved must not have been evicted out from under itself mid-query.
 statement ok
 SET gdrive_path_cache_entries = 1024;
+
+# ---------------------------------------------------------------------------
+# The per-open metadata refresh is skipped when it CANNOT return anything new.
+#
+# OpenFile used to always issue one files.get to confirm size and
+# headRevisionId. Measured at ~270 ms (docs/paper Figure 1), paid once per file
+# per query. Two cases where it is provably redundant:
+#
+#   1. The leaf was resolved by a files.list in THIS query. That listing's
+#      field mask already returns size and headRevisionId, so the refresh is a
+#      round trip that cannot differ. Always on.
+#   2. The user declared the path immutable. A cached leaf cannot be stale
+#      either, because staleness needs an in-place overwrite. Opt-in.
+#
+# Exact equalities, not `<=`. `files_get <= 1` would pass whether the skip
+# fired or not, which is the whole thing being tested here.
+# ---------------------------------------------------------------------------
+statement ok
+SET gdrive_immutable_prefixes = '';
+
+statement ok
+SELECT * FROM gdrive_reset_stats();
+
+# Case 1: cold. The glob/resolve lists the leaf, so the open needs no files.get
+# at all. This is the pure win -- it changes no semantics and has no setting.
+statement ok
+SELECT count(*) FROM read_parquet('gdrive://fixtures/wide.parquet');
+
+query I
+SELECT value FROM gdrive_stats() WHERE metric = 'files_get'
+----
+0
+
+# Case 2: a SECOND query. The path cache now carries the leaf from the previous
+# query, which CAN be stale, so the refresh must come back. Exactly one -- the
+# per-query metadata cache still collapses the per-thread opens into one.
+statement ok
+SELECT * FROM gdrive_reset_stats();
+
+statement ok
+SELECT count(*) FROM read_parquet('gdrive://fixtures/wide.parquet');
+
+query I
+SELECT value FROM gdrive_stats() WHERE metric = 'files_get'
+----
+1
+
+# Case 3: same second query, but the prefix is declared immutable. Now the
+# refresh is skipped too.
+statement ok
+SET gdrive_immutable_prefixes = 'gdrive://fixtures';
+
+statement ok
+SELECT * FROM gdrive_reset_stats();
+
+statement ok
+SELECT count(*) FROM read_parquet('gdrive://fixtures/wide.parquet');
+
+query I
+SELECT value FROM gdrive_stats() WHERE metric = 'files_get'
+----
+0
+
+# Case 4: the prefix match is on SEGMENTS. 'gdrive://fix' must not exempt
+# 'gdrive://fixtures/...'. A plain starts_with would, and would silently
+# suppress freshness checks for every sibling directory sharing a name prefix.
+statement ok
+SET gdrive_immutable_prefixes = 'gdrive://fix';
+
+statement ok
+SELECT * FROM gdrive_reset_stats();
+
+statement ok
+SELECT count(*) FROM read_parquet('gdrive://fixtures/wide.parquet');
+
+query I
+SELECT value FROM gdrive_stats() WHERE metric = 'files_get'
+----
+1
+
+statement ok
+SET gdrive_immutable_prefixes = '';
+
+# ---------------------------------------------------------------------------
+# O-1: a glob must CACHE the children it already listed.
+#
+# Glob lists a folder, matches locally, and returns. It used to discard the
+# listing, so every subsequent OpenFile re-resolved its leaf with a fresh
+# files.list -- 151 listings to read 150 files, when every one of those leaves
+# was in the first response, complete with size and headRevisionId.
+#
+# Exactly 1: the single ListChildren of `fixtures/many`. An inequality would
+# pass at 151 and prove nothing.
+#
+# The literal prefix is resolved deliberately first, so this assertion is about
+# the GLOB and not about whichever earlier case in this file happened to leave
+# `fixtures/many` in the path cache. Without that the expected number depends
+# on test ordering, which is not a property anybody should have to reason about
+# when this fails.
+# ---------------------------------------------------------------------------
+statement ok
+SELECT count(*) FROM glob('gdrive://fixtures/many/f-000.csv');
+
+statement ok
+SELECT * FROM gdrive_reset_stats();
+
+query I
+SELECT count(*) FROM read_csv('gdrive://fixtures/many/*.csv')
+----
+150
+
+query I
+SELECT value FROM gdrive_stats() WHERE metric = 'files_list'
+----
+1
+
+# The `count(*) = 150` above is the guard that no file was dropped -- caching
+# resolution must not lose a match. Deliberately NOT asserted via files_media:
+# an earlier case in this file reads f-0*.csv, so 100 of these files already
+# have their blocks cached and the media count here is 50, not 150. That is a
+# property of test ordering, not of this change.

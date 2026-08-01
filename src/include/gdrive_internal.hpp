@@ -113,8 +113,20 @@ std::string CanonicalPathOf(const GDriveUri &uri);
 //!
 //! More than one match is an ERROR naming both file ids and suggesting the
 //! id: form (R-4).
+//!
+//! `leaf_is_fresh`, when non-null, reports whether the LAST path segment's
+//! metadata is known current for THIS query -- either because it was just
+//! listed, or because the cache entry was stored by a files.list earlier in
+//! the same query (which is the common case: DuckDB's multi-file reader globs
+//! a path before opening it).
+//!
+//! OpenFile uses it to skip a redundant files.get. A segment obtained from
+//! `files.list` already carries Drive's current size and headRevisionId -- the
+//! field mask asks for both -- so re-fetching them is a ~270 ms round trip
+//! that cannot return anything different. Only a leaf carried over from an
+//! EARLIER query can be stale and needs the refresh.
 DriveFileMeta ResolvePath(GDrivePathCache &cache, GDriveClient &client, const GDriveAuthContext &auth,
-                          const GDriveUri &uri);
+                          const GDriveUri &uri, bool *leaf_is_fresh = nullptr);
 
 //! Same resolution as ResolvePath, but returns false instead of throwing for
 //! the "no such file or directory" outcome specifically. Ambiguity (R-4),
@@ -123,8 +135,11 @@ DriveFileMeta ResolvePath(GDrivePathCache &cache, GDriveClient &client, const GD
 //! DirectoryExists) must use this rather than a broad catch(...), which
 //! would silently turn an ambiguity or auth error into "no match" (exactly
 //! the failure mode REQ-F-08/R-2 exist to prevent, one layer up).
+//!
+//! See ResolvePath for `leaf_is_fresh`. It is only written when this returns
+//! true; on a miss there is no leaf to have come from anywhere.
 bool TryResolvePath(GDrivePathCache &cache, GDriveClient &client, const GDriveAuthContext &auth, const GDriveUri &uri,
-                    DriveFileMeta &out);
+                    DriveFileMeta &out, bool *leaf_is_fresh = nullptr);
 
 // ---------------------------------------------------------------------------
 // Mutation helpers (T3.C, gdrive_mutate.cpp). Kept as free functions rather

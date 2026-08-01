@@ -16,6 +16,22 @@
 namespace duckdb {
 namespace gdrive {
 
+namespace {
+//! The query generation THIS thread is currently serving.
+//!
+//! `metadata_generation` cannot answer that question: it is one shared value
+//! that whichever thread called BeginQuery last has overwritten. Two
+//! concurrent queries in one DatabaseInstance therefore make it thrash between
+//! their query numbers, and a freshness test against it can report that query
+//! B's open may trust an entry listed by query A. Freshness means "listed
+//! during MY query", so it has to be compared against MY generation.
+//!
+//! Thread-local is the right scope: DuckDB's parallel scan has each worker
+//! call OpenFile -- and therefore BeginQuery -- for itself, with its own
+//! query's number.
+thread_local idx_t t_query_generation = 0;
+} // namespace
+
 bool CacheKey::operator==(const CacheKey &other) const {
 	return secret_name == other.secret_name && drive_id == other.drive_id && root_folder_id == other.root_folder_id &&
 	       canonical_path == other.canonical_path;
@@ -65,8 +81,11 @@ void GDrivePathCache::EvictPathsLocked() {
 	SetGlobalPathCacheEntries(entries.size());
 }
 
-bool GDrivePathCache::TryGet(const CacheKey &key, DriveFileMeta &out) {
+bool GDrivePathCache::TryGet(const CacheKey &key, DriveFileMeta &out, bool *fresh_in_query) {
 	lock_guard<mutex> guard(lock);
+	if (fresh_in_query) {
+		*fresh_in_query = false;
+	}
 	auto it = entries.find(key.ToString());
 	if (it == entries.end()) {
 		IncrementGlobalCacheMiss();
@@ -74,13 +93,38 @@ bool GDrivePathCache::TryGet(const CacheKey &key, DriveFileMeta &out) {
 	}
 	it->second.used_at = ++path_clock;
 	out = it->second.meta;
+	// Fresh only within the generation it was listed in.
+	//
+	// Two generation values are deliberately never fresh, because both are
+	// SHARED rather than unique to one query, and freshness reasoning depends
+	// entirely on the number identifying exactly one query:
+	//
+	//   0                 "no query context" (see BeginQuery). Two unscoped
+	//                     opens would otherwise each conclude the other's
+	//                     entry was current.
+	//   MAXIMUM_QUERY_ID  DuckDB's sentinel for "this transaction has no query
+	//                     running" (TransactionContext::ResetActiveQuery). It
+	//                     is a constant, so every context between statements
+	//                     reports the same value.
+	//
+	// Ordinary query numbers cannot collide: they come from an atomic counter
+	// on DatabaseManager, and this filesystem -- and therefore this cache --
+	// is registered per DatabaseInstance, so every ClientContext sharing this
+	// cache also shares that counter.
+	if (fresh_in_query) {
+		*fresh_in_query = t_query_generation != 0 && t_query_generation != MAXIMUM_QUERY_ID &&
+		                  it->second.fresh_generation == t_query_generation;
+	}
 	IncrementGlobalCacheHit();
 	return true;
 }
 
 void GDrivePathCache::Put(const CacheKey &key, const DriveFileMeta &meta) {
 	lock_guard<mutex> guard(lock);
-	entries[key.ToString()] = PathEntry {meta, ++path_clock};
+	// Every Put comes from a live files.list (or a files.get on the root), so
+	// the entry is current as of this query -- stamp it, and let TryGet decide
+	// later whether that stamp is still the query we are in.
+	entries[key.ToString()] = PathEntry {meta, ++path_clock, t_query_generation};
 	EvictPathsLocked();
 	SetGlobalPathCacheEntries(entries.size());
 }
@@ -107,6 +151,9 @@ std::string MetadataKey(const CacheKey &identity, const std::string &file_id) {
 } // namespace
 
 void GDrivePathCache::BeginQuery(idx_t generation) {
+	// Recorded per thread as well as shared: see t_query_generation above for
+	// why the shared value cannot answer "is this entry from MY query".
+	t_query_generation = generation;
 	lock_guard<mutex> guard(lock);
 	if (generation != metadata_generation) {
 		// A new query revalidates. Everything cached for the previous one is

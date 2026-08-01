@@ -431,6 +431,27 @@ class Drive:
         )
         return self._ok(resp, "upload")["id"]
 
+    def update_content(self, file_id: str, content: bytes,
+                       mime: str = "application/octet-stream") -> str:
+        """Overwrite a file's bytes IN PLACE. Returns the new headRevisionId.
+
+        The file id is unchanged -- which is the whole point. This is the
+        mutation that `gdrive_immutable_prefixes` trades away the ability to
+        detect: a delete-and-recreate gives a new id and shows up as a 404,
+        but an in-place overwrite leaves the id valid, so there is nothing for
+        the extension to notice. Drive offers neither an ETag nor a working
+        If-Match to check against (verified 2026-08-01), so a test is the only
+        way to pin the resulting behaviour.
+        """
+        resp = self._request(
+            "PATCH", f"{UPLOAD_V3}/files/{file_id}", "files.update.upload",
+            params={"uploadType": "media", "fields": "id,headRevisionId,size",
+                    "supportsAllDrives": "true"},
+            data=content, headers={"Content-Type": mime},
+            timeout=self._transfer_timeout(len(content)),
+        )
+        return self._ok(resp, "update_content")["headRevisionId"]
+
     #: Source content type to upload for each native target. Drive decides
     #: what to convert INTO from the source type as much as from the target,
     #: so uploading text/csv and asking for a Doc silently produces a SHEET.

@@ -101,5 +101,21 @@ GDriveUriParse ParseGDriveUri(const std::string &uri);
 //! unaffected by this helper and keeps rejecting all id:+segments shapes.
 bool IsFileIdFallbackGlobProbe(const std::string &uri);
 
+//! True if `path` lies at or under one of the comma-separated prefixes in
+//! `csv_prefixes`. Used by the `gdrive_immutable_prefixes` setting.
+//!
+//! Matching is on whole path SEGMENTS, never on characters: the prefix
+//! `gdrive://lake` matches `gdrive://lake` and `gdrive://lake/data/x.parquet`
+//! but NOT `gdrive://lakehouse/x.parquet`. A plain `starts_with` would match
+//! the last one, and since the setting suppresses a freshness check, a
+//! neighbouring directory silently inheriting "assume immutable" is a
+//! correctness bug, not a cosmetic one.
+//!
+//! A trailing slash on a prefix is insignificant, entries are trimmed, and
+//! empty entries are ignored -- so `"a/, ,b"` is the two prefixes `a` and `b`.
+//! An empty `csv_prefixes` matches nothing, which is the default and means the
+//! feature is off.
+bool PathMatchesAnyPrefix(const std::string &path, const std::string &csv_prefixes);
+
 } // namespace gdrive
 } // namespace duckdb

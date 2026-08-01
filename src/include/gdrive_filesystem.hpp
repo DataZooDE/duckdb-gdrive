@@ -125,7 +125,16 @@ private:
 class GDrivePathCache {
 public:
 	//! Look up a fully-resolved path. Returns false on a miss.
-	bool TryGet(const CacheKey &key, DriveFileMeta &out);
+	//!
+	//! `fresh_in_query`, when non-null, reports whether the entry was stored by
+	//! a live files.list during the CURRENT query. That matters because
+	//! files.list returns the same size and headRevisionId that files.get
+	//! would, so an entry put this query needs no refresh -- and DuckDB's
+	//! multi-file reader globs a path before opening it, which means the
+	//! common case is a cache HIT on an entry that is nonetheless brand new.
+	//! Without this flag that hit is indistinguishable from one left over from
+	//! a previous query, and the redundant files.get is paid anyway.
+	bool TryGet(const CacheKey &key, DriveFileMeta &out, bool *fresh_in_query = nullptr);
 	void Put(const CacheKey &key, const DriveFileMeta &meta);
 	//! Drop `key` and everything beneath it, within the SAME identity. A
 	//! rename or delete invalidates every descendant path, but must not
@@ -196,6 +205,11 @@ private:
 	struct PathEntry {
 		DriveFileMeta meta;
 		uint64_t used_at = 0;
+		//! Query generation during which this entry was stored from a live
+		//! files.list. 0 means "stored with no query context", which is never
+		//! treated as fresh -- an entry we cannot scope is one we cannot make
+		//! claims about.
+		idx_t fresh_generation = 0;
 	};
 	unordered_map<std::string, PathEntry> entries;
 	idx_t max_entries = 0;
@@ -335,6 +349,13 @@ private:
 	//! Takes the base handle: GDriveFileHandleImpl lives in the private
 	//! gdrive_internal.hpp, which this public contract must not depend on.
 	bool TryRecoverStaleHandle(GDriveFileHandle &handle);
+
+	//! The block-cache read strategy, split out so Read() can wrap it in a
+	//! single stale-id retry. Sets `not_found` when a fetch failed
+	//! specifically with NOT_FOUND, because ThrowGDriveError erases the kind
+	//! into a DuckDB exception type and the caller must not match on text.
+	//! Base handle for the same reason as above.
+	void ReadViaBlockCache(GDriveFileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location, bool &not_found);
 };
 
 } // namespace gdrive
