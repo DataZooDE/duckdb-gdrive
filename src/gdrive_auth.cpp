@@ -19,6 +19,33 @@
 //
 // REQ-NF-03: no path in this file ever puts a token, a client secret, or key
 // material into an exception message.
+// ---------------------------------------------------------------------------
+// THESE DEFINES MUST COME BEFORE EVERY #include IN THIS FILE.
+//
+// NOMINMAX suppresses windows.h's min/max macros, which otherwise break every
+// later std::min / std::max. It only works if it is defined before ANYTHING
+// pulls windows.h in -- and several headers below do, transitively:
+// datazoo/oauth2/oauth2_flow_v2.hpp -> http_client.hpp -> httplib.hpp ->
+// windows.h. Putting these defines after those includes leaves them with no
+// effect at all, silently, on Windows only.
+//
+// That is not hypothetical. Adding the datazoo-oauth2 includes ABOVE this
+// block broke the Windows v1.4.5 LTS build while every other job in the
+// matrix passed, and while the same library built cleanly on Windows inside
+// erpl-web -- whose sources do not define NOMINMAX after including it.
+//
+// Same class of ordering trap as PICOJSON_USE_INT64 (see CMakeLists.txt): a
+// macro that must be set before a header's first inclusion, whose failure
+// mode is silence rather than an error.
+// ---------------------------------------------------------------------------
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#endif
+
+#define CPPHTTPLIB_OPENSSL_SUPPORT
+
 #include "gdrive_adc.hpp"
 #include "gdrive_auth.hpp"
 #include "gdrive_oauth_params.hpp"
@@ -34,14 +61,6 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 
-// Windows headers define min/max macros that conflict with C++ std:: functions.
-#ifdef _WIN32
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#endif
-
-#define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "httplib.hpp"
 
 #include <cstdint>

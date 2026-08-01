@@ -6,11 +6,12 @@
 // construction is pure and unit-tested; signing needs OpenSSL and the token
 // POST needs a socket, so both live here, exercised only by live SQL tests
 // (CLAUDE.md, decision D-1 -- no mocks).
-#include "gdrive_service_account.hpp"
-
-#include "duckdb/common/exception.hpp"
-
-// Windows headers define min/max macros that conflict with C++ std:: functions.
+// NOMINMAX must precede every include: it only suppresses windows.h's min/max
+// macros if nothing has pulled windows.h in yet, and its failure mode is
+// silence on Windows only. Neither header below reaches windows.h today, so
+// this was working -- but it was working by luck, and the same ordering in
+// gdrive_auth.cpp stopped working the moment a header that does was added
+// above it. Hoisted so luck is not load-bearing.
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -18,6 +19,11 @@
 #endif
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
+
+#include "gdrive_service_account.hpp"
+
+#include "duckdb/common/exception.hpp"
+
 #include "httplib.hpp"
 
 #include <jwt-cpp/traits/kazuho-picojson/defaults.h>
