@@ -803,8 +803,13 @@ reported 43 agreements while executing zero tests.
 
 All measurements are against the live Google Drive API; there is no fake Drive
 server and no HTTP replay layer anywhere in this work. Hardware, region and
-network: \todonum{machine, link, region}. DuckDB \todonum{version}, extension
-\todonum{version}. The corpus for the single-file experiments is one 87\,MB
+network: AMD Ryzen 9 3950X, 16 cores / 32 threads, 125\,GiB RAM, Linux 6.18,
+on a 485\,Mbit/s domestic link in northern Germany. DuckDB v1.5.5, extension
+v2026.08.01. The link matters: it is fast enough that none of the results
+below are bandwidth-bound --- the 87\,MB fixture would cross it in 1.4\,s at
+line rate --- but it is not a datacentre, so absolute latencies would be lower
+from a cloud VM. The comparisons are all same-machine, same-session, so the
+link cancels. The corpus for the single-file experiments is one 87\,MB
 zstd-compressed Parquet file, 2\,000\,000 rows $\times$ 6 columns, byte-identical
 across every storage backend and verified by checksum against the Drive copy.
 
@@ -1006,51 +1011,52 @@ in CI.
 \subsection{Cold Single-File Scan}
 
 \begin{table}[t]
-\caption{Cold scan of the same 87\,MB Parquet file (byte-identical in every
-backend), three columns aggregated, nine repeats. \textbf{The two sessions are
-reported separately and ratios never cross them}, because the object-store
-denominator moves more between sessions than the effects being measured.}
+\caption{Cold scan of the same 87\,MB Parquet file, byte-identical in every
+backend, three columns aggregated. Nine repeats, \textbf{all cloud legs in one
+session}. Ratios are against the GCS minimum. Download-then-query was measured
+separately, three repeats on the same machine within the hour.}
 \label{tab:coldscan}
 \small
 \begin{tabular}{lrrr}
 \toprule
-Backend & min & median & vs.\ object store \\
+Backend & min & median & vs.\ GCS \\
 \midrule
-\multicolumn{4}{l}{\emph{Session A --- GCS denominator}} \\
-Local disk                          & 0.12\,s & 0.13\,s & 0.09$\times$ \\
-\texttt{gs://} (europe-west3)       & 1.34\,s & 1.65\,s & 1.00$\times$ \\
-\texttt{gdrive://}, defaults        & 4.09\,s & 4.67\,s & \textbf{3.05$\times$} \\
-\texttt{gdrive://}, 128\,MiB blocks & 2.70\,s & 2.93\,s & \textbf{2.02$\times$} \\
+Local disk                          & 0.11\,s & 0.12\,s & 0.08$\times$ \\
+\texttt{s3://} (eu-central-1)       & 0.97\,s & 1.42\,s & 0.72$\times$ \\
+\texttt{gs://} (europe-west3)       & 1.35\,s & 1.55\,s & 1.00$\times$ \\
+\texttt{gdrive://}, defaults        & 3.93\,s & 5.34\,s & \textbf{2.91$\times$} \\
+\texttt{gdrive://}, 128\,MiB blocks & 2.60\,s & 5.28\,s & \textbf{1.93$\times$} \\
 \addlinespace
-\multicolumn{4}{l}{\emph{Session B --- S3 denominator}} \\
-Local disk                          & 0.13\,s & 0.14\,s & 0.12$\times$ \\
-\texttt{s3://} (eu-central-1)       & 1.11\,s & 1.24\,s & 1.00$\times$ \\
-\texttt{gdrive://}, defaults        & 3.86\,s & 4.48\,s & \textbf{3.48$\times$} \\
-\texttt{gdrive://}, 128\,MiB blocks & 2.58\,s & 2.75\,s & \textbf{2.32$\times$} \\
-\addlinespace
-Download, then query locally        & \todonum{} & \todonum{} & \todonum{} \\
+Download, then query locally        & 6.14\,s & 9.70\,s & 4.55$\times$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 Table~\ref{tab:coldscan} gives the headline result: roughly 3$\times$ object
-storage at the defaults, 2$\times$ tuned, against roughly 30$\times$ for a local
-file. We set ourselves a 3$\times$ gate before measuring, and against GCS the
-default configuration sits \emph{on} it --- 3.05$\times$ on minima, 2.83$\times$
-on medians. Calling that a clean pass or a clean fail would both overstate what
-was measured.
+storage at the defaults, 2$\times$ tuned, and 36$\times$ a local file. The
+workflow this replaces --- fetch the bytes, then scan them --- is slower than
+querying in place, which is the practical case for the extension and the only
+row here that is not a cost.
 
-\textbf{The denominator is the least stable number in the table.} Against S3 in
-Frankfurt the same extension, on the same file, measures 3.48$\times$ rather
-than 3.05$\times$ --- not because anything got slower, but because S3 answered
-in 1.11\,s where GCS took 1.34\,s. The Drive numbers agree closely across the
-two sessions (3.86 vs 4.09\,s, within the 9\% run-to-run spread we see on that
-leg); the object stores do not. This is the same effect that made an earlier
-three-repeat protocol report PASS once and FAIL three times on identical code,
-so we report two labelled sessions rather than one merged table with a single
-ratio. A paper that quoted ``2$\times$ object storage'' by pairing the best
-Drive run with the slowest denominator would not be wrong about any individual
-measurement, and would still be misleading.
+\textbf{Do not read the 2.91$\times$ as an improvement.} We set a 3$\times$ gate
+before measuring, and this run passes it where an earlier one recorded
+3.05$\times$. Nothing in the extension got faster between them: the benchmark
+addresses its fixture through the \texttt{gdrive://id:} form, which skips path
+resolution entirely, so none of Section~\ref{sec:evalrefresh}'s work touches
+this number. The denominator moved. GCS answered in 1.35\,s here and 1.34\,s
+there, which is not the difference; the Drive leg drifted from 4.09\,s to
+3.93\,s, well inside its own run-to-run spread. The verdict changed, the system
+did not.
+
+\textbf{The denominator is the least stable number in the table.} S3 in
+Frankfurt answers the same request in 0.97\,s against GCS's 1.35\,s --- a 39\%
+gap between two object stores in the same city, measured minutes apart. Quoted
+against S3 the extension is 4.05$\times$ rather than 2.91$\times$, and the gate
+would fail. We report GCS because that is the denominator the gate was written
+against, not because it is the flattering one; had we chosen after seeing the
+data, the number would deserve no trust at all. The medians tell the same
+story less kindly: at 5.34\,s the Drive leg's median is 3.4$\times$ the GCS
+median, because Drive's spread is wide and one slow request moves a whole run.
 
 \subsection{Block-Size Sensitivity}
 
@@ -1120,68 +1126,86 @@ that combination is documented rather than defaulted.
 
 \begin{table}[t]
 \caption{DuckLake with its \texttt{DATA\_PATH} on each backend and its catalog
-local in all three. Wall-clock and storage API calls per operation.}
+local in all three. Minimum of three runs, each operation in a fresh process
+against a persistent catalog. 200\,000 rows, then a 50\,000-row append.}
 \label{tab:ducklake}
 \small
-\begin{tabular}{lrrrrrr}
+\begin{tabular}{lrrrr}
 \toprule
-& \multicolumn{2}{c}{\texttt{s3://}} & \multicolumn{2}{c}{\texttt{gs://}} & \multicolumn{2}{c}{\texttt{gdrive://}} \\
-\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}
-Operation & s & calls & s & calls & s & calls \\
+Operation & \texttt{s3://} & \texttt{gs://} & \texttt{gdrive://} & vs.\ GCS \\
 \midrule
-\texttt{CREATE TABLE AS}  & \todonum{} & \todonum{} & \todonum{} & \todonum{} & \todonum{} & \todonum{} \\
-\texttt{INSERT} (append)  & \todonum{} & \todonum{} & \todonum{} & \todonum{} & \todonum{} & \todonum{} \\
-\texttt{DELETE}           & \todonum{} & \todonum{} & \todonum{} & \todonum{} & \todonum{} & \todonum{} \\
-Scan, cold                & \todonum{} & \todonum{} & \todonum{} & \todonum{} & \todonum{} & \todonum{} \\
-Time-travel read          & \todonum{} & \todonum{} & \todonum{} & \todonum{} & \todonum{} & \todonum{} \\
-Compaction                & \todonum{} & \todonum{} & \todonum{} & \todonum{} & \todonum{} & \todonum{} \\
+\texttt{CREATE TABLE AS} & 1.51\,s & 1.55\,s & 7.80\,s & 5.0$\times$ \\
+\texttt{INSERT} (append) & 0.59\,s & 0.66\,s & 3.54\,s & 5.4$\times$ \\
+\texttt{DELETE}          & 0.68\,s & 1.03\,s & 6.39\,s & 6.2$\times$ \\
+Scan, cold               & 0.61\,s & 0.92\,s & 3.70\,s & 4.0$\times$ \\
+Time-travel read         & 0.24\,s & 0.25\,s & 2.61\,s & \textbf{10.4$\times$} \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 Table~\ref{tab:ducklake} is the experiment the rest of the paper exists to
-support. The workload is the one already encoded in our live suite: create a
-table of 20\,000 rows, append 5\,000, delete a seventh of them, read the
-pre-append snapshot by version, and compact. The catalog is a local DuckDB file
-in all three configurations; only the data path moves. That is the supported
-shape, and it is the shape Section~\ref{sec:thesis} argues for.
+support, and it is less flattering than Table~\ref{tab:coldscan}. A single
+large scan runs at 2.9$\times$ GCS; a lakehouse workload runs at 4--10$\times$.
 
-Reporting API calls alongside wall-clock is what makes the table diagnostic
-rather than merely comparative. Where Drive is slower, the count says whether
-the cause is per-request latency or a request pattern we could improve.
+The spread across operations is the finding. The cheapest operation on an
+object store is the most expensive here in relative terms: a time-travel read
+costs 0.25\,s on GCS and 2.61\,s on Drive, \textbf{10.4$\times$}. That query
+reads almost no data --- it resolves a snapshot and reads one small file --- so
+it is nearly pure metadata, and metadata is exactly where Drive is weakest.
+The full scan, which moves the most bytes, has the \emph{best} ratio at
+4.0$\times$. Drive's penalty is not proportional to data volume; it is
+proportional to how many things you have to look up, which is the same
+conclusion Figure~\ref{fig:flame} reached from a different direction.
 
-\subsection{The Effect of DuckLake's Local Cache}
+\textbf{Two object stores, one city, 39\% apart.} S3 and GCS are both in
+Frankfurt and differ by more than a third on several rows. That is worth
+stating because it bounds how precisely any of these ratios can be read: the
+gap between the two \emph{baselines} is a substantial fraction of the effects
+being measured on them.
 
-DuckLake caches immutable data files locally. Because Drive's per-request floor
-is three orders of magnitude above an object store's, we expect that cache to
-be worth disproportionately more on Drive than on S3 or GCS ---
-Table~\ref{tab:dlcache} tests it. The quantity of interest is not the speed-up
-on each backend but the \emph{ratio of speed-ups}: if caching narrows the
-Drive-versus-S3 gap by more than it narrows any other gap, then the practical
-advice for a Drive-backed lakehouse is different from the advice for an
-object-store-backed one, and that is the most directly actionable result this
-paper can produce.
+\subsection{DuckLake's Caching Model}
+
+DuckLake, at the version measured here, \textbf{exposes no local data-file
+cache of its own}. Enumerating \texttt{duckdb\_settings()} against
+\texttt{ducklake} \texttt{d8a1881e} returns retry and inlining knobs and
+nothing about caching data files. The relevant control is DuckDB core's
+\texttt{enable\_external\_file\_cache}, an \emph{in-memory} cache of external
+file data, on by default; the separate \texttt{duckdb-diskcache} extension is
+a different mechanism that we did not measure.
+
+We expected this to matter disproportionately on Drive, because a cache is
+worth more when a miss costs 1.2\,s than when it costs milliseconds. It does
+not matter at all:
 
 \begin{table}[t]
-\caption{DuckLake scan with its local file cache disabled and enabled.}
+\caption{Cold scan with \texttt{enable\_external\_file\_cache} on and off,
+minimum of three runs.}
 \label{tab:dlcache}
 \small
 \begin{tabular}{lrrr}
 \toprule
-Backend & cache off & cache on & speed-up \\
+Backend & cache on & cache off & difference \\
 \midrule
-\texttt{s3://}     & \todonum{} & \todonum{} & \todonum{} \\
-\texttt{gs://}     & \todonum{} & \todonum{} & \todonum{} \\
-\texttt{gdrive://} & \todonum{} & \todonum{} & \todonum{} \\
+\texttt{s3://}     & 0.61\,s & 0.59\,s & $-$0.02\,s \\
+\texttt{gs://}     & 0.92\,s & 0.91\,s & $-$0.01\,s \\
+\texttt{gdrive://} & 3.70\,s & 3.62\,s & $-$0.08\,s \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The exact option names governing this cache are pinned to the DuckLake version
-under test and are enumerated from \texttt{duckdb\_settings()} rather than
-quoted from documentation, since the caching surface has changed between
-releases and a separate disk-cache extension exists that must not be conflated
-with it. \todonum{pin the DuckLake version and its cache settings}
+Every difference is negative and smaller than the run-to-run spread --- the
+cache is not merely unhelpful here, it is invisible. The reason is structural
+rather than a property of Drive: the cache lives in memory, and every
+measurement starts a fresh process. A cold query cannot hit an in-memory cache
+that no longer exists. Our hypothesis was wrong for a reason we should have
+seen before measuring, and it holds equally for all three backends.
+
+This matters for advice. On Drive the expensive thing is the \emph{first}
+access from a new process, and an in-memory cache never helps that. Only a
+cache that survives the process --- on disk, or a long-lived server holding the
+connection and the resolved ids --- would move these numbers. That is the shape
+of the remaining headroom, and it is not something the storage layer can supply
+on its own.
 
 \subsection{Write Path and Concurrency}
 
@@ -1195,29 +1219,47 @@ regression that produced 19 metadata calls for one query before those caches
 existed.
 
 \begin{table}[t]
-\caption{Write path.}
+\caption{Write path, minimum of three cold runs. Sizes are the uncompressed
+row payload; Parquet compresses, so the effective rate is what the user waits
+for, not a disk figure.}
 \label{tab:writes}
 \small
 \begin{tabular}{lrr}
 \toprule
-Operation & time & effective MB/s \\
+Operation & min & median \\
 \midrule
-Upload 1\,MiB           & \todonum{} & \todonum{} \\
-Upload 16\,MiB          & \todonum{} & \todonum{} \\
-Upload 128\,MiB         & \todonum{} & \todonum{} \\
-Create one folder       & \todonum{} & --- \\
-DuckLake commit (append)& \todonum{} & --- \\
+Upload 1\,MiB                & 3.99\,s  & 5.42\,s \\
+Upload 16\,MiB               & 10.01\,s & 12.18\,s \\
+Upload 128\,MiB              & 63.95\,s & 66.39\,s \\
+Create one folder + tiny file & 3.69\,s  & 5.08\,s \\
 \bottomrule
 \end{tabular}
 \end{table}
 
+Writes behave unlike reads. A ranged read costs the same whatever its length;
+an upload does not. Between 1\,MiB and 128\,MiB the time grows roughly with
+size --- 16$\times$ the bytes for 16$\times$ the time from 16 to 128\,MiB ---
+so uploads are bandwidth-bound where reads are latency-bound. The fixed cost
+is still large: 3.99\,s to move one mebibyte, and 3.69\,s to create a folder
+and a file of a few dozen bytes. Below roughly 16\,MiB an upload is mostly
+overhead.
+
+That asymmetry has a practical consequence for a lakehouse on Drive, and it
+runs opposite to the usual advice. On an object store, many small files are
+the pathology. Here the per-request floor makes small writes disproportionately
+expensive while large ones stream at a reasonable rate, so a writer should
+prefer fewer, larger data files --- which is also what makes the reads cheap
+(Section~\ref{sec:evalrefresh}).
+
 \begin{figure}[t]
 \centering
-\fbox{\parbox[c][3.6cm][c]{0.92\columnwidth}{\centering
-\todonum{Figure~\ref{fig:threads}: scan wall-clock and total Drive API calls
-against \texttt{SET threads} $\in \{1,4,8,16,32\}$, two y-axes. Produced by
-\texttt{bench.py --threads-sweep}, reading \texttt{gdrive\_stats()}.}}}
-\caption{Thread scaling. Time should fall; request count should not rise.}
+\input{fig_threads}
+\caption{Thread scaling, minimum of three cold runs. Wall-clock (solid, left
+axis) falls from 9.10\,s to 4.18\,s; Drive API calls (dashed, right axis) stay
+at eight. The flat line is the assertion: decompression parallelises, and the
+single-flight caches keep the request count independent of thread count. Before
+those caches existed the same sweep produced 3, 6 and 19 metadata calls at 1, 4
+and 32 threads.}
 \label{fig:threads}
 \end{figure}
 

@@ -1,0 +1,23 @@
+% GENERATED from data/bench_paper.json -- do not edit by hand.
+\begin{tikzpicture}
+\begin{axis}[
+  width=0.80\columnwidth, height=4.6cm,
+  xlabel={\texttt{SET threads}}, ylabel={scan (s)},
+  xmode=log, log basis x=2, xtick={1,4,8,16,32}, xticklabels={1,4,8,16,32},
+  ymin=0, ymax=10, xlabel near ticks, ylabel near ticks,
+  tick label style={font=\scriptsize}, label style={font=\scriptsize},
+  axis y line*=left, axis x line*=bottom,
+]
+\addplot[mark=*, thick, blue!60] coordinates {(1,9.1) (4,6.33) (8,5.27) (16,4.53) (32,4.18)};
+\end{axis}
+\begin{axis}[
+  width=0.80\columnwidth, height=4.6cm,
+  xmode=log, log basis x=2, xtick=\empty,
+  ymin=0, ymax=16, ylabel={Drive API calls},
+  axis y line*=right, axis x line=none,
+  tick label style={font=\scriptsize}, label style={font=\scriptsize},
+  ylabel near ticks,
+]
+\addplot[mark=square, thick, orange!85, dashed] coordinates {(1,8) (4,8) (8,8) (16,8) (32,8)};
+\end{axis}
+\end{tikzpicture}
