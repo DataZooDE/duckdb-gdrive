@@ -61,8 +61,14 @@ bool RemoveOne(FileSystem &fs, const string &path) {
 		if (ConfirmedAbsent(fs, path)) {
 			return false;
 		}
-		// Reachable, and not a file: a directory, or something FileExists
-		// declined for a reason of its own. Deleting is not the answer.
+		// Reachable, and not a file. Almost always a directory -- say so,
+		// because "cannot be removed" without a reason sends people looking
+		// for a permissions problem.
+		if (fs.DirectoryExists(path)) {
+			throw IOException("gdrive: '%s' is a directory, not a file; remove_file does not remove "
+			                  "directories",
+			                  path);
+		}
 		throw IOException("gdrive: '%s' exists but is not a removable file", path);
 	}
 	fs.RemoveFile(path);
@@ -189,6 +195,9 @@ void FileSizeScalar(DataChunk &args, ExpressionState &state, Vector &result) {
 			    if (ConfirmedAbsent(fs, p)) {
 				    mask.SetInvalid(idx);
 				    return 0;
+			    }
+			    if (fs.DirectoryExists(p)) {
+				    throw IOException("gdrive: '%s' is a directory, not a file; it has no byte size", p);
 			    }
 			    throw IOException("gdrive: '%s' exists but its size cannot be read as a file", p);
 		    }
