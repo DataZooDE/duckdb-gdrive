@@ -506,6 +506,29 @@ GDriveAuthContext BuildContextFromCredentialChain(ClientContext &context, const 
 		                             secret_name.c_str(), adc_path.c_str(), parsed.error.c_str());
 	}
 
+	// Checked before a token is minted, not on the first Drive call.
+	//
+	// Drive refuses a user credential that names no quota project outright,
+	// and its message -- "the drive.googleapis.com API requires a quota
+	// project, which is not set by default" -- arrives attached to whatever
+	// query the user happened to run. It then reads as a problem with that
+	// query, or with that file, rather than with a credential a gcloud command
+	// wrote days earlier. Refusing here names the file and the fix, and avoids
+	// minting a token that could not have worked.
+	//
+	// AUTHORIZED_USER only: a service account carries its own project
+	// association, and sending it an x-goog-user-project it lacks
+	// serviceusage permission on turns a working call into a 403.
+	if (parsed.kind == AdcKind::AUTHORIZED_USER && parsed.user.quota_project_id.empty()) {
+		throw IOException(
+		    "gdrive secret '%s': the credentials at '%s' name no quota project, and Drive refuses a "
+		    "user credential without one. Set it with:\n"
+		    "  gcloud auth application-default set-quota-project <PROJECT_ID>\n"
+		    "or use a service-account key, which carries its own project association\n"
+		    "  CREATE SECRET (TYPE gdrive, PROVIDER service_account, KEY_FILE '/path/to/key.json');",
+		    secret_name.c_str(), adc_path.c_str());
+	}
+
 	auto make_ctx = [&](const std::string &access_token) {
 		GDriveAuthContext ctx;
 		ctx.access_token = access_token;
