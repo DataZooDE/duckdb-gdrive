@@ -391,6 +391,21 @@ guard rail on an existing credential. If you need a genuinely read-only
 credential, grant only the read-only scope during consent, or use a
 service-account key whose assertion names the scope on every mint.
 
+**Concurrent writers create duplicates — of files *and* of directories.**
+Drive has no atomic create-if-absent, so every create is check-then-act: the
+writers all look, all see nothing, and all create. This applies to a shared
+output *directory* just as much as to a file, and the writers report success.
+Measured 2026-08-02: three parallel `COPY … TO
+'gdrive://out/shared/dir/fN.csv'` produced **three folders named `out`**, after
+which the whole subtree was unaddressable by path.
+
+The extension adopts a folder another writer created if it sees one, which
+narrows the window, but it cannot close it — nothing in the Drive API can.
+**Do not point concurrent writers at one directory tree.** Give each writer its
+own top-level prefix, or serialise the creation of the shared parents before
+fanning out. A table format does the former by construction, which is why
+DuckLake is unaffected.
+
 **Two concurrent writers to the SAME path will poison it.** Drive has no
 atomic create-if-absent, so the write path is check-then-act: both writers list
 the destination, both see nothing, both create. The result is two files with

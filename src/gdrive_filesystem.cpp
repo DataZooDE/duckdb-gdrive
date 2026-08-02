@@ -434,17 +434,20 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 						// file id, which it rejects with "The specified parent
 						// is not a folder": loud, but Drive's phrasing, and it
 						// names neither the offending segment nor the fix.
-						// Same diagnosis as the uncached path below.
+						//
+						// Do NOT throw straight from the cached value: the entry
+						// may predate someone replacing that file with a folder,
+						// and refusing a write on stale evidence is its own bug.
+						// Drop the entry and fall through to the live check
+						// below, which re-lists and reaches the right answer
+						// either way. Only ever taken on the collision path, so
+						// the extra round trip is not on any hot path.
 						if (!cached.IsFolder()) {
-							throw IOException(
-							    "gdrive: cannot create directory '%s' under '%s': a file of that name "
-							    "already exists. Creating a folder beside it would leave two entries "
-							    "with one name, which Drive allows and which would make both "
-							    "unaddressable by path.",
-							    segment, path);
+							cache.InvalidatePrefix(key);
+						} else {
+							parent_id = cached.id;
+							continue;
 						}
-						parent_id = cached.id;
-						continue;
 					}
 					auto matches = ListByName(*client, parent_id, segment, /*require_folder=*/true, path);
 					if (matches.size() > 1) {
@@ -469,13 +472,28 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 					// The extra listing is paid only for the FIRST missing
 					// segment: once one is created, parent_is_new short-
 					// circuits the rest of the chain (O-2).
-					auto non_folder = ListByName(*client, parent_id, segment, /*require_folder=*/false, path);
-					if (!non_folder.empty()) {
+					auto any_kind = ListByName(*client, parent_id, segment, /*require_folder=*/false, path);
+					// This listing is unfiltered, so it can also turn up a
+					// FOLDER that another writer created between the two calls.
+					// Adopt it: that is the outcome we wanted anyway, and
+					// reporting "a file of that name already exists" for a
+					// folder would be simply untrue.
+					const DriveFileMeta *existing_folder = nullptr;
+					const DriveFileMeta *existing_file = nullptr;
+					for (const auto &m : any_kind) {
+						(m.IsFolder() ? existing_folder : existing_file) = &m;
+					}
+					if (existing_file) {
 						throw IOException(
 						    "gdrive: cannot create directory '%s' under '%s': a file of that name already "
 						    "exists. Creating a folder beside it would leave two entries with one name, "
 						    "which Drive allows and which would make both unaddressable by path.",
 						    segment, path);
+					}
+					if (existing_folder) {
+						cache.Put(key, *existing_folder);
+						parent_id = existing_folder->id;
+						continue;
 					}
 					// Missing entirely. Fall through and create -- and remember,
 					// so the rest of the chain skips its probes.

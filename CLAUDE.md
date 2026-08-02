@@ -424,6 +424,15 @@ touches its own subtrees and nothing else. Note also that anything appended to
 block drops the delegated-user secret and runs as an identity with no Drive
 storage quota, so a write after it cannot succeed.
 
+**Concurrent directory creation duplicates too, not just files.** Three
+parallel `COPY` calls into one new subtree produced three copies of the
+top-level folder, and every writer reported success. `OpenFile`'s mkdir walk
+now adopts a folder another writer created if its second listing sees one,
+which narrows the window; it cannot close it, because Drive has no atomic
+create-if-absent. A create-then-reconcile (delete the losing duplicates) was
+considered and rejected: another writer may already have written into the one
+you would delete. Documented as a limitation instead.
+
 **Releasing:** follow `docs/RELEASE.md`. The community-extensions repo builds
 from a tagged commit and runs none of our live tests, so whatever is broken
 at tag time ships.
