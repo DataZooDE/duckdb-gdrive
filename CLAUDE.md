@@ -433,6 +433,14 @@ create-if-absent. A create-then-reconcile (delete the losing duplicates) was
 considered and rejected: another writer may already have written into the one
 you would delete. Documented as a limitation instead.
 
+**A live test must not assert on the whole Shared Drive.** `test_harness.py`
+snapshotted every child of `/scratch` and required the set to be unchanged
+across a create-and-delete. That is not a property of teardown; it is a
+property of nobody else being busy, and the Drive is shared by CI, the nightly
+sweep and any developer running the live suite. It went red in CI on
+2026-08-02 while a local drill happened to be writing scratch folders. Assert
+about the object the test itself created.
+
 **Releasing:** follow `docs/RELEASE.md`. The community-extensions repo builds
 from a tagged commit and runs none of our live tests, so whatever is broken
 at tag time ships.
