@@ -1,0 +1,207 @@
+# name: test/sql/vfs_functions.test
+# description: remove_file() / move_file() -- the two FileSystem operations
+# that SQL never got. Exercised here against the LOCAL filesystem, which is
+# the point: both resolve through FileSystem::GetFileSystem(context), the
+# virtual filesystem, so they dispatch on the path's scheme and are in no way
+# Drive-specific. Testing them on local paths proves the generic contract
+# without needing a credential or a network. The gdrive:// dispatch of the
+# same two functions is covered in test/sql/live/.
+# group: [sql]
+
+require gdrive
+
+# ---------------------------------------------------------------------------
+# Setup: a real file to operate on, written through the ordinary COPY path.
+# ---------------------------------------------------------------------------
+statement ok
+COPY (SELECT 42 AS x) TO '__TEST_DIR__/vfs_a.csv';
+
+query I
+SELECT count(*) FROM glob('__TEST_DIR__/vfs_a.csv')
+----
+1
+
+# ---------------------------------------------------------------------------
+# move_file: a rename, not a copy. The source must disappear, the target must
+# appear, and the bytes must survive -- the last of which is what makes this
+# usable for write-to-temp-then-publish.
+# ---------------------------------------------------------------------------
+query I
+SELECT move_file('__TEST_DIR__/vfs_a.csv', '__TEST_DIR__/vfs_b.csv')
+----
+true
+
+query I
+SELECT count(*) FROM glob('__TEST_DIR__/vfs_a.csv')
+----
+0
+
+query I
+SELECT count(*) FROM glob('__TEST_DIR__/vfs_b.csv')
+----
+1
+
+query I
+SELECT x FROM read_csv('__TEST_DIR__/vfs_b.csv')
+----
+42
+
+# ---------------------------------------------------------------------------
+# remove_file on a file that exists: true, and it is actually gone.
+# ---------------------------------------------------------------------------
+query I
+SELECT remove_file('__TEST_DIR__/vfs_b.csv')
+----
+true
+
+query I
+SELECT count(*) FROM glob('__TEST_DIR__/vfs_b.csv')
+----
+0
+
+# ---------------------------------------------------------------------------
+# remove_file on a file that does NOT exist: false, NOT an error.
+#
+# This is the contract that matters to callers. A storage layer implementing
+# a delete-returns-not-found semantic needs to distinguish "removed" from
+# "was not there", and on a remote filesystem the second case is the common
+# one during a retry or a re-run. Surfacing it as a value rather than an
+# exception is what makes remove_file usable in that position.
+# ---------------------------------------------------------------------------
+query I
+SELECT remove_file('__TEST_DIR__/vfs_does_not_exist.csv')
+----
+false
+
+# Idempotence follows from the above: deleting twice is true then false, and
+# the second call is not an error.
+statement ok
+COPY (SELECT 1 AS x) TO '__TEST_DIR__/vfs_twice.csv';
+
+query II
+SELECT remove_file('__TEST_DIR__/vfs_twice.csv'),
+       remove_file('__TEST_DIR__/vfs_twice.csv')
+----
+true	false
+
+# ---------------------------------------------------------------------------
+# NULL propagates rather than deleting something. Worth pinning: a NULL path
+# silently coerced to '' would be a delete against the current directory.
+# ---------------------------------------------------------------------------
+query I
+SELECT remove_file(NULL)
+----
+NULL
+
+query I
+SELECT move_file(NULL, '__TEST_DIR__/vfs_x.csv')
+----
+NULL
+
+# ---------------------------------------------------------------------------
+# Set-valued input: these are ordinary scalar functions, so they vectorise
+# over a column of paths rather than needing one statement per file.
+# ---------------------------------------------------------------------------
+statement ok
+COPY (SELECT 1 AS x) TO '__TEST_DIR__/vfs_m1.csv';
+
+statement ok
+COPY (SELECT 2 AS x) TO '__TEST_DIR__/vfs_m2.csv';
+
+query I
+SELECT count(*) FROM (
+  SELECT remove_file(file) AS ok FROM glob('__TEST_DIR__/vfs_m*.csv')
+) WHERE ok
+----
+2
+
+query I
+SELECT count(*) FROM glob('__TEST_DIR__/vfs_m*.csv')
+----
+0
+
+# ---------------------------------------------------------------------------
+# move_file to a nonexistent source is an error, not a false. Only not-found
+# on REMOVE is a value; a failed rename means the caller's assumption about
+# what it was publishing was wrong, and that must not pass silently.
+# ---------------------------------------------------------------------------
+statement error
+SELECT move_file('__TEST_DIR__/vfs_absent.csv', '__TEST_DIR__/vfs_target.csv')
+----
+
+# ---------------------------------------------------------------------------
+# write_blob / read_blob: a BYTE-EXACT round trip.
+#
+# This is the pair that makes a general storage layer possible on top of the
+# VFS. Routing content through COPY ... TO (FORMAT csv) instead looks like it
+# works and does not: the CSV writer appends a trailing newline, so every
+# write grows the file by one byte and content hashing breaks.
+# ---------------------------------------------------------------------------
+query I
+SELECT write_blob('__TEST_DIR__/vfs_rt.md', '# Title
+second line
+')
+----
+20
+
+query I
+SELECT (SELECT content FROM read_blob('__TEST_DIR__/vfs_rt.md')) = '# Title
+second line
+'::BLOB
+----
+true
+
+# Overwriting with SHORTER content must truncate. FILE_CREATE (rather than
+# FILE_CREATE_NEW) would leave the tail of the previous content in place and
+# silently corrupt the file -- this is the assertion that pins that choice.
+query I
+SELECT write_blob('__TEST_DIR__/vfs_rt.md', 'short')
+----
+5
+
+query I
+SELECT (SELECT content FROM read_blob('__TEST_DIR__/vfs_rt.md')) = 'short'::BLOB
+----
+true
+
+query I
+SELECT file_size('__TEST_DIR__/vfs_rt.md')
+----
+5
+
+# Binary content, including embedded NUL bytes -- the reason the parameter is
+# BLOB and not VARCHAR.
+query I
+SELECT write_blob('__TEST_DIR__/vfs_bin.dat', '\x00\x01\x02\xFF\x00'::BLOB)
+----
+5
+
+query I
+SELECT (SELECT content FROM read_blob('__TEST_DIR__/vfs_bin.dat')) = '\x00\x01\x02\xFF\x00'::BLOB
+----
+true
+
+# An empty write is a real, zero-length file, not a no-op and not an error.
+query I
+SELECT write_blob('__TEST_DIR__/vfs_empty.md', ''::BLOB)
+----
+0
+
+query I
+SELECT file_size('__TEST_DIR__/vfs_empty.md')
+----
+0
+
+# ---------------------------------------------------------------------------
+# file_size reports metadata only, and answers NULL for absent rather than
+# raising -- same rationale as remove_file returning false.
+# ---------------------------------------------------------------------------
+query I
+SELECT file_size('__TEST_DIR__/vfs_no_such_file.md') IS NULL
+----
+true
+
+query I
+SELECT file_size(NULL) IS NULL
+----
+true

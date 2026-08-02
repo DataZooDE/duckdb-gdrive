@@ -1249,6 +1249,18 @@ vector<OpenFileInfo> GDriveFileSystem::Glob(const string &path, FileOpener *open
 			if (!MatchPath(one_pattern, full_rel_path)) {
 				continue;
 			}
+			// Folders are traversed but never RETURNED, matching what
+			// glob() does on every other filesystem: DuckDB's glob is a
+			// file-listing function feeding read_parquet/read_csv, and the
+			// local implementation yields only files. Emitting folders here
+			// made `gdrive://` the odd one out, so a caller that globbed a
+			// tree and read each hit got a folder handed to it as if it
+			// were a file. They are still listed above (recursion needs
+			// them) and still cached (path resolution needs them) -- only
+			// the result set excludes them.
+			if (meta.IsFolder()) {
+				continue;
+			}
 
 			// R-4 for listings (S-2.8): an entry is ambiguous when another
 			// listed entry shares its exact relative path (same folder, same

@@ -166,6 +166,44 @@ application-default login` writes) refreshes access tokens as it goes, and a
 > Note also that plain `gcloud auth login` is not enough — it configures the
 > CLI, not Application Default Credentials.
 
+> **On a Google Workspace account that login may be refused outright**, with
+> a browser page reading *"This app is blocked — This app tried to access
+> sensitive info in your Google Account."* Nothing is misconfigured, and the
+> extension is not involved: the refusal happens at Google's consent screen,
+> before any token exists.
+>
+> The cause is that `gcloud auth application-default login` requests the
+> scope using **gcloud's own built-in OAuth client**
+> (`764086051850-…apps.googleusercontent.com`), Drive is a *restricted*
+> scope, and a Workspace domain decides for itself which OAuth clients may
+> request restricted scopes. A domain that has not explicitly trusted the
+> Cloud SDK client blocks it. Personal Google accounts are unaffected, which
+> is why this is easy to miss until it happens to you.
+>
+> Three ways out, in rough order of least work:
+>
+> 1. **Use a service-account key** and point `GOOGLE_APPLICATION_CREDENTIALS`
+>    or `gdrive_adc_file` at it. This is still `credential_chain` — the
+>    `service_account` arm — so no SQL changes. Service accounts mint tokens
+>    via RFC 7523 with no consent screen, so restricted scopes never arise.
+>    Remember a service account can only write inside a **Shared Drive**.
+> 2. **Have a Workspace admin trust the Cloud SDK client**: admin.google.com
+>    → Security → Access and data control → API controls → *Manage app
+>    access* → Configure new app → search that client id → **Trusted**.
+>    *Limited* is not enough: it permits only unrestricted scopes. Searching
+>    by client id returns it under the name **Google Auth Library** (verified,
+>    Google-owned), not "gcloud" or "Cloud SDK" — that is the right entry.
+>    Scope it to the org unit containing the user who needs Drive.
+> 3. **Bring your own OAuth client** (type *Desktop app*, as under
+>    `authorization_code` below) and pass `gcloud auth
+>    application-default login --client-id-file=…`. That writes the same
+>    `authorized_user` document and needs no domain-wide decision.
+>
+> One more trap while you are there: each run of `application-default login`
+> **replaces** the stored credential rather than adding to it. If you need
+> Drive *and* ordinary Cloud API access from the same ADC file, ask for both
+> in a single login — `--scopes=openid,https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/drive`.
+
 Workload identity federation (`external_account`) is not supported; the
 extension names it explicitly rather than failing obscurely.
 

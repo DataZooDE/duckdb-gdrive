@@ -35,6 +35,19 @@ struct GDriveAuthContext {
 	//! The secret's name, for error messages that tell the user which
 	//! credential to fix. NEVER accompanied by the token itself.
 	std::string secret_name;
+	//! GCP project to bill Drive API quota to, sent as `x-goog-user-project`.
+	//!
+	//! Only ever set for an `authorized_user` ADC document, and REQUIRED
+	//! there: Drive refuses a user credential that names no quota project
+	//! with "the drive.googleapis.com API requires a quota project, which is
+	//! not set by default". That is a hard failure on every call, not a
+	//! billing nicety, so a `credential_chain` secret over a gcloud login is
+	//! unusable without it. `gcloud auth application-default login` writes
+	//! the project into the ADC file as `quota_project_id`.
+	//!
+	//! Empty for service accounts, which carry their own project association
+	//! and need no header.
+	std::string quota_project_id;
 };
 
 //! Resolve a secret to a usable token, refreshing transparently when expired
