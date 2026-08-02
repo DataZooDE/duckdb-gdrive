@@ -852,6 +852,24 @@ GDriveAuthContext GetAuthContext(ClientContext &context, const std::string &path
 	auto match = secret_manager.LookupSecret(transaction, path, "gdrive");
 
 	if (!match.HasMatch()) {
+		// A gdrive secret may EXIST and still not match: DuckDB's SCOPE clause
+		// restricts which paths a secret applies to, and `SCOPE` is easy to
+		// reach for when you meant `DRIVE_SCOPE`, the OAuth scope. Writing
+		// SCOPE 'https://www.googleapis.com/auth/drive' scopes the secret to
+		// paths beginning with that URL -- which no gdrive:// path does -- and
+		// the secret then matches nothing. Telling that user "no secret
+		// configured" sends them off to create a second one, which will not
+		// match either. Say what actually happened.
+		if (HasAnyGDriveSecret(context)) {
+			throw IOException(
+			    "gdrive: a gdrive secret exists, but none of them apply to '%s'.\n"
+			    "A secret's SCOPE clause limits which paths it covers. If you meant to set the "
+			    "OAuth scope, the parameter is DRIVE_SCOPE -- SCOPE is DuckDB's path filter:\n"
+			    "  CREATE SECRET g (TYPE gdrive, PROVIDER config, ACCESS_TOKEN '...',\n"
+			    "                   DRIVE_SCOPE 'https://www.googleapis.com/auth/drive');\n"
+			    "Check what is registered with: SELECT name, scope FROM duckdb_secrets();",
+			    path);
+		}
 		// REQ from this slice: name the path and show a CREATE SECRET example
 		// rather than letting an opaque 401 come back from Google.
 		throw IOException(

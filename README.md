@@ -382,6 +382,15 @@ may or may not have been applied, and does **not** retry. Check the path
 before re-running it. The real fix is Drive's resumable upload protocol, whose
 session URI makes a retry genuinely idempotent; that is not implemented yet.
 
+**`DRIVE_SCOPE` does not restrict a refresh token.** With `PROVIDER config`
+and a `REFRESH_TOKEN`, the scope was fixed when consent was granted; Google
+returns a token carrying those scopes and refreshing cannot narrow them. So a
+secret declared with `DRIVE_SCOPE '…/auth/drive.readonly'` will still write —
+verified. Treat `DRIVE_SCOPE` as *what to ask for at consent time*, not as a
+guard rail on an existing credential. If you need a genuinely read-only
+credential, grant only the read-only scope during consent, or use a
+service-account key whose assertion names the scope on every mint.
+
 **Two concurrent writers to the SAME path will poison it.** Drive has no
 atomic create-if-absent, so the write path is check-then-act: both writers list
 the destination, both see nothing, both create. The result is two files with
