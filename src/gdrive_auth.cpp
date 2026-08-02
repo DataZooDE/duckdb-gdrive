@@ -513,6 +513,12 @@ GDriveAuthContext BuildContextFromCredentialChain(ClientContext &context, const 
 		ctx.root_folder_id = GetOrEmpty(kv, "root_folder_id");
 		ctx.scope = scope;
 		ctx.secret_name = secret_name;
+		// User credentials only. A service account carries its own project
+		// association, and sending it an x-goog-user-project it has no
+		// serviceusage permission on turns a working call into a 403.
+		if (parsed.kind == AdcKind::AUTHORIZED_USER) {
+			ctx.quota_project_id = parsed.user.quota_project_id;
+		}
 		return ctx;
 	};
 

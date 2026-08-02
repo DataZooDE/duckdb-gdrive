@@ -488,8 +488,9 @@ std::string JsonEscape(const std::string &s) {
 
 class GDriveClientImpl : public GDriveClient {
 public:
-	GDriveClientImpl(std::string access_token, std::string drive_id)
-	    : access_token_(std::move(access_token)), drive_id_(std::move(drive_id)) {
+	GDriveClientImpl(std::string access_token, std::string drive_id, std::string quota_project_id = "")
+	    : access_token_(std::move(access_token)), drive_id_(std::move(drive_id)),
+	      quota_project_id_(std::move(quota_project_id)) {
 	}
 
 	DriveResponse GetMetadata(const std::string &file_id) override {
@@ -847,6 +848,13 @@ private:
 		// per attempt, never copied into a string that could end up in a log
 		// or an error. Nothing in this file logs request headers.
 		headers.emplace("Authorization", "Bearer " + access_token_);
+		// Drive rejects a user credential that names no quota project outright
+		// ("the drive.googleapis.com API requires a quota project"), so this is
+		// a correctness header, not a billing one. Empty for service accounts,
+		// which must NOT send it.
+		if (!quota_project_id_.empty()) {
+			headers.emplace("x-goog-user-project", quota_project_id_);
+		}
 		for (const auto &kv : extra_headers) {
 			headers.emplace(kv.first, kv.second);
 		}
@@ -1009,6 +1017,9 @@ private:
 
 	std::string access_token_;
 	std::string drive_id_;
+	//! Sent as x-goog-user-project when non-empty; see the header emission
+	//! in DoHttp for why Drive treats this as mandatory for user credentials.
+	std::string quota_project_id_;
 	DriveCallStats stats_;
 };
 
@@ -1021,8 +1032,9 @@ private:
 namespace duckdb {
 namespace gdrive {
 
-std::unique_ptr<GDriveClient> CreateGDriveClient(const std::string &access_token, const std::string &drive_id) {
-	return std::make_unique<GDriveClientImpl>(access_token, drive_id);
+std::unique_ptr<GDriveClient> CreateGDriveClient(const std::string &access_token, const std::string &drive_id,
+                                                 const std::string &quota_project_id) {
+	return std::make_unique<GDriveClientImpl>(access_token, drive_id, quota_project_id);
 }
 
 } // namespace gdrive

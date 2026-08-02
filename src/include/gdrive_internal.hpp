@@ -38,7 +38,7 @@ namespace gdrive {
 //! hand. T2.B (src/gdrive_client.cpp) owns the real factory and the
 //! per-process stats registry it feeds.
 inline std::unique_ptr<GDriveClient> CreateGDriveClient(const GDriveAuthContext &auth_context) {
-	return CreateGDriveClient(auth_context.access_token, auth_context.drive_id);
+	return CreateGDriveClient(auth_context.access_token, auth_context.drive_id, auth_context.quota_project_id);
 }
 
 //! Escape a literal for Drive's `q` query syntax: backslash and single-quote

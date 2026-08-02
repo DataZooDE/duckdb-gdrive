@@ -4,6 +4,7 @@
 #include "gdrive_filesystem.hpp"
 #include "gdrive_stats.hpp"
 #include "gdrive_version.hpp"
+#include "gdrive_vfs_functions.hpp"
 
 #ifndef EMSCRIPTEN
 #include "telemetry.hpp"
@@ -153,6 +154,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	gdrive::RegisterGDriveSecrets(loader);
 	gdrive::RegisterGDriveStats(loader);
+
+	// remove_file()/move_file(): the two FileSystem operations SQL never got.
+	// Registered here for want of a better home -- they are scheme-generic and
+	// know nothing about Drive (see gdrive_vfs_functions.hpp).
+	gdrive::RegisterVfsFunctions(loader);
 }
 
 void GdriveExtension::Load(ExtensionLoader &loader) {

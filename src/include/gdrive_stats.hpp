@@ -57,7 +57,8 @@ void IncrementGlobalCacheMiss();
 //! token already resolved (and refreshed if needed) via gdrive_auth.hpp's
 //! GetAuthContext(). `drive_id`, when non-empty, scopes every files.list to
 //! that Shared Drive (corpora=drive, per HLD section 4 mitigation 3 / D-5).
-std::unique_ptr<GDriveClient> CreateGDriveClient(const std::string &access_token, const std::string &drive_id = "");
+std::unique_ptr<GDriveClient> CreateGDriveClient(const std::string &access_token, const std::string &drive_id = "",
+                                                 const std::string &quota_project_id = "");
 
 //! Registers gdrive_stats() -- one row per counter (metric VARCHAR, value
 //! BIGINT) -- reading GetGlobalDriveCallStats(). Call once from
