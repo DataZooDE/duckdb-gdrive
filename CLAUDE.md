@@ -395,6 +395,35 @@ them between creating a bucket and uploading to it. `make bench` fails loudly
 on a missing leg, which is right, but the reauth is interactive and cannot be
 done from a script.
 
+**Real-world drill, 2026-08-02 — what live use broke that unit tests did not.**
+Six defects, every one of them silent or a wrong answer rather than an error.
+The pattern worth remembering: *`FileExists` returning false is not proof of
+absence.* `GDriveFileSystem::FileExists` deliberately answers false when no
+secret is configured, because DuckDB core probes speculatively during
+replacement-scan binding (`bind_basetableref.cpp`) and during direct file reads
+(`direct_file_reader.cpp`) and would break if it threw. That leniency is right
+for core and wrong as a user-facing contract: `file_size` and `remove_file`
+built "does not exist" on top of it and reported an unconfigured extension as a
+missing file. They now confirm absence with an explicit
+`FILE_FLAGS_NULL_IF_NOT_EXISTS` open, which the gdrive `OpenFile` had also been
+ignoring outright.
+
+Also: writing under a path whose parent is a FILE used to create a same-named
+FOLDER beside it — the extension manufacturing the exact R-4 duplicate it
+refuses to create elsewhere, and making the original file unreadable. And
+`glob` returned folders for a literal path, though the listing branch filtered
+them; local `glob` of a directory returns zero rows, which is the parity to
+match.
+
+**Cost assertions belong in their own test file.** The mkdir depth-invariance
+check lived in `gdrive_write.test` and started failing the moment an unrelated
+fix changed how DuckDB probes a COPY target — the property was fine, the shared
+scratch state was not. It is now `gdrive_mkdir_cost.test.template`, which
+touches its own subtrees and nothing else. Note also that anything appended to
+`gdrive_write.test.template` must go BEFORE the service-account section: that
+block drops the delegated-user secret and runs as an identity with no Drive
+storage quota, so a write after it cannot succeed.
+
 **Releasing:** follow `docs/RELEASE.md`. The community-extensions repo builds
 from a tagged commit and runs none of our live tests, so whatever is broken
 at tag time ships.

@@ -503,8 +503,19 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 	}
 	cache.SetMaxEntries(static_cast<idx_t>(GetUBigIntSetting(opener, "gdrive_path_cache_entries", 4096)));
 
+	// FILE_FLAGS_NULL_IF_NOT_EXISTS is part of the FileSystem contract and was
+	// ignored here: core opens speculatively with it (magic-byte sniffing,
+	// buffer-manager probes) and expects a null, not an exception. ONLY
+	// not-found becomes null -- ambiguity (R-4), auth, quota and malformed
+	// responses still throw, which is the same rule TryResolvePath follows.
 	bool leaf_is_fresh = false;
-	auto meta = ResolvePath(cache, *client, auth, parsed.uri, &leaf_is_fresh);
+	DriveFileMeta meta;
+	if (!TryResolvePath(cache, *client, auth, parsed.uri, meta, &leaf_is_fresh)) {
+		if (flags.ReturnNullIfNotExists()) {
+			return nullptr;
+		}
+		throw IOException("gdrive: no such file or directory: '%s'", parsed.uri.ToString());
+	}
 
 	// The path-walk cache may serve a leaf entry captured during an earlier
 	// Glob/ListFiles call; OpenFile re-fetches that leaf's own metadata fresh
@@ -1117,7 +1128,12 @@ vector<OpenFileInfo> GDriveFileSystem::Glob(const string &path, FileOpener *open
 		auto auth = GetAuthContext(context, path);
 		auto client = CreateGDriveClient(auth);
 		DriveFileMeta meta;
-		if (TryResolvePath(cache, *client, auth, parsed.uri, meta)) {
+		// Folders are not glob results. The listing branch below already
+		// filters them; this branch did not, so `glob('gdrive://a-folder')`
+		// -- a literal path, no metacharacters -- handed a folder back as if
+		// it were a file, and the caller fed it to read_parquet. Every other
+		// filesystem's glob yields files only.
+		if (TryResolvePath(cache, *client, auth, parsed.uri, meta) && !meta.IsFolder()) {
 			result.emplace_back(path);
 		}
 		return result;

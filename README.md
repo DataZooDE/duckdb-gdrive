@@ -382,6 +382,27 @@ may or may not have been applied, and does **not** retry. Check the path
 before re-running it. The real fix is Drive's resumable upload protocol, whose
 session URI makes a retry genuinely idempotent; that is not implemented yet.
 
+**Two concurrent writers to the SAME path will poison it.** Drive has no
+atomic create-if-absent, so the write path is check-then-act: both writers list
+the destination, both see nothing, both create. The result is two files with
+one name — and because duplicate names are a hard error here, *every*
+subsequent read, glob and delete of that path fails with "ambiguous" until you
+remove one by file id. Measured 2026-08-02: **6 of 6 trials**, with both
+`write_blob` and `COPY … TO`. This is not a rare race; two writers that overlap
+at all will hit it.
+
+There is no fix available at the storage layer — `files.generateIds` makes a
+*retry* idempotent, not two independent creates. Serialise writers to a path
+yourself, or give each writer a distinct name (which is what a table format
+does, and why DuckLake is unaffected). Recovering a poisoned path means
+listing the duplicates and deleting one via `gdrive://id:<fileId>`.
+
+**A failed `move_file` onto an existing target can leave two files.** The move
+is done before the replaced file is deleted, deliberately — the reverse order
+risks losing data if the move fails. If the delete then fails, the destination
+name has two entries. The call raises, so this is loud rather than silent, but
+the path needs the same id-based cleanup.
+
 **Rate-limit errors are not covered by live tests.** Storage-quota errors are
 provoked against the real API; rate limits (403/429) are asserted only against
 captured Drive response bodies, because exhausting real quota needs a
