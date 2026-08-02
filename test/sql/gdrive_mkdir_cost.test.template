@@ -1,0 +1,101 @@
+# name: test/sql/gdrive_mkdir_cost.test.template
+# description: O-2/O-3 -- creating a deep new tree must not cost more listings
+#              than a shallow one
+# group: [live]
+#
+# Materialised by e2e/helpers/materialise.py. Run via `make test_live`.
+#
+# IN ITS OWN FILE ON PURPOSE. This measures a cost property, and cost depends
+# on cache state: run it after other tests have written into the same scratch
+# and the numbers move for reasons that have nothing to do with the code under
+# test. It lived in gdrive_write.test for a day and produced a confusing
+# failure the moment an unrelated fix changed how DuckDB probes a COPY target.
+# Both subtrees below are created here, first, and touched nowhere else.
+#
+# The property: the write path creates missing intermediate folders, and once
+# one segment is missing every deeper one is missing too -- a child cannot live
+# in a parent that does not exist. So only the FIRST miss needs a listing, and
+# the leaf's overwrite probe is skippable on the same evidence. Cost is
+# therefore independent of depth.
+#
+# Asserted as invariance rather than an absolute count: DuckDB probes a COPY
+# target through the filesystem before opening it, and how often it does that
+# is its business, not ours.
+
+require gdrive
+
+require parquet
+
+require-env GDRIVE_CI_DRIVE_ID
+
+require-env GDRIVE_OAUTH_CLIENT_ID
+
+require-env GDRIVE_OAUTH_CLIENT_SECRET
+
+require-env GDRIVE_USER_REFRESH_TOKEN
+
+statement ok
+CREATE SECRET gdrive_mkdir (
+    TYPE gdrive,
+    PROVIDER config,
+    CLIENT_ID '${OAUTH_CLIENT_ID}',
+    CLIENT_SECRET '${OAUTH_CLIENT_SECRET}',
+    REFRESH_TOKEN '${USER_REFRESH_TOKEN}',
+    ROOT_FOLDER_ID '${DRIVE_ID}',
+    DRIVE_SCOPE 'https://www.googleapis.com/auth/drive'
+);
+
+# Resolve the scratch parent once, so the counts below are about the new
+# segments and not about resolving the path that holds them.
+statement ok
+SELECT count(*) FROM glob('gdrive://scratch/${SCRATCH}/*');
+
+statement ok
+SELECT * FROM gdrive_reset_stats();
+
+statement ok
+COPY (SELECT 7 AS a) TO 'gdrive://scratch/${SCRATCH}/mk1/f.csv' (FORMAT csv, HEADER);
+
+statement ok
+CREATE TEMP TABLE mk_shallow AS SELECT value AS n FROM gdrive_stats() WHERE metric = 'files_list';
+
+statement ok
+SELECT * FROM gdrive_reset_stats();
+
+# Four new segments instead of one. Before O-2 this cost three extra listings.
+statement ok
+COPY (SELECT 7 AS a) TO 'gdrive://scratch/${SCRATCH}/mk2/a/b/c/f.csv' (FORMAT csv, HEADER);
+
+query I
+SELECT (SELECT value FROM gdrive_stats() WHERE metric = 'files_list') = (SELECT n FROM mk_shallow)
+----
+true
+
+# The skipping must not have skipped the creating: 4 folders + 1 file.
+query I
+SELECT value FROM gdrive_stats() WHERE metric = 'files_create'
+----
+5
+
+query I
+SELECT a FROM read_csv('gdrive://scratch/${SCRATCH}/mk2/a/b/c/f.csv')
+----
+7
+
+# O-3: a SECOND write into that same directory re-walks nothing -- the folders
+# created above are in the path cache, so no folder is listed or created again.
+statement ok
+SELECT * FROM gdrive_reset_stats();
+
+statement ok
+COPY (SELECT 8 AS a) TO 'gdrive://scratch/${SCRATCH}/mk2/a/b/c/g.csv' (FORMAT csv, HEADER);
+
+query I
+SELECT value FROM gdrive_stats() WHERE metric = 'files_create'
+----
+1
+
+query I
+SELECT a FROM read_csv('gdrive://scratch/${SCRATCH}/mk2/a/b/c/g.csv')
+----
+8

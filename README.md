@@ -382,6 +382,51 @@ may or may not have been applied, and does **not** retry. Check the path
 before re-running it. The real fix is Drive's resumable upload protocol, whose
 session URI makes a retry genuinely idempotent; that is not implemented yet.
 
+**`DRIVE_SCOPE` does not restrict a refresh token.** With `PROVIDER config`
+and a `REFRESH_TOKEN`, the scope was fixed when consent was granted; Google
+returns a token carrying those scopes and refreshing cannot narrow them. So a
+secret declared with `DRIVE_SCOPE '…/auth/drive.readonly'` will still write —
+verified. Treat `DRIVE_SCOPE` as *what to ask for at consent time*, not as a
+guard rail on an existing credential. If you need a genuinely read-only
+credential, grant only the read-only scope during consent, or use a
+service-account key whose assertion names the scope on every mint.
+
+**Concurrent writers create duplicates — of files *and* of directories.**
+Drive has no atomic create-if-absent, so every create is check-then-act: the
+writers all look, all see nothing, and all create. This applies to a shared
+output *directory* just as much as to a file, and the writers report success.
+Measured 2026-08-02: three parallel `COPY … TO
+'gdrive://out/shared/dir/fN.csv'` produced **three folders named `out`**, after
+which the whole subtree was unaddressable by path.
+
+The extension adopts a folder another writer created if it sees one, which
+narrows the window, but it cannot close it — nothing in the Drive API can.
+**Do not point concurrent writers at one directory tree.** Give each writer its
+own top-level prefix, or serialise the creation of the shared parents before
+fanning out. A table format does the former by construction, which is why
+DuckLake is unaffected.
+
+**Two concurrent writers to the SAME path will poison it.** Drive has no
+atomic create-if-absent, so the write path is check-then-act: both writers list
+the destination, both see nothing, both create. The result is two files with
+one name — and because duplicate names are a hard error here, *every*
+subsequent read, glob and delete of that path fails with "ambiguous" until you
+remove one by file id. Measured 2026-08-02: **6 of 6 trials**, with both
+`write_blob` and `COPY … TO`. This is not a rare race; two writers that overlap
+at all will hit it.
+
+There is no fix available at the storage layer — `files.generateIds` makes a
+*retry* idempotent, not two independent creates. Serialise writers to a path
+yourself, or give each writer a distinct name (which is what a table format
+does, and why DuckLake is unaffected). Recovering a poisoned path means
+listing the duplicates and deleting one via `gdrive://id:<fileId>`.
+
+**A failed `move_file` onto an existing target can leave two files.** The move
+is done before the replaced file is deleted, deliberately — the reverse order
+risks losing data if the move fails. If the delete then fails, the destination
+name has two entries. The call raises, so this is loud rather than silent, but
+the path needs the same id-based cleanup.
+
 **Rate-limit errors are not covered by live tests.** Storage-quota errors are
 provoked against the real API; rate limits (403/429) are asserted only against
 captured Drive response bodies, because exhausting real quota needs a

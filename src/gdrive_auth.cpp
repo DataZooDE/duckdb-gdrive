@@ -322,11 +322,38 @@ RefreshResult RefreshUserToken(const std::string &client_id, const std::string &
 	// material appears in a token-endpoint error body) can leak verbatim.
 	auto parsed = ParseRefreshTokenResponse(response->body);
 	if (response->status != 200) {
-		std::string detail = parsed.parsed_ok && !parsed.error_description.empty() ? parsed.error_description
-		                      : parsed.parsed_ok && !parsed.error.empty()          ? parsed.error
-		                                                                           : "";
+		// Keep BOTH fields when both are present. `error` is the machine
+		// code ("invalid_grant") and `error_description` is the prose, and
+		// Google's prose alone is often useless -- a malformed refresh token
+		// yields the literal description "Bad Request", which tells the
+		// reader nothing that the HTTP status did not.
+		std::string detail;
+		if (parsed.parsed_ok) {
+			if (!parsed.error.empty() && !parsed.error_description.empty()) {
+				detail = parsed.error + ": " + parsed.error_description;
+			} else if (!parsed.error_description.empty()) {
+				detail = parsed.error_description;
+			} else {
+				detail = parsed.error;
+			}
+		}
 		result.error = "Google token endpoint returned HTTP " + std::to_string(response->status) +
 		                (detail.empty() ? std::string() : (": " + detail));
+		// invalid_grant is the one every long-lived deployment eventually
+		// meets: Google revokes a refresh token when the user withdraws
+		// access, when the OAuth client is deleted, or after ~6 months unused
+		// on a project still in "Testing" publishing status. CLAUDE.md calls
+		// that expected maintenance rather than a bug -- so the message should
+		// say what to do about it instead of leaving the reader with a bare
+		// 400.
+		if (parsed.parsed_ok && parsed.error == "invalid_grant") {
+			result.error +=
+			    "\n\nThe refresh token is no longer valid. Google revokes one when access is "
+			    "withdrawn, when the OAuth client is deleted, or after ~6 months unused while the "
+			    "project is still in \"Testing\" publishing status. Obtain a new one (for this repo, "
+			    "`make oauth_consent`) and recreate the secret. A service-account key does not "
+			    "expire this way.";
+		}
 		return result;
 	}
 
@@ -504,6 +531,29 @@ GDriveAuthContext BuildContextFromCredentialChain(ClientContext &context, const 
 		// ParseAdcJson guarantees its error quotes no credential material.
 		throw InvalidInputException("gdrive secret '%s': credentials file '%s' is unusable: %s",
 		                             secret_name.c_str(), adc_path.c_str(), parsed.error.c_str());
+	}
+
+	// Checked before a token is minted, not on the first Drive call.
+	//
+	// Drive refuses a user credential that names no quota project outright,
+	// and its message -- "the drive.googleapis.com API requires a quota
+	// project, which is not set by default" -- arrives attached to whatever
+	// query the user happened to run. It then reads as a problem with that
+	// query, or with that file, rather than with a credential a gcloud command
+	// wrote days earlier. Refusing here names the file and the fix, and avoids
+	// minting a token that could not have worked.
+	//
+	// AUTHORIZED_USER only: a service account carries its own project
+	// association, and sending it an x-goog-user-project it lacks
+	// serviceusage permission on turns a working call into a 403.
+	if (parsed.kind == AdcKind::AUTHORIZED_USER && parsed.user.quota_project_id.empty()) {
+		throw IOException(
+		    "gdrive secret '%s': the credentials at '%s' name no quota project, and Drive refuses a "
+		    "user credential without one. Set it with:\n"
+		    "  gcloud auth application-default set-quota-project <PROJECT_ID>\n"
+		    "or use a service-account key, which carries its own project association\n"
+		    "  CREATE SECRET (TYPE gdrive, PROVIDER service_account, KEY_FILE '/path/to/key.json');",
+		    secret_name.c_str(), adc_path.c_str());
 	}
 
 	auto make_ctx = [&](const std::string &access_token) {
@@ -802,6 +852,24 @@ GDriveAuthContext GetAuthContext(ClientContext &context, const std::string &path
 	auto match = secret_manager.LookupSecret(transaction, path, "gdrive");
 
 	if (!match.HasMatch()) {
+		// A gdrive secret may EXIST and still not match: DuckDB's SCOPE clause
+		// restricts which paths a secret applies to, and `SCOPE` is easy to
+		// reach for when you meant `DRIVE_SCOPE`, the OAuth scope. Writing
+		// SCOPE 'https://www.googleapis.com/auth/drive' scopes the secret to
+		// paths beginning with that URL -- which no gdrive:// path does -- and
+		// the secret then matches nothing. Telling that user "no secret
+		// configured" sends them off to create a second one, which will not
+		// match either. Say what actually happened.
+		if (HasAnyGDriveSecret(context)) {
+			throw IOException(
+			    "gdrive: a gdrive secret exists, but none of them apply to '%s'.\n"
+			    "A secret's SCOPE clause limits which paths it covers. If you meant to set the "
+			    "OAuth scope, the parameter is DRIVE_SCOPE -- SCOPE is DuckDB's path filter:\n"
+			    "  CREATE SECRET g (TYPE gdrive, PROVIDER config, ACCESS_TOKEN '...',\n"
+			    "                   DRIVE_SCOPE 'https://www.googleapis.com/auth/drive');\n"
+			    "Check what is registered with: SELECT name, scope FROM duckdb_secrets();",
+			    path);
+		}
 		// REQ from this slice: name the path and show a CREATE SECRET example
 		// rather than letting an opaque 401 come back from Google.
 		throw IOException(

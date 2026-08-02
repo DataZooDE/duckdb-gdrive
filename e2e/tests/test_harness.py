@@ -54,19 +54,31 @@ def test_scratch_roundtrip(drive, writer, scratch):
 
 
 def test_scratch_is_cleaned_up(writer):
-    """Teardown really deletes: a leaked folder per run would fill the Drive."""
+    """Teardown really deletes: a leaked folder per run would fill the Drive.
+
+    Asserts only about the folder THIS test created.
+
+    It used to snapshot every child of /scratch and require the set to be
+    unchanged, which made it fail whenever anything else touched the Shared
+    Drive in the same moment -- a second CI run, the nightly sweep, or a
+    developer running the live suite locally. That is not a property of
+    teardown, it is a property of nobody else being busy, and the Drive is
+    shared by construction. Observed failing in CI for exactly that reason on
+    2026-08-02 while a local drill was writing scratch folders.
+    """
     drive = writer
     scratch_root = drive.find_or_create_folder(fx.SCRATCH_ROOT)
-    before = {c["id"] for c in drive.list_children(scratch_root)}
 
     import uuid
     name = f"run-{uuid.uuid4().hex[:12]}"
     fid = drive.create_folder(name, scratch_root)
-    assert fid in {c["id"] for c in drive.list_children(scratch_root)}
+    assert fid in {c["id"] for c in drive.list_children(scratch_root)}, "create did not land"
+
     drive.delete(fid, permanent=True)
 
-    after = {c["id"] for c in drive.list_children(scratch_root)}
-    assert after == before
+    assert fid not in {c["id"] for c in drive.list_children(scratch_root)}, (
+        "the folder this test created survived its own delete"
+    )
 
 
 def test_permanent_fixtures_present(drive, fixtures_root):

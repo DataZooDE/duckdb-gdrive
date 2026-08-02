@@ -427,8 +427,27 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 				if (!parent_is_new) {
 					DriveFileMeta cached;
 					if (cache.TryGet(key, cached)) {
-						parent_id = cached.id;
-						continue;
+						// A cache hit says "this path resolves", not "this path
+						// is a folder". The path cache is shared with the READ
+						// side, so a file written earlier in the session is in
+						// here too -- and using it as a parent sends Drive a
+						// file id, which it rejects with "The specified parent
+						// is not a folder": loud, but Drive's phrasing, and it
+						// names neither the offending segment nor the fix.
+						//
+						// Do NOT throw straight from the cached value: the entry
+						// may predate someone replacing that file with a folder,
+						// and refusing a write on stale evidence is its own bug.
+						// Drop the entry and fall through to the live check
+						// below, which re-lists and reaches the right answer
+						// either way. Only ever taken on the collision path, so
+						// the extra round trip is not on any hot path.
+						if (!cached.IsFolder()) {
+							cache.InvalidatePrefix(key);
+						} else {
+							parent_id = cached.id;
+							continue;
+						}
 					}
 					auto matches = ListByName(*client, parent_id, segment, /*require_folder=*/true, path);
 					if (matches.size() > 1) {
@@ -439,8 +458,45 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 						parent_id = matches[0].id;
 						continue;
 					}
-					// Missing. Fall through and create -- and remember, so the
-					// rest of the chain skips its probes.
+					// No FOLDER of that name. Before creating one, check there
+					// is no FILE of that name either.
+					//
+					// ListByName above filters to folders, so a same-named file
+					// is invisible to it -- and Drive happily holds both. Left
+					// alone, this creates the folder beside the file and both
+					// become unaddressable by path: the R-4 ambiguity the rest
+					// of the extension refuses to manufacture. write_blob got
+					// this guard first; review pointed out COPY TO comes
+					// through here instead and was still poisoning paths.
+					//
+					// The extra listing is paid only for the FIRST missing
+					// segment: once one is created, parent_is_new short-
+					// circuits the rest of the chain (O-2).
+					auto any_kind = ListByName(*client, parent_id, segment, /*require_folder=*/false, path);
+					// This listing is unfiltered, so it can also turn up a
+					// FOLDER that another writer created between the two calls.
+					// Adopt it: that is the outcome we wanted anyway, and
+					// reporting "a file of that name already exists" for a
+					// folder would be simply untrue.
+					const DriveFileMeta *existing_folder = nullptr;
+					const DriveFileMeta *existing_file = nullptr;
+					for (const auto &m : any_kind) {
+						(m.IsFolder() ? existing_folder : existing_file) = &m;
+					}
+					if (existing_file) {
+						throw IOException(
+						    "gdrive: cannot create directory '%s' under '%s': a file of that name already "
+						    "exists. Creating a folder beside it would leave two entries with one name, "
+						    "which Drive allows and which would make both unaddressable by path.",
+						    segment, path);
+					}
+					if (existing_folder) {
+						cache.Put(key, *existing_folder);
+						parent_id = existing_folder->id;
+						continue;
+					}
+					// Missing entirely. Fall through and create -- and remember,
+					// so the rest of the chain skips its probes.
 				}
 
 				auto resp = client->Upload("", parent_id, segment, "application/vnd.google-apps.folder", "");
@@ -503,8 +559,19 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 	}
 	cache.SetMaxEntries(static_cast<idx_t>(GetUBigIntSetting(opener, "gdrive_path_cache_entries", 4096)));
 
+	// FILE_FLAGS_NULL_IF_NOT_EXISTS is part of the FileSystem contract and was
+	// ignored here: core opens speculatively with it (magic-byte sniffing,
+	// buffer-manager probes) and expects a null, not an exception. ONLY
+	// not-found becomes null -- ambiguity (R-4), auth, quota and malformed
+	// responses still throw, which is the same rule TryResolvePath follows.
 	bool leaf_is_fresh = false;
-	auto meta = ResolvePath(cache, *client, auth, parsed.uri, &leaf_is_fresh);
+	DriveFileMeta meta;
+	if (!TryResolvePath(cache, *client, auth, parsed.uri, meta, &leaf_is_fresh)) {
+		if (flags.ReturnNullIfNotExists()) {
+			return nullptr;
+		}
+		throw IOException("gdrive: no such file or directory: '%s'", parsed.uri.ToString());
+	}
 
 	// The path-walk cache may serve a leaf entry captured during an earlier
 	// Glob/ListFiles call; OpenFile re-fetches that leaf's own metadata fresh
@@ -581,7 +648,18 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 			key.root_folder_id = auth.root_folder_id;
 			key.canonical_path = CanonicalPathOf(parsed.uri);
 			cache.InvalidatePrefix(key);
-			meta = ResolvePath(cache, *client, auth, parsed.uri);
+			// Same flag contract as the first miss above. The cached id was
+			// dead and the path is gone too, so a caller that asked for null
+			// rather than a throw must still get null -- otherwise a
+			// speculative core probe against a path some other client deleted
+			// raises instead of reporting absence. Review caught this: the
+			// first miss was handled, the re-resolve was not.
+			if (!TryResolvePath(cache, *client, auth, parsed.uri, meta)) {
+				if (flags.ReturnNullIfNotExists()) {
+					return nullptr;
+				}
+				throw IOException("gdrive: no such file or directory: '%s'", parsed.uri.ToString());
+			}
 		}
 	}
 
@@ -1117,7 +1195,12 @@ vector<OpenFileInfo> GDriveFileSystem::Glob(const string &path, FileOpener *open
 		auto auth = GetAuthContext(context, path);
 		auto client = CreateGDriveClient(auth);
 		DriveFileMeta meta;
-		if (TryResolvePath(cache, *client, auth, parsed.uri, meta)) {
+		// Folders are not glob results. The listing branch below already
+		// filters them; this branch did not, so `glob('gdrive://a-folder')`
+		// -- a literal path, no metacharacters -- handed a folder back as if
+		// it were a file, and the caller fed it to read_parquet. Every other
+		// filesystem's glob yields files only.
+		if (TryResolvePath(cache, *client, auth, parsed.uri, meta) && !meta.IsFolder()) {
 			result.emplace_back(path);
 		}
 		return result;

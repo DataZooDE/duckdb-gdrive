@@ -38,9 +38,38 @@ namespace {
 // a ClientContextFileOpener here is not merely redundant, it aborts the query
 // with "OpenerFileSystem cannot take an opener". Secret lookup still works:
 // the opener the wrapper pushes is the one that resolves `gdrive` secrets.
+//! Confirm that `path` is genuinely ABSENT rather than unreachable.
+//!
+//! `FileExists` returning false is not proof of absence. GDriveFileSystem
+//! deliberately answers false when no secret is configured or the URI does not
+//! parse -- it has to, because DuckDB core probes speculatively during
+//! replacement-scan binding and would break if that threw. Building a
+//! user-facing "does not exist" on top of that leniency reported a
+//! CONFIGURATION error as a missing file: `remove_file` returned false and
+//! `file_size` returned NULL for a file that was plainly there.
+//!
+//! Opening with NULL_IF_NOT_EXISTS is the strict question: null means the
+//! filesystem looked and found nothing; anything else throws. Only reached on
+//! the false path, so an existing file never pays for it.
+bool ConfirmedAbsent(FileSystem &fs, const string &path) {
+	auto probe = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_NULL_IF_NOT_EXISTS);
+	return probe == nullptr;
+}
+
 bool RemoveOne(FileSystem &fs, const string &path) {
 	if (!fs.FileExists(path)) {
-		return false;
+		if (ConfirmedAbsent(fs, path)) {
+			return false;
+		}
+		// Reachable, and not a file. Almost always a directory -- say so,
+		// because "cannot be removed" without a reason sends people looking
+		// for a permissions problem.
+		if (fs.DirectoryExists(path)) {
+			throw IOException("gdrive: '%s' is a directory, not a file; remove_file does not remove "
+			                  "directories",
+			                  path);
+		}
+		throw IOException("gdrive: '%s' exists but is not a removable file", path);
 	}
 	fs.RemoveFile(path);
 	return true;
@@ -100,6 +129,18 @@ void EnsureParentDirectories(FileSystem &fs, const string &target) {
 		// a wasted round trip, and on Drive it can produce a DUPLICATE folder
 		// of the same name rather than an error.
 		if (!fs.DirectoryExists(dir)) {
+			// ...but "not a directory" is not the same as "not there". If a
+			// FILE already occupies this segment, creating a folder beside it
+			// gives Drive two entries with one name -- an R-4 ambiguity
+			// manufactured by us, which then makes the original file
+			// unreadable. Every other filesystem answers ENOTDIR here.
+			if (fs.FileExists(dir)) {
+				throw IOException(
+				    "gdrive: cannot create directory '%s': a file of that name already exists. "
+				    "Writing under it would create a second entry with the same name, which Drive "
+				    "allows and which would make both unaddressable by path.",
+				    dir);
+			}
 			fs.CreateDirectory(dir);
 		}
 	}
@@ -148,10 +189,17 @@ void FileSizeScalar(DataChunk &args, ExpressionState &state, Vector &result) {
 	    args.data[0], result, args.size(), [&](string_t path, ValidityMask &mask, idx_t idx) -> int64_t {
 		    auto p = path.GetString();
 		    // NULL for absent, mirroring remove_file's false: "no such file"
-		    // is an expected answer on a remote store, not an exception.
+		    // is an expected answer on a remote store, not an exception. But
+		    // ONLY for genuine absence -- see ConfirmedAbsent.
 		    if (!fs.FileExists(p)) {
-			    mask.SetInvalid(idx);
-			    return 0;
+			    if (ConfirmedAbsent(fs, p)) {
+				    mask.SetInvalid(idx);
+				    return 0;
+			    }
+			    if (fs.DirectoryExists(p)) {
+				    throw IOException("gdrive: '%s' is a directory, not a file; it has no byte size", p);
+			    }
+			    throw IOException("gdrive: '%s' exists but its size cannot be read as a file", p);
 		    }
 		    auto handle = fs.OpenFile(p, FileFlags::FILE_FLAGS_READ);
 		    if (!handle) {
@@ -236,7 +284,10 @@ void RegisterVfsFunctions(ExtensionLoader &loader) {
 
 	FunctionDescription size_desc;
 	size_desc.description =
-	    "Byte length of the file at `path`, or NULL if it does not exist. Reads only metadata -- unlike "
+	    "Byte length of the file at `path`, or NULL if it does not exist. Reads only metadata for ordinary "
+	    "files -- unlike read_blob, which downloads the body. NOTE: a native Google Doc or Sheet has no "
+	    "stored byte size, so its size is the length of the EXPORT (see gdrive_docs_export_mime) and "
+	    "obtaining it downloads that export. Unlike "
 	    "read_blob(), which reports the same number but downloads the whole body to do it.";
 	size_desc.parameter_names = {"path"};
 	size_desc.parameter_types = {LogicalType::VARCHAR};
