@@ -8,6 +8,10 @@
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 
+// int64_t is used below. libstdc++ leaks it transitively, musl's libc++ does
+// not, and musl is in the 1.4 LTS build matrix -- scripts/check_cstdint.sh
+// guards exactly this.
+#include <cstdint>
 #include <utility>
 
 namespace duckdb {
