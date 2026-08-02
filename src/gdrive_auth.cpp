@@ -322,11 +322,38 @@ RefreshResult RefreshUserToken(const std::string &client_id, const std::string &
 	// material appears in a token-endpoint error body) can leak verbatim.
 	auto parsed = ParseRefreshTokenResponse(response->body);
 	if (response->status != 200) {
-		std::string detail = parsed.parsed_ok && !parsed.error_description.empty() ? parsed.error_description
-		                      : parsed.parsed_ok && !parsed.error.empty()          ? parsed.error
-		                                                                           : "";
+		// Keep BOTH fields when both are present. `error` is the machine
+		// code ("invalid_grant") and `error_description` is the prose, and
+		// Google's prose alone is often useless -- a malformed refresh token
+		// yields the literal description "Bad Request", which tells the
+		// reader nothing that the HTTP status did not.
+		std::string detail;
+		if (parsed.parsed_ok) {
+			if (!parsed.error.empty() && !parsed.error_description.empty()) {
+				detail = parsed.error + ": " + parsed.error_description;
+			} else if (!parsed.error_description.empty()) {
+				detail = parsed.error_description;
+			} else {
+				detail = parsed.error;
+			}
+		}
 		result.error = "Google token endpoint returned HTTP " + std::to_string(response->status) +
 		                (detail.empty() ? std::string() : (": " + detail));
+		// invalid_grant is the one every long-lived deployment eventually
+		// meets: Google revokes a refresh token when the user withdraws
+		// access, when the OAuth client is deleted, or after ~6 months unused
+		// on a project still in "Testing" publishing status. CLAUDE.md calls
+		// that expected maintenance rather than a bug -- so the message should
+		// say what to do about it instead of leaving the reader with a bare
+		// 400.
+		if (parsed.parsed_ok && parsed.error == "invalid_grant") {
+			result.error +=
+			    "\n\nThe refresh token is no longer valid. Google revokes one when access is "
+			    "withdrawn, when the OAuth client is deleted, or after ~6 months unused while the "
+			    "project is still in \"Testing\" publishing status. Obtain a new one (for this repo, "
+			    "`make oauth_consent`) and recreate the secret. A service-account key does not "
+			    "expire this way.";
+		}
 		return result;
 	}
 
