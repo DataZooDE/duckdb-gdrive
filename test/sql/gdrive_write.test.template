@@ -232,6 +232,30 @@ SELECT remove_file('gdrive://scratch/${SCRATCH}/collide/definitely-absent.txt')
 ----
 false
 
+# The same collision through COPY TO, which does NOT go through write_blob's
+# recursive mkdir but through OpenFile's write branch. The first guard only
+# covered write_blob, so COPY still poisoned the path -- caught by review, not
+# by the test above, which is exactly why both paths need their own case.
+statement error
+COPY (SELECT 1 AS a) TO 'gdrive://scratch/${SCRATCH}/collide/thing/child.csv' (FORMAT csv);
+----
+a file of that name already exists
+
+# Still readable after the COPY was refused.
+query I
+SELECT decode(content) FROM read_blob('gdrive://scratch/${SCRATCH}/collide/thing')
+----
+iam-a-file
+
+# The guard must not reject an ordinary deep write into a fresh subtree.
+statement ok
+COPY (SELECT 1 AS a) TO 'gdrive://scratch/${SCRATCH}/collide/fresh/x/y/ok.csv' (FORMAT csv);
+
+query I
+SELECT a FROM read_csv('gdrive://scratch/${SCRATCH}/collide/fresh/x/y/ok.csv')
+----
+1
+
 # glob yields FILES. A literal path naming a folder used to be returned as a
 # result, which a caller then handed to read_parquet. The listing branch
 # filtered folders; this one did not.

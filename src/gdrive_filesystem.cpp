@@ -427,6 +427,22 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 				if (!parent_is_new) {
 					DriveFileMeta cached;
 					if (cache.TryGet(key, cached)) {
+						// A cache hit says "this path resolves", not "this path
+						// is a folder". The path cache is shared with the READ
+						// side, so a file written earlier in the session is in
+						// here too -- and using it as a parent sends Drive a
+						// file id, which it rejects with "The specified parent
+						// is not a folder": loud, but Drive's phrasing, and it
+						// names neither the offending segment nor the fix.
+						// Same diagnosis as the uncached path below.
+						if (!cached.IsFolder()) {
+							throw IOException(
+							    "gdrive: cannot create directory '%s' under '%s': a file of that name "
+							    "already exists. Creating a folder beside it would leave two entries "
+							    "with one name, which Drive allows and which would make both "
+							    "unaddressable by path.",
+							    segment, path);
+						}
 						parent_id = cached.id;
 						continue;
 					}
@@ -439,8 +455,30 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 						parent_id = matches[0].id;
 						continue;
 					}
-					// Missing. Fall through and create -- and remember, so the
-					// rest of the chain skips its probes.
+					// No FOLDER of that name. Before creating one, check there
+					// is no FILE of that name either.
+					//
+					// ListByName above filters to folders, so a same-named file
+					// is invisible to it -- and Drive happily holds both. Left
+					// alone, this creates the folder beside the file and both
+					// become unaddressable by path: the R-4 ambiguity the rest
+					// of the extension refuses to manufacture. write_blob got
+					// this guard first; review pointed out COPY TO comes
+					// through here instead and was still poisoning paths.
+					//
+					// The extra listing is paid only for the FIRST missing
+					// segment: once one is created, parent_is_new short-
+					// circuits the rest of the chain (O-2).
+					auto non_folder = ListByName(*client, parent_id, segment, /*require_folder=*/false, path);
+					if (!non_folder.empty()) {
+						throw IOException(
+						    "gdrive: cannot create directory '%s' under '%s': a file of that name already "
+						    "exists. Creating a folder beside it would leave two entries with one name, "
+						    "which Drive allows and which would make both unaddressable by path.",
+						    segment, path);
+					}
+					// Missing entirely. Fall through and create -- and remember,
+					// so the rest of the chain skips its probes.
 				}
 
 				auto resp = client->Upload("", parent_id, segment, "application/vnd.google-apps.folder", "");
@@ -592,7 +630,18 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 			key.root_folder_id = auth.root_folder_id;
 			key.canonical_path = CanonicalPathOf(parsed.uri);
 			cache.InvalidatePrefix(key);
-			meta = ResolvePath(cache, *client, auth, parsed.uri);
+			// Same flag contract as the first miss above. The cached id was
+			// dead and the path is gone too, so a caller that asked for null
+			// rather than a throw must still get null -- otherwise a
+			// speculative core probe against a path some other client deleted
+			// raises instead of reporting absence. Review caught this: the
+			// first miss was handled, the re-resolve was not.
+			if (!TryResolvePath(cache, *client, auth, parsed.uri, meta)) {
+				if (flags.ReturnNullIfNotExists()) {
+					return nullptr;
+				}
+				throw IOException("gdrive: no such file or directory: '%s'", parsed.uri.ToString());
+			}
 		}
 	}
 
