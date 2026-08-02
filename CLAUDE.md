@@ -27,6 +27,8 @@ the code that cites it.
 | **D-10** | **`credential_chain` is the default provider**, resolving Application Default Credentials ourselves rather than via `google-cloud-cpp`. | `CREATE SECRET (TYPE gdrive);` works with no arguments after `gcloud auth application-default login`. See the pitfall below for why the SDK was rejected. The default provider changed from `config`, which could never succeed argument-less, so no working statement changed meaning. |
 | **D-11** | `datazoo-oauth2` is public at `github.com/DataZooDE/datazoo-oauth2`, consumed as a commit-pinned submodule. | Forced by community-extensions building this repo from source: a private submodule cannot be cloned by their builder. Reaffirms HLD §5.4's rejection of vendoring. |
 | **D-12** | The `erpl-web` migration gate runs that repo's **live** OAuth suites, not just its offline Catch2 binaries. | Needs real SAP Datasphere / Entra / Business Central credentials. Consistent with D-1: a suite that only proves the code compiles is not a gate. |
+| **D-13** | **CalVer, `vYYYY.MM.DD`**, matching the other DataZoo extensions. | The community descriptor carries **no `version:` field** — `2026.08.01` is not valid semver (leading zeros), so the tagged `ref` is the version. `src/gdrive_version.cpp` is a hardcoded string and `make check_stamp` fails if it does not match the tag; nothing compared them before v2026.08.01. |
+| **D-14** | **`gdrive_immutable_prefixes` is opt-in and empty by default.** | It skips the per-open metadata refresh for paths the user declares are never modified in place. The extension cannot verify the claim: Drive keeps a file id across an overwrite, returns no `ETag`, and *silently ignores* `If-Match` (verified 2026-08-01 — a bogus precondition returns `206` and the data, not `412`). So it is a user assertion, and the promise is stronger than "not overwritten": not modified, not replaced, and not deleted-and-recreated while the process runs. |
 
 Target name: **`gdrive`** — `INSTALL gdrive; LOAD gdrive;`, and `TARGET_NAME`
 in `CMakeLists.txt`.
@@ -341,6 +343,43 @@ without tags: fatal: No names found, cannot describe anything.
 
 The Checks workflow now fetches them. Release artifacts were never affected —
 the distribution pipeline checks DuckDB out properly.
+
+**A new .cpp must include `<cstdint>` itself, even if its header does.** The
+musl gate caught `gdrive_trace.cpp` in 3 seconds of CI: the TU named `uint64_t`
+and glibc supplied it transitively where musl does not, and musl is in the 1.4
+LTS matrix. `make check_cstdint` exists for exactly this and is worth running
+before pushing a new source file.
+
+**`fopen(path, "we")` is glibc-only.** The `e` (O_CLOEXEC) mode extension is
+not standard C and is undefined behaviour on MSVC's CRT. This repo ships to
+glibc, musl, macOS and Windows, so plain `"w"` it is.
+
+**The two retry branches were not symmetric.** `ExecuteWithRetry`'s
+transport-failure path has a careful idempotency gate — a retried POST
+`files.create` manufactures an R-4 duplicate — but the HTTP-error path (5xx,
+429) had none until 2026-08-01. A 5xx is exactly as ambiguous as a dropped
+connection. It bit hardest on FOLDER creation, which unlike file creation
+reserves no id via `files.generateIds` and so cannot recognise its own retry.
+
+**Read-time stale-id recovery is not "strictly better" than validating at
+open**, whatever the old comment said. It covers more (a file deleted *after*
+the handle opened), but DuckDB is told the file size at open and no read-time
+mechanism can retract a number already reported, so a different-length
+replacement reads short. It converts a hard failure into a bounded read.
+
+**DuckLake has no local data-file cache of its own** (checked at `d8a1881e`).
+`duckdb_settings()` returns retry and inlining knobs and nothing about caching
+data files; the relevant control is DuckDB core's
+`enable_external_file_cache`, which is IN MEMORY and therefore does nothing for
+the cold-process workload that matters on Drive (measured: every delta inside
+the noise, on all three backends). `duckdb-diskcache` is a separate extension.
+Do not cite a DuckLake cache setting from memory — enumerate it.
+
+**A benchmark needs its cloud logins checked first.** `gcloud` and `aws`
+sessions both expired mid-session during the 2026-08-01 measurements, one of
+them between creating a bucket and uploading to it. `make bench` fails loudly
+on a missing leg, which is right, but the reauth is interactive and cannot be
+done from a script.
 
 **Releasing:** follow `docs/RELEASE.md`. The community-extensions repo builds
 from a tagged commit and runs none of our live tests, so whatever is broken

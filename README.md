@@ -90,8 +90,8 @@ for an occasionally-queried lakehouse. It does not make Drive fast — see
 ## Status
 
 Early, but read *and* write are real. **Verified against a live Google Drive
-account** (139 assertions across five live suites, 13 e2e, plus 860
-pure-logic ones):
+account** (209 assertions across six live suites, 23 e2e, plus 937 pure-logic
+ones):
 
 - reads by file id and by path, multi-segment resolution, UTF-8 and spaced
   names, ranged Parquet reads, globbing, listing past Drive's 100-item page
@@ -102,9 +102,14 @@ pure-logic ones):
   and the same file over `gdrive://`;
 - **DuckLake** end to end, including deletes and time travel.
 
-**The performance target is missed.** Measured end to end against GCS:
-**4.8×** where the goal is 3×. Not a marginal miss, and the cause is known —
-55 Drive round trips per query. See `docs/benchmark.md`.
+**The performance target is met, narrowly.** A cold columnar scan measures
+**2.91×** the same file on GCS against a 3× goal, and **1.93×** with 128 MiB
+blocks. Read that with two caveats. It passed at 3.05× a release earlier and
+nothing in the extension changed to move it — the object-store denominator did,
+and quoted against S3 (0.97 s) the same run is 4.05× and would fail. And a
+*lakehouse* workload is 4–10× an object store, not 3×, because Drive's penalty
+tracks how many things you look up rather than how many bytes you move. See
+`docs/benchmark.md` and `docs/paper/`.
 
 Not production-ready. The *Known limitations* section below lists what is
 verified and what is not.
@@ -378,23 +383,30 @@ Being direct, because the alternatives are often better:
 Reads are ranged, so a Parquet scan fetches footers and column chunks rather
 than whole files.
 
-> **The performance target is met only marginally, and only when tuned.** The
-> goal is a cold columnar scan within **3×** the same file on object storage.
-> Measured 2026-07-30 on an 87 MB Parquet, both legs in one session, 9 repeats:
-> local **0.12 s**, GCS **1.34 s**, `gdrive://` **4.09 s** — **3.05×**, which
-> misses the gate by 0.05×. On medians it is 2.83×, which would pass. It is
-> *at* the gate, not comfortably inside it.
+> **The target is met, narrowly.** The goal is a cold columnar scan within
+> **3×** the same file on object storage. Measured 2026-08-01 on an 87 MB
+> Parquet, all legs in one session, 9 repeats: local **0.11 s**,
+> S3 **0.97 s**, GCS **1.35 s**, `gdrive://` **3.93 s** — **2.91×** GCS.
+> With `gdrive_block_size_bytes` at 128 MiB, **2.60 s — 1.93×**, at the cost of
+> ~0.8 s on footer-only queries like `count(*)`. That is why the knob exists
+> and why 16 MiB remains the default.
 >
-> Setting `gdrive_block_size_bytes` to 128 MiB brings it to **2.70 s — 2.02×**,
-> a clear pass, at the cost of ~0.8 s on footer-only queries like `count(*)`.
-> That is why the knob exists and why 16 MiB remains the default.
+> **Do not read 2.91× as an improvement.** An earlier run measured 3.05× and
+> nothing in the extension changed between them: this benchmark addresses its
+> fixture through the `gdrive://id:` form, which skips path resolution
+> entirely. The denominator moved. Two object stores in the same city differ
+> by 39% here — quoted against S3 the identical run is **4.05×** and fails the
+> gate. We report GCS because that is what the gate was written against, not
+> because it is the kinder number.
 >
-> One caveat worth knowing: the GCS leg itself varied 1.03–1.72 s across runs,
-> enough to flip a 3-repeat verdict between PASS and FAIL. Treat any single
-> run of this benchmark, including this one, as indicative rather than exact.
+> **A lakehouse workload is worse than a single scan.** DuckLake operations run
+> 4–10× an object store, and the *cheapest* operation has the worst ratio: a
+> time-travel read is 10.4×, because it reads almost no data and is nearly pure
+> metadata. The full scan, moving the most bytes, is the best at 4.0×. Budget
+> by how many lookups a query does, not by how much data it moves.
 >
-> Budget accordingly: for a cold scan Drive is ~30× a local file and ~2–3×
-> object storage. See `docs/benchmark.md` for the full numbers.
+> Also: a cold scan is ~36× a local file, and downloading first and querying
+> locally is **6.14 s**, slower than querying in place.
 
 Drive enforces per-user API quotas. A query that looks unremarkable against S3
 can hit them, so the extension caches path resolution aggressively and reports

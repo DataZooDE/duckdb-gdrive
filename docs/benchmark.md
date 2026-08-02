@@ -3,22 +3,33 @@
 **Gate:** a cold columnar scan over `gdrive://` completes within **3×** the
 same file on Google Cloud Storage.
 
-**Status: EVALUATED 2026-07-30. The default configuration sits ON the gate,
-at 3.05x; the documented tuned configuration passes at 2.02x.**
+**Status: EVALUATED 2026-08-01. The default configuration PASSES at 2.91x;
+the tuned configuration passes at 1.93x. Read the caveats before quoting it.**
 
-Both legs in one session, byte-identical file (md5 verified against the Drive
-copy), 9 repeats per leg:
+All legs in one session, byte-identical file, 9 repeats per leg:
 
 | Leg | min | median | vs `gs` (min) |
 |---|---|---|---|
-| local | 0.12 s | 0.13 s | — |
-| `gs://` (europe-west3) | 1.34 s | 1.65 s | 1.00x |
-| **`gdrive://`, default** | **4.09 s** | 4.67 s | **3.05x** — misses by 0.05x |
-| `gdrive://`, 128 MiB blocks | 2.70 s | 2.93 s | **2.02x** — passes |
+| local | 0.11 s | 0.12 s | 0.08x |
+| `s3://` (eu-central-1) | 0.97 s | 1.42 s | 0.72x |
+| `gs://` (europe-west3) | 1.35 s | 1.55 s | 1.00x |
+| **`gdrive://`, default** | **3.93 s** | 5.34 s | **2.91x** — passes |
+| `gdrive://`, 128 MiB blocks | 2.60 s | 5.28 s | **1.93x** — passes |
+| download, then query locally | 6.14 s | 9.70 s | 4.55x |
 
-On medians the default is 2.83x, which would pass. Calling this a clean fail
-or a clean pass would both be overstating what was measured: it is *at* the
-gate.
+**This is not an improvement over the 3.05x below.** Nothing in the extension
+changed to produce it: this benchmark addresses the fixture through the
+`gdrive://id:` form, which skips path resolution, so the 2026-08-01 round of
+round-trip work does not touch this number at all. The denominator moved.
+
+**Quoted against S3 the same run is 4.05x and FAILS the gate.** S3 and GCS are
+both in Frankfurt and differ by 39% here. We report GCS because that is the
+denominator the gate was written against; choosing after seeing the data would
+make the number worthless. Note also the medians: 5.34 s against 1.55 s is
+3.4x, because Drive's spread is wide and one slow request moves a whole run.
+
+**A lakehouse workload is 4-10x, not 3x.** See `docs/paper/` Table 4. The
+single-file scan measured here is the friendliest workload Drive has.
 
 **The variance is in the DENOMINATOR, and it is large enough to decide the
 verdict on its own.** Four full runs were done before settling on 9 repeats:
@@ -263,6 +274,15 @@ idea and it is wrong for this access pattern.
   connection, full TLS handshake — for every request. Now one connection per
   thread, reused across requests and queries. Median request 1558 ms ->
   1334 ms.
+
+  **The 224 ms was NOT the handshake, despite what this document used to
+  imply.** Timing the phases directly with raw sockets (2026-08-01, see
+  `docs/paper/` Figure 1) puts DNS + TCP + TLS at 48-54 ms cold and zero warm;
+  the handshake alone is 33-35 ms. The reuse was a real improvement whose cause
+  we had not isolated. What the decomposition does show is that server
+  time-to-first-byte is essentially the entire cost at every request shape — a
+  1 KiB ranged read spends 1226 ms waiting and 0.2 ms receiving — which rules
+  out client-side work as a lever and leaves only "issue fewer requests".
 
 ### What would close the gate, and its cost
 

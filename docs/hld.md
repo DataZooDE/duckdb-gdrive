@@ -160,11 +160,11 @@ it is Entra-shaped and must be generalised on the way in (§5.4):
   `config` (paste pre-obtained tokens), `authorization_code` (interactive).
   This maps one-to-one onto REQ-F-05.
 
-  > **Not what shipped.** `authorization_code` was withdrawn during
-  > implementation and is **not registered**: `CREATE SECRET ... PROVIDER
-  > authorization_code` is an error, and a test pins it that way. The design
-  > below is retained because it is the target for the library extraction
-  > (W6), not because it describes the current extension.
+  > **Shipped after all.** This note used to say `authorization_code` had been
+  > withdrawn and was not registered. It landed in v2026.08.01 and is
+  > documented in the README; `client_credentials` is the provider that does
+  > not exist here, replaced by `credential_chain` (D-10) and
+  > `service_account`.
 - **`MicrosoftEntraTokenManager` → `OAuth2SecretTokenManager`** in the library,
   with the Entra token URL and client-credentials shape lifted out as inputs.
   The valuable part: `GetToken(context, secret)` returns a usable token,
@@ -178,7 +178,7 @@ it is Entra-shaped and must be generalised on the way in (§5.4):
 Resulting shape:
 
 ```sql
--- DESIGN ONLY -- `authorization_code` is not registered; this errors today.
+-- This works as of v2026.08.01. See the README for the redirect-URI setup.
 -- interactive: browser flow, refresh token stored in the secret
 CREATE SECRET gdrive_user (
     TYPE gdrive, PROVIDER authorization_code,
@@ -364,12 +364,16 @@ expectation, not a technical constraint.
 
 - **Unit** — path parsing, collision handling, Range header construction, error
   mapping. No network.
-- **Integration against a fake** — a local HTTP server speaking enough of Drive
-  v3 to exercise read/list/glob/write deterministically. This is what makes the
-  suite runnable in CI without credentials, and is a real build item rather
-  than an afterthought.
-- **Live, opt-in** — against a real Drive service account behind a feature
-  flag: scheduled and on-demand, never on the merge path.
+- **Integration against a fake** — ~~a local HTTP server speaking enough of
+  Drive v3~~. **Superseded by decision D-1 (see `CLAUDE.md`): there is no fake
+  Drive server and no HTTP replay layer.** If a behaviour needs a socket it
+  gets a live test; if it does not, it gets a Catch2 test; nothing gets both.
+  The consequence was accepted knowingly — fork PRs cannot run the live suite.
+- **Live, on the merge path** — against a real Drive account, not behind a
+  feature flag and not only scheduled. `make test` lets live tests skip when
+  credentials are absent so a developer without a Google account still gets a
+  green run; `make test_live` fails instead, and CI uses that, because a silent
+  skip is a false green.
 - **Benchmark, gating** — the Milestone-1 comparison against a FUSE mount and
   against object storage for the same file, reported as a committed number.
 
