@@ -234,4 +234,20 @@ jobs:
       - env:
           GDRIVE_CI_SA_KEY_B64: ${{ secrets.GDRIVE_CI_SA_KEY_B64 }}
           GDRIVE_CI_DRIVE_ID: ${{ secrets.GDRIVE_CI_DRIVE_ID }}
-        run: make sweep_orphans
+          # The DELEGATED USER is required, not optional. Scratch folders are
+          # created by writes, which run as the user, so the user owns them --
+          # and a service account cannot permanently delete a file it does not
+          # own in a Shared Drive. With only the SA key this job deletes
+          # nothing and reports 403 on every folder.
+          GDRIVE_OAUTH_CLIENT_ID: ${{ secrets.GDRIVE_OAUTH_CLIENT_ID }}
+          GDRIVE_OAUTH_CLIENT_SECRET: ${{ secrets.GDRIVE_OAUTH_CLIENT_SECRET }}
+          GDRIVE_USER_REFRESH_TOKEN: ${{ secrets.GDRIVE_USER_REFRESH_TOKEN }}
+        # NOT `make sweep_orphans`. The Makefile includes
+        # extension-ci-tools/makefiles/duckdb_extension.Makefile at the top,
+        # and this job checks out without submodules -- so make died on the
+        # include before reaching any target, every night from 2026-07-29
+        # until this was noticed. Adding `submodules: recursive` would fix it
+        # by cloning DuckDB nightly to delete some folders; running the module
+        # directly needs no submodules at all. The make target stays for
+        # humans.
+        run: cd e2e && uv run python -m helpers.sweep

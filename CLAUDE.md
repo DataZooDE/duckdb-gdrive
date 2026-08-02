@@ -155,6 +155,20 @@ Fixtures are two-tier: permanent read-only `/fixtures` seeded
 once, and per-test `/scratch/run-<uuid>` deleted on teardown so concurrent CI
 runs cannot collide. `make sweep_orphans` cleans up after crashed runs.
 
+**The nightly sweep had been dead since 2026-07-29 and nobody noticed**, for
+three independent reasons worth remembering. (1) The workflow job checks out
+WITHOUT submodules, and the Makefile includes
+`extension-ci-tools/makefiles/duckdb_extension.Makefile` at the top, so `make`
+died on the include before reaching any target -- a job that fails in 3
+seconds looks like an infrastructure blip. (2) `sweep()` let a single failed
+delete propagate, so even run by hand it removed one folder of 61 and stopped.
+(3) It authenticated as the SERVICE ACCOUNT, but scratch folders are created by
+writes, and writes run as the DELEGATED USER -- the user owns them, and a
+service account cannot permanently delete a file it does not own in a Shared
+Drive. Measured 2026-08-02: 0 of 58 deletable as the SA, 58 of 58 as the user.
+The sweep now runs the module directly (no submodules needed), collects
+per-folder failures and exits non-zero, and authenticates as the user.
+
 **Do not run `make seed_fixtures` while live tests are running.** Seeding
 deletes a fixture before re-uploading it, so a concurrent test can observe
 the gap and fail for a reason that has nothing to do with the code. The

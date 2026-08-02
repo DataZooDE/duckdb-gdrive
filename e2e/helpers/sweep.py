@@ -22,6 +22,10 @@ from . import fixtures as fx
 DEFAULT_MAX_AGE_HOURS = 24
 
 
+class SweepIncomplete(RuntimeError):
+    """Some folders could not be deleted. The sweep ran; it did not finish."""
+
+
 def _parse_rfc3339(value: str) -> dt.datetime:
     return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
 
@@ -52,6 +56,7 @@ def sweep(drive: Drive, max_age_hours: int = DEFAULT_MAX_AGE_HOURS, dry_run: boo
     cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=max_age_hours)
     removed = 0
     unswept = []
+    failed: list[tuple[str, str]] = []
     for child in drive.list_children(scratch):
         if child["mimeType"] != FOLDER_MIME or not child["name"].startswith("run-"):
             # The run- prefix is deliberate: it protects anything a HUMAN put
@@ -76,28 +81,66 @@ def sweep(drive: Drive, max_age_hours: int = DEFAULT_MAX_AGE_HOURS, dry_run: boo
         print(f"{'would delete' if dry_run else 'deleting'} {child['name']} "
               f"(age {age.total_seconds() / 3600:.1f}h)")
         if not dry_run:
-            drive.delete(child["id"], permanent=True)
+            # One folder we cannot delete must not strand the other sixty.
+            #
+            # Both identities write here -- the service account for reads, the
+            # delegated user for writes -- and permanent deletion in a Shared
+            # Drive needs a role the deleting identity may not hold for a
+            # folder the other one created. Before this, the first
+            # `insufficientFilePermissions` aborted the whole sweep: a real run
+            # removed exactly ONE folder of 61 and exited, and because the
+            # nightly job was separately broken nobody saw it for a week.
+            #
+            # Failures are collected and reported, and the exit status is
+            # non-zero, so this is visible rather than silently partial.
+            try:
+                drive.delete(child["id"], permanent=True)
+            except Exception as e:  # noqa: BLE001 -- any failure, keep going
+                failed.append((child["name"], str(e).splitlines()[0][:120]))
+                continue
         removed += 1
 
     print(f"{removed} stale scratch folder(s) {'found' if dry_run else 'removed'}")
+    if failed:
+        print(f"FAILED to delete {len(failed)} folder(s):")
+        for name, err in failed:
+            print(f"  {name}: {err}")
+        print("  Usually a Shared Drive role: permanent deletion needs Manager")
+        print("  on a folder the other CI identity created.")
     if unswept:
         print(f"NOTE: {len(unswept)} folder(s) under /{fx.SCRATCH_ROOT} do not use the "
               f"run-<uuid> convention and will NEVER be swept:")
         for name in sorted(unswept):
             print(f"  {name}")
         print("  Delete them by hand, or rename them to run-<something>.")
+    if failed:
+        raise SweepIncomplete(f"{len(failed)} folder(s) could not be deleted")
     return removed
 
 
 def main() -> int:
     try:
-        drive = Drive.from_env()
+        # As the DELEGATED USER, not the service account.
+        #
+        # Scratch folders are created by writes, and writes run as the user
+        # (a service account has no Drive storage quota). The user therefore
+        # OWNS them, and a service account cannot permanently delete a file it
+        # does not own in a Shared Drive. Running this as the SA fails with
+        # 403 insufficientFilePermissions on every folder -- measured
+        # 2026-08-02: 0 of 58 deletable as the SA, 58 of 58 as the user.
+        drive = Drive.from_env(prefer_user=True)
     except DriveConfigError as e:
         print(f"cannot sweep: {e}", file=sys.stderr)
         return 2
     max_age = int(os.environ.get("GDRIVE_SWEEP_MAX_AGE_HOURS", DEFAULT_MAX_AGE_HOURS))
     dry = os.environ.get("GDRIVE_SWEEP_DRY_RUN") == "1"
-    sweep(drive, max_age_hours=max_age, dry_run=dry)
+    try:
+        sweep(drive, max_age_hours=max_age, dry_run=dry)
+    except SweepIncomplete as e:
+        # Non-zero: a sweep that silently leaves folders behind is how the
+        # Shared Drive fills up while the job reports success every night.
+        print(f"sweep incomplete: {e}", file=sys.stderr)
+        return 1
     return 0
 
 
