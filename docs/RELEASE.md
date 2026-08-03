@@ -18,7 +18,7 @@ The eight criteria the project set itself, and where each stands.
 | 5 | CI green on all target platforms, stable + LTS | met — 36 checks green on the v2026.08.01 commit |
 | 6 | `datazoo-oauth2` standalone **and `erpl-web` consuming it** with no remaining copy | **open** — deferred by D-2, not dropped |
 | 7 | No credential in the repo, in any log, or in any error message | met, gated by `make check_credentials` |
-| 8 | Accepted into `duckdb/community-extensions` | submitted 2026-07-30 (PR #2407), retargeted to v2026.08.03 on 2026-08-03; still open |
+| 8 | Accepted into `duckdb/community-extensions` | **met** — PR #2407 merged 2026-08-03 at v2026.08.01. Version bumps go in their own PR after that (#2425 for v2026.08.03), matching the sibling extensions' "Bump X to vYYYY.MM.DD" pattern |
 
 ## Before tagging
 
@@ -113,6 +113,13 @@ Before tagging, update **both**:
 * the expected value in `test/sql/gdrive_load.test`
 
 ## Submitting
+
+**The first submission is a one-off; every release after it is a BUMP PR.**
+`extensions/gdrive/description.yml` already exists upstream, so a new release
+means one line changed on a branch cut from `upstream/main`, titled
+`Bump gdrive to vYYYY.MM.DD` — the same shape the other DataZoo extensions
+use. Do not push to the original submission branch after it merges: that
+commit lands on a merged PR and changes nothing.
 
 1. Copy `docs/community-extension-description.yml` to
    `community-extensions/extensions/gdrive/description.yml`, dropping the

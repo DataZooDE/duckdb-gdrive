@@ -168,6 +168,20 @@ for t in "${tests[@]}"; do
     # satisfied in the test runner must be a failure here.
     out="$("$UNITTEST" "$t" 2>&1)" || failed=1
     printf '%s\n' "$out"
+    # unittest exits 0 when it matched NO test cases at all -- a green run
+    # that executed nothing. ducklake_conformance.py already defends against
+    # exactly this ("reported 43 agreements having executed zero tests"); the
+    # knowledge was in that script and not in this one. Seen for real on
+    # 2026-08-03, when a second process re-ran materialise mid-sweep and
+    # rewrote test/sql/live/ underneath a running suite: six of seven suites
+    # reported "No test cases matched" and this script still exited 0.
+    if grep -qE 'No test cases matched|No tests ran' <<<"$out"; then
+        echo "FAIL: $t matched NO test cases -- nothing was executed." >&2
+        echo "      unittest exits 0 for this, so it would otherwise pass silently." >&2
+        echo "      Check the file exists, and that nothing is rewriting" >&2
+        echo "      test/sql/live/ concurrently (materialise regenerates it)." >&2
+        failed=1
+    fi
     if grep -q 'All tests were skipped' <<<"$out"; then
         echo "FAIL: $t was SKIPPED, not run." >&2
         echo "      Credentials are configured, so a skip here tests nothing." >&2
