@@ -18,7 +18,7 @@ The eight criteria the project set itself, and where each stands.
 | 5 | CI green on all target platforms, stable + LTS | met — 36 checks green on the v2026.08.01 commit |
 | 6 | `datazoo-oauth2` standalone **and `erpl-web` consuming it** with no remaining copy | **open** — deferred by D-2, not dropped |
 | 7 | No credential in the repo, in any log, or in any error message | met, gated by `make check_credentials` |
-| 8 | Accepted into `duckdb/community-extensions` | submitted 2026-07-30 (PR #2407), retargeted to v2026.08.01 on 2026-08-01; still open |
+| 8 | Accepted into `duckdb/community-extensions` | submitted 2026-07-30 (PR #2407), retargeted to v2026.08.03 on 2026-08-03; still open |
 
 ## Before tagging
 
@@ -103,8 +103,8 @@ Two consequences worth knowing:
   `make check_stamp` now fails when HEAD is on a tag and the string is not it.
 
 ```bash
-git tag -a v2026.08.01 -m "gdrive 2026.08.01"
-git push origin v2026.08.01
+git tag -a v2026.08.03 -m "gdrive 2026.08.03"
+git push origin v2026.08.03
 ```
 
 Before tagging, update **both**:
