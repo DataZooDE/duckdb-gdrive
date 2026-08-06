@@ -56,3 +56,49 @@ jobs:
       ci_tools_version: v1.4-andium
       extension_name: gdrive
       exclude_archs: 'windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'
+
+  # Publish the built binaries to the erpl.io distribution bucket, so users can
+  #   INSTALL gdrive FROM 'http://get.erpl.io';   (DuckDB started with -unsigned,
+  # as the binary is unsigned). This is a mirror of the community-extensions
+  # channel (D-4), not a replacement -- it lets erpl.io ship a build the moment
+  # a tag lands, without waiting on the community build queue, and serves the
+  # 1.4 LTS line the same way.
+  #
+  # Both DuckDB lines are deployed. The S3 key carries the DuckDB version
+  # (see scripts/extension-upload.sh), so the two uploads land on distinct
+  # paths and DuckDB resolves whichever matches the client it runs -- deploying
+  # only one line would leave users on the other with a 404 at INSTALL.
+  #
+  # Gated to main / version tags: PRs build and test but never deploy, so the
+  # deploy never needs OIDC credentials on a pull request. The reusable deploy
+  # workflow assumes the erpl AWS role via OIDC (id-token: write above) and
+  # reads the bucket from the DEPLOY_S3_BUCKET repo/org variable.
+  duckdb-stable-deploy:
+    name: Deploy extension binaries (v1.5.5)
+    needs: duckdb-stable-build
+    # Run even if a non-essential matrix arch failed; the deploy fans out per
+    # arch and only uploads the artifacts that actually exist.
+    if: ${{ !cancelled() && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
+    uses: ./.github/workflows/_extension_deploy.yml
+    secrets: inherit
+    with:
+      extension_name: gdrive
+      duckdb_version: v1.5.5
+      ci_tools_version: v1.5-variegata
+      exclude_archs: 'windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'
+      deploy_latest: ${{ startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' }}
+      deploy_versioned: ${{ startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' }}
+
+  duckdb-lts-deploy:
+    name: Deploy extension binaries (v1.4.5 LTS)
+    needs: duckdb-lts-build
+    if: ${{ !cancelled() && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
+    uses: ./.github/workflows/_extension_deploy.yml
+    secrets: inherit
+    with:
+      extension_name: gdrive
+      duckdb_version: v1.4.5
+      ci_tools_version: v1.4-andium
+      exclude_archs: 'windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'
+      deploy_latest: ${{ startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' }}
+      deploy_versioned: ${{ startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' }}
