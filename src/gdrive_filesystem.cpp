@@ -14,6 +14,7 @@
 #include <functional>
 #include <limits>
 #include <utility>
+#include "gdrive_banner.hpp"
 
 namespace duckdb {
 namespace gdrive {
@@ -379,6 +380,7 @@ std::string GDriveFileSystem::DisambiguatePath(const std::string &parent_path, c
 
 unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFlags flags,
                                                   optional_ptr<FileOpener> opener) {
+	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, {
 	auto &context = RequireClientContext(opener, path);
 	auto parsed = ParseGDriveUri(path);
 	if (!parsed.ok) {
@@ -680,6 +682,7 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 	}
 
 	return std::move(handle);
+	});
 }
 
 //! The block cache key for one file under one identity.
@@ -1050,6 +1053,7 @@ bool GDriveFileSystem::DirectoryExists(const string &directory, optional_ptr<Fil
 }
 
 void GDriveFileSystem::CreateDirectory(const string &directory, optional_ptr<FileOpener> opener) {
+	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, {
 	auto &context = RequireClientContext(opener, directory);
 	auto parsed = ParseGDriveUri(directory);
 	if (!parsed.ok) {
@@ -1058,6 +1062,7 @@ void GDriveFileSystem::CreateDirectory(const string &directory, optional_ptr<Fil
 	auto auth = GetAuthContext(context, directory);
 	auto client = CreateGDriveClient(auth);
 	MutateCreateDirectory(*client, cache, auth, parsed.uri);
+	});
 }
 
 void GDriveFileSystem::RemoveDirectory(const string &directory, optional_ptr<FileOpener> opener) {
@@ -1074,6 +1079,7 @@ void GDriveFileSystem::RemoveDirectory(const string &directory, optional_ptr<Fil
 
 bool GDriveFileSystem::ListFiles(const string &directory, const std::function<void(const string &, bool)> &callback,
                                  FileOpener *opener) {
+	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, {
 	optional_ptr<FileOpener> op(opener);
 	auto &context = RequireClientContext(op, directory);
 	if (!HasAnyGDriveSecret(context)) {
@@ -1116,9 +1122,11 @@ bool GDriveFileSystem::ListFiles(const string &directory, const std::function<vo
 		callback(name, child.IsFolder());
 	}
 	return true;
+	});
 }
 
 void GDriveFileSystem::MoveFile(const string &source, const string &target, optional_ptr<FileOpener> opener) {
+	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, {
 	auto &context = RequireClientContext(opener, source);
 	auto src_parsed = ParseGDriveUri(source);
 	if (!src_parsed.ok) {
@@ -1132,9 +1140,11 @@ void GDriveFileSystem::MoveFile(const string &source, const string &target, opti
 	auto client = CreateGDriveClient(auth);
 	bool permanent = GetBoolSetting(opener, "gdrive_permanent_delete", false);
 	MutateMoveFile(*client, cache, auth, src_parsed.uri, dst_parsed.uri, permanent);
+	});
 }
 
 void GDriveFileSystem::RemoveFile(const string &filename, optional_ptr<FileOpener> opener) {
+	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, {
 	auto &context = RequireClientContext(opener, filename);
 	auto parsed = ParseGDriveUri(filename);
 	if (!parsed.ok) {
@@ -1144,9 +1154,11 @@ void GDriveFileSystem::RemoveFile(const string &filename, optional_ptr<FileOpene
 	auto client = CreateGDriveClient(auth);
 	bool permanent = GetBoolSetting(opener, "gdrive_permanent_delete", false);
 	MutateRemoveFile(*client, cache, auth, parsed.uri, permanent);
+	});
 }
 
 vector<OpenFileInfo> GDriveFileSystem::Glob(const string &path, FileOpener *opener) {
+	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, {
 	optional_ptr<FileOpener> op(opener);
 	auto &context = RequireClientContext(op, path);
 	// Deliberately NOT swallowed into "no matches": a missing secret is a
@@ -1362,6 +1374,7 @@ vector<OpenFileInfo> GDriveFileSystem::Glob(const string &path, FileOpener *open
 		}
 	}
 	return result;
+	});
 }
 
 void GDriveFileSystem::FileSync(FileHandle &handle) {

@@ -564,3 +564,18 @@ and no recorded-HTTP layer. See `scripts/setup_ci_drive.sh`.
 ## Licence
 
 MIT. See `LICENSE`.
+
+## Feedback
+
+If `gdrive` misbehaves — an auth flow that will not complete, a file that will not
+read, a glob that misses — please [open an issue](https://github.com/DataZooDE/duckdb-gdrive/issues).
+Drive behaviour varies with account type, shared-drive setup and quota in ways we cannot
+reproduce here, so a report with your setup is the fastest path to a fix. Filesystem
+errors end with that link.
+
+If it saved you time, a star on the repo helps other people find it.
+
+The first time you load the extension in an interactive terminal each day, a small
+banner says the same thing. It never prints when output is piped, in notebooks, or in
+CI. Silence it with `SET datazoo_banner = false;` or `DATAZOO_NO_BANNER=1`.
+
