@@ -20,6 +20,16 @@ CREATE SECRET (TYPE gdrive);
 SELECT count(*) FROM 'gdrive://Finance/2026/actuals.parquet';
 ```
 
+The community build is the default. A tag-fresh mirror is also published to the
+erpl.io bucket on every release, so you can install it directly — start DuckDB
+with `-unsigned`, because that binary is unsigned:
+
+```sql
+-- duckdb -unsigned
+INSTALL gdrive FROM 'http://get.erpl.io';
+LOAD gdrive;
+```
+
 For a server, CI job, or anything unattended, name a key file instead:
 
 ```sql
