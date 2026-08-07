@@ -14,6 +14,12 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/function/scalar_function.hpp"
+#include "gdrive_banner.hpp"
+
+// Deliberately outside namespace duckdb: the banner library is DuckDB-agnostic
+// and the guarded filesystem methods refer to this object.
+const datazoo::BannerInfo GDRIVE_BANNER {
+    "gdrive", "0.1.0", "https://github.com/DataZooDE/duckdb-gdrive"};
 
 namespace duckdb {
 
@@ -159,6 +165,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Registered here for want of a better home -- they are scheme-generic and
 	// know nothing about Drive (see gdrive_vfs_functions.hpp).
 	gdrive::RegisterVfsFunctions(loader);
+
+	datazoo::RegisterBannerOption(loader);
+	// Last, so a load that fails earlier never advertises itself. Silent unless
+	// stderr is a terminal and the ~/.duckdb stamp is over a day old.
+	datazoo::ShowBanner(GDRIVE_BANNER);
 }
 
 void GdriveExtension::Load(ExtensionLoader &loader) {

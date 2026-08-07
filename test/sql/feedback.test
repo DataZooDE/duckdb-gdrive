@@ -1,0 +1,30 @@
+# name: test/sql/feedback.test
+# description: The feedback banner's two contracts: filesystem errors carry an
+#              issue link, and the banner never writes anything under a test runner.
+# group: [gdrive]
+
+require gdrive
+
+# --- This extension's surface is a FileSystem, not registered function pointers,
+#     so DATAZOO_GUARD does not apply -- the user-facing GDriveFileSystem methods
+#     wrap their bodies in DATAZOO_GUARDED_BLOCK instead. This asserts that path.
+statement error
+SELECT * FROM read_csv('gdrive://nonexistent/file.csv');
+----
+https://github.com/DataZooDE/duckdb-gdrive/issues
+
+# The link is appended, not substituted: the real diagnostic, which tells the
+# user exactly what to do next, must survive.
+statement error
+SELECT * FROM read_csv('gdrive://nonexistent/file.csv');
+----
+no gdrive secret configured
+
+# --- The opt-out knob exists and is settable. The banner itself cannot be
+#     observed from a .test file at all -- stderr is not a tty here, which is
+#     precisely the guarantee that keeps this suite's expected output unchanged.
+statement ok
+SET datazoo_banner = false;
+
+statement ok
+SET datazoo_banner = true;

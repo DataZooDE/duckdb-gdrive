@@ -41,6 +41,16 @@ include_directories(./duckdb/third_party/httplib)
 # Anonymous usage telemetry, shared with ../erpl, ../erpl-web, ../quack-oauth.
 # Native only -- it uses duckdb_httplib_openssl::SSLClient, not portable to
 # wasm. Opt-out: `gdrive_telemetry_enabled` setting / DATAZOO_DISABLE_TELEMETRY.
+# Feedback banner (header-only). Telemetry follows the wasm split below: on
+# EMSCRIPTEN there is no posthog-telemetry and so no telemetry.hpp to include.
+if(NOT EMSCRIPTEN)
+    set(DATAZOO_BANNER_TELEMETRY ON CACHE BOOL "" FORCE)
+    set(DATAZOO_BANNER_TELEMETRY_INCLUDE_DIR
+        ${CMAKE_CURRENT_SOURCE_DIR}/posthog-telemetry/include CACHE PATH "" FORCE)
+endif()
+add_subdirectory(datazoo-banner)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/datazoo-banner/include)
+
 if(NOT EMSCRIPTEN)
     include_directories(posthog-telemetry/include)
     add_subdirectory(posthog-telemetry)
