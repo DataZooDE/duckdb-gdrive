@@ -129,6 +129,11 @@ jobs:
       # runs. Without it the step printed "SKIP: no stock duckdb on PATH" and
       # passed -- a green line for work not done, which is the failure mode
       # this whole gate exists to prevent.
+      #
+      # Installing the CLI and the check having run are still two different
+      # facts, so smoke_loadable now treats a skip as FATAL whenever CI is set:
+      # if this step breaks, or the version below drifts from the script's
+      # WANT_VERSION, the gate fails loudly instead of passing on a skip.
       - name: Install stock duckdb v1.5.5
         run: |
           curl -sSLo /tmp/duckdb.zip \

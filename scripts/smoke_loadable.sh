@@ -12,14 +12,38 @@
 # DuckDB. Every test passed throughout.
 #
 # Skips (rather than fails) when no matching stock duckdb is on PATH -- the
-# version must match exactly, so we cannot demand one. CI's distribution
-# pipeline runs the equivalent check on every platform.
+# version must match exactly, so a developer without one still gets a green
+# run. CI's distribution pipeline runs the equivalent check on every platform.
+#
+# In CI that leniency is wrong, and the workflow installs a stock CLI of the
+# exact version precisely so this script runs for real. But "installed the
+# CLI" and "the check ran" were still two different facts: if the install step
+# broke, or WANT_VERSION drifted from the version the workflow downloads, both
+# SKIP paths exited 0 and the gate passed without loading anything. Silent
+# skips are the exact failure mode this file exists to catch, so under CI a
+# skip is a failure. Set SMOKE_LOADABLE_STRICT=0 to opt out, or =1 to demand
+# the real check locally.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
 EXT="$PWD/build/release/extension/gdrive/gdrive.duckdb_extension"
 WANT_VERSION="v1.5.5"
+STRICT="${SMOKE_LOADABLE_STRICT:-${CI:+1}}"
+STRICT="${STRICT:-0}"
+
+# Report a condition that stops the real check from running: fatal under
+# STRICT, an honest skip otherwise.
+skip_or_fail() {
+    if [[ "$STRICT" == "1" ]]; then
+        echo "FAIL: $1" >&2
+        echo "      Refusing to report success for a check that did not run." >&2
+        echo "      (SMOKE_LOADABLE_STRICT=$STRICT)" >&2
+        exit 1
+    fi
+    echo "SKIP: $1"
+    exit 0
+}
 
 if [[ ! -f "$EXT" ]]; then
     echo "FAIL: $EXT not built. Run \`make\` first." >&2
@@ -27,15 +51,16 @@ if [[ ! -f "$EXT" ]]; then
 fi
 
 if ! command -v duckdb >/dev/null 2>&1; then
-    echo "SKIP: no stock \`duckdb\` on PATH to load the artifact into."
-    exit 0
+    skip_or_fail "no stock \`duckdb\` on PATH to load the artifact into."
 fi
 
 have="$(duckdb -noheader -list -c "SELECT version();" 2>/dev/null || true)"
 if [[ "$have" != "$WANT_VERSION" ]]; then
-    echo "SKIP: stock duckdb is $have, artifact targets $WANT_VERSION."
-    echo "      (An extension only loads into the exact version it was built for.)"
-    exit 0
+    # An extension only loads into the exact version it was built for, so a
+    # mismatch cannot be worked around here -- but in CI it means the stock
+    # CLI the workflow installs has drifted from WANT_VERSION, which is a
+    # real defect rather than a missing local tool.
+    skip_or_fail "stock duckdb is ${have:-unknown}, artifact targets $WANT_VERSION."
 fi
 
 # ---------------------------------------------------------------------------

@@ -34,6 +34,9 @@ rm -rf build/release    # MANDATORY if the submodule moved -- see below
 GEN=ninja make
 make check_stamp        # artifact built for the DuckDB we target
 make smoke_loadable     # artifact LOADS into a stock duckdb
+                        # skips without a matching stock duckdb on PATH; run
+                        # SMOKE_LOADABLE_STRICT=1 make smoke_loadable before a
+                        # release so a skip fails instead of passing quietly
 make smoke_static       # only platform libraries dynamically linked
 make verify_readme      # README <-> code agree in BOTH directions
 make latency            # per-request Drive latency; the figures the docs quote

@@ -345,6 +345,20 @@ tests use the statically linked shell and never load the shipped artifact.
 `make check_stamp` and `make smoke_loadable` now catch this; the warning in
 the Build section above was already there and was not enough.
 
+**A gate that can skip will eventually skip, and a skip reads as a pass.**
+`smoke_loadable` exits 0 when there is no matching stock `duckdb` on PATH, so
+CI installs one -- but "the CLI was installed" and "the check ran" are two
+different facts, and nothing asserted the second. It now treats a skip as
+FATAL whenever `CI` is set (`SMOKE_LOADABLE_STRICT=0` opts out, `=1` demands
+the real check locally), so a broken install step or a `WANT_VERSION` that
+drifts from the version `Checks.yml` downloads fails loudly. The same class of
+bug shipped fleet-wide in the smoke-test rollout: the reusable workflow's skip
+gate matched `exclude_archs` by SUBSTRING, so `windows_amd64_mingw` also
+matched `windows_amd64` and every Windows smoke job reported success without
+downloading an artifact. Five repos merged green before a *different* bug made
+Linux and macOS fail while Windows "passed". When part of a matrix fails, ask
+why the rest passed -- an implausible pass is a lead, not a relief.
+
 **DuckDB versions ITSELF from `git describe --tags` inside `duckdb/`.**
 `actions/checkout` does not fetch submodule tags, so without an explicit
 `git -C duckdb fetch --tags` the build falls back to a dummy `v0.0.1` and
