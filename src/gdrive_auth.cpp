@@ -369,6 +369,154 @@ RefreshResult RefreshUserToken(const std::string &client_id, const std::string &
 	return result;
 }
 
+//! Exchange a workload-identity subject token for a Drive access token.
+//!
+//! Two hops, and BOTH are required for Drive. STS federates the platform's
+//! subject token into a short-lived federated token, which by itself carries
+//! only `cloud-platform`; the impersonation call is what mints a token for a
+//! real service account with the Drive scope. Skipping the second hop yields
+//! a token Drive rejects with a 403 that reads like a permissions problem.
+//!
+//! The subject token is read HERE, not at parse time. A projected Kubernetes
+//! token is rotated under the process (hourly), so a value captured when the
+//! secret was created works until it silently does not.
+RefreshResult ExchangeExternalAccountToken(const AdcExternalAccount &ext, const std::string &scope,
+                                            int64_t now_unix) {
+	RefreshResult result;
+
+	// The platform writes this; a missing file means the pod is not configured
+	// for federation, which is worth saying plainly rather than as an STS 400.
+	std::ifstream token_file(ext.subject_token_path, std::ios::binary);
+	if (!token_file.good()) {
+		result.error = "no workload-identity token at '" + ext.subject_token_path +
+		                "'. This path is written by the platform (a projected service-account "
+		                "token, on Kubernetes); if it is absent the workload is not federated.";
+		return result;
+	}
+	std::ostringstream token_ss;
+	token_ss << token_file.rdbuf();
+	std::string subject_token = token_ss.str();
+	// A projected token file ends with a newline often enough to matter, and
+	// STS rejects the token rather than trimming it.
+	while (!subject_token.empty() && (subject_token.back() == '\n' || subject_token.back() == '\r')) {
+		subject_token.pop_back();
+	}
+	if (subject_token.empty()) {
+		result.error = "the workload-identity token at '" + ext.subject_token_path + "' is empty";
+		return result;
+	}
+
+	// --- hop 1: STS token exchange -----------------------------------------
+	std::string sts_host, sts_path;
+	if (!SplitUrl(ext.token_url, sts_host, sts_path)) {
+		result.error = "the credentials name an unusable token_url";
+		return result;
+	}
+	// cloud-platform, NOT the Drive scope: a federated token may only carry
+	// scopes the pool grants, and the Drive scope is applied at impersonation.
+	const std::string sts_body =
+	    "grant_type=" + UrlEncodeFormValue("urn:ietf:params:oauth:grant-type:token-exchange") +
+	    "&audience=" + UrlEncodeFormValue(ext.audience) +
+	    "&scope=" + UrlEncodeFormValue("https://www.googleapis.com/auth/cloud-platform") +
+	    "&requested_token_type=" + UrlEncodeFormValue("urn:ietf:params:oauth:token-type:access_token") +
+	    "&subject_token_type=" + UrlEncodeFormValue(ext.subject_token_type) +
+	    "&subject_token=" + UrlEncodeFormValue(subject_token);
+
+	duckdb_httplib_openssl::Client sts(sts_host);
+	sts.set_connection_timeout(30);
+	sts.set_read_timeout(30);
+	sts.set_write_timeout(30);
+	sts.set_follow_location(true);
+	auto sts_response = sts.Post(sts_path.c_str(), sts_body, "application/x-www-form-urlencoded");
+	if (!sts_response) {
+		result.error = "no response from the STS endpoint (" + ext.token_url + "); check network connectivity";
+		return result;
+	}
+	auto sts_parsed = ParseRefreshTokenResponse(sts_response->body);
+	if (sts_response->status != 200) {
+		std::string detail;
+		if (sts_parsed.parsed_ok) {
+			detail = sts_parsed.error_description.empty() ? sts_parsed.error : sts_parsed.error_description;
+		}
+		result.error = "STS token exchange returned HTTP " + std::to_string(sts_response->status) +
+		                (detail.empty() ? std::string() : (": " + detail)) +
+		                "\n\nA rejected subject token usually means the audience does not match the "
+		                "workload identity pool provider this token was minted for.";
+		return result;
+	}
+	if (!sts_parsed.parsed_ok || sts_parsed.access_token.empty()) {
+		result.error = "the STS response contained no access_token";
+		return result;
+	}
+
+	// --- hop 2: impersonate the service account, WITH the Drive scope ------
+	if (ext.service_account_impersonation_url.empty()) {
+		result.error =
+		    "these credentials federate an identity but name no "
+		    "service_account_impersonation_url, so no token can carry the Drive scope. Add a "
+		    "service account to the credential configuration.";
+		return result;
+	}
+	std::string imp_host, imp_path;
+	if (!SplitUrl(ext.service_account_impersonation_url, imp_host, imp_path)) {
+		result.error = "the credentials name an unusable service_account_impersonation_url";
+		return result;
+	}
+	picojson::object imp_body_obj;
+	picojson::array scopes;
+	scopes.emplace_back(scope);
+	imp_body_obj["scope"] = picojson::value(scopes);
+	imp_body_obj["lifetime"] = picojson::value(std::string("3600s"));
+	const std::string imp_body = picojson::value(imp_body_obj).serialize();
+
+	duckdb_httplib_openssl::Client imp(imp_host);
+	imp.set_connection_timeout(30);
+	imp.set_read_timeout(30);
+	imp.set_write_timeout(30);
+	imp.set_follow_location(true);
+	duckdb_httplib_openssl::Headers imp_headers = {{"Authorization", "Bearer " + sts_parsed.access_token}};
+	auto imp_response = imp.Post(imp_path.c_str(), imp_headers, imp_body, "application/json");
+	if (!imp_response) {
+		result.error = "no response from the service-account impersonation endpoint (" +
+		                ext.service_account_impersonation_url + "); check network connectivity";
+		return result;
+	}
+	if (imp_response->status != 200) {
+		// The body names the missing role, which is the actual fix and is not
+		// credential material -- it is an IAM policy statement about a
+		// principal that just failed to use it.
+		result.error = "service-account impersonation returned HTTP " +
+		                std::to_string(imp_response->status) +
+		                "\n\nThe federated principal needs roles/iam.workloadIdentityUser on the "
+		                "service account it impersonates.";
+		return result;
+	}
+
+	// A DIFFERENT response shape from the token endpoint: camelCase
+	// `accessToken`, and `expireTime` as an RFC 3339 STRING rather than a
+	// lifetime in seconds. Reusing ParseRefreshTokenResponse here would find
+	// neither field and report "no access_token" for a successful call.
+	picojson::value imp_root;
+	if (!picojson::parse(imp_root, imp_response->body).empty() || !imp_root.is<picojson::object>()) {
+		result.error = "the impersonation response was not valid JSON";
+		return result;
+	}
+	const auto &imp_obj = imp_root.get<picojson::object>();
+	auto token_it = imp_obj.find("accessToken");
+	if (token_it == imp_obj.end() || !token_it->second.is<std::string>()) {
+		result.error = "the impersonation response contained no accessToken";
+		return result;
+	}
+
+	result.ok = true;
+	result.access_token = token_it->second.get<std::string>();
+	// Derived from the lifetime we REQUESTED rather than parsed from
+	// `expireTime`: the requested value is what was granted, and adding an
+	// RFC 3339 parser here would be a second thing to get wrong for no gain.
+	result.expires_at_unix = now_unix + 3600;
+	return result;
+}
+
 std::string GetOrEmpty(const KeyValueSecret &kv, const char *key) {
 	Value v;
 	if (kv.TryGetValue(key, v) && !v.IsNull()) {
@@ -592,7 +740,19 @@ GDriveAuthContext BuildContextFromCredentialChain(ClientContext &context, const 
 	std::string access_token;
 	int64_t expires_at = 0;
 
-	if (parsed.kind == AdcKind::AUTHORIZED_USER) {
+	if (parsed.kind == AdcKind::EXTERNAL_ACCOUNT) {
+		// Workload identity federation. No key is involved: the platform's
+		// subject token is exchanged at STS and then used to impersonate a
+		// service account WITH the Drive scope.
+		RefreshResult federated = ExchangeExternalAccountToken(parsed.external_account, scope, NowUnix());
+		if (!federated.ok) {
+			throw IOException("gdrive secret '%s': failed to obtain an access token from the "
+			                   "workload-identity credentials at '%s': %s",
+			                   secret_name.c_str(), adc_path.c_str(), federated.error.c_str());
+		}
+		access_token = federated.access_token;
+		expires_at = federated.expires_at_unix;
+	} else if (parsed.kind == AdcKind::AUTHORIZED_USER) {
 		RefreshResult refreshed = RefreshUserToken(parsed.user.client_id, parsed.user.client_secret,
 		                                            parsed.user.refresh_token, NowUnix());
 		if (!refreshed.ok) {

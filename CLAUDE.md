@@ -51,6 +51,32 @@ working pattern for something fiddly — capture it here. A paragraph under the
 right section is enough. The bar: *would past-me have saved an hour if this
 had been written down?*
 
+## JSON parsing: picojson, and why not duckdb's yyjson
+
+Asked and answered (2026-09-01): reuse the parser already in the duckdb source
+tree, as this repo already does for cpp-httplib. Rejected, for two reasons
+that are unlikely to change.
+
+**jwt-cpp makes picojson non-removable.** It is configured with the
+kazuho-picojson traits (`jwt-cpp/traits/kazuho-picojson/defaults.h`, included
+by five sources), so picojson *is* jwt-cpp's JSON type for the RFC 7523
+minting path. Switching our own parse calls to yyjson would leave the vcpkg
+dependency exactly where it is and put a second JSON library beside it.
+
+**It would break the pure/duckdb split.** yyjson lives under
+`duckdb/third_party`, and pure-logic targets deliberately do not get that
+include path (see the httplib note in CMakeLists.txt). `gdrive_adc.cpp` is a
+pure source precisely so the credential-document parser can be Catch2-tested
+with no duckdb.hpp and no I/O. Reaching into the duckdb tree from it would
+move it to the duckdb-linked side and cost it that coverage.
+
+There is also the `PICOJSON_USE_INT64` ODR trap documented in CMakeLists.txt.
+Mixing a second JSON library into those same translation units adds surface
+next to a hazard that has already bitten once.
+
+If this is revisited, the question to answer first is not "which parser" but
+"does the ADC parser stay pure" — everything else follows from that.
+
 ## Build
 
 Always use ninja; `make` without it takes 2–3× longer.

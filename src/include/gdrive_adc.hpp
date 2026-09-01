@@ -43,7 +43,35 @@ enum class AdcKind {
 	UNKNOWN,
 	AUTHORIZED_USER, //!< `gcloud auth application-default login`
 	SERVICE_ACCOUNT, //!< a downloaded service-account key
-	EXTERNAL_ACCOUNT //!< workload identity federation -- recognised, unsupported
+	EXTERNAL_ACCOUNT //!< workload identity federation
+};
+
+//! An `external_account` (workload identity federation) document.
+//!
+//! Contains NO secret. That is the whole reason it exists: the caller proves
+//! its identity with a short-lived token the platform writes to disk, so a
+//! cluster needs no downloaded service-account key to store, mount or rotate.
+//!
+//! Only a FILE-sourced subject token is represented. `url`-sourced tokens
+//! (AWS/Azure/GCE metadata) are a different exchange and are refused by name
+//! in the parser rather than accepted with an empty path.
+struct AdcExternalAccount {
+	//! STS audience -- the full WIF provider resource name. GCP rejects a
+	//! subject token minted for any other audience, so this is also what
+	//! makes a leaked token non-replayable elsewhere.
+	std::string audience;
+	std::string subject_token_type;
+	//! STS endpoint the subject token is exchanged at.
+	std::string token_url;
+	//! `…:generateAccessToken` for the service account to impersonate.
+	//! Empty when the federated token is used directly, which is legal but
+	//! cannot carry the Drive scope on its own.
+	std::string service_account_impersonation_url;
+	//! Path the platform writes the subject token to. Read at token time,
+	//! never at parse time -- it is rotated under the process (hourly, for a
+	//! projected Kubernetes token), so a value cached at parse time would
+	//! work until it silently did not.
+	std::string subject_token_path;
 };
 
 //! The refreshable triple out of an `authorized_user` ADC document. These are
@@ -61,6 +89,7 @@ struct AdcParse {
 	AdcKind kind = AdcKind::UNKNOWN;
 	AdcUserCredentials user;           //!< Valid when kind == AUTHORIZED_USER.
 	ServiceAccountKey service_account; //!< Valid when kind == SERVICE_ACCOUNT.
+	AdcExternalAccount external_account; //!< Valid when kind == EXTERNAL_ACCOUNT.
 };
 
 //! Environment inputs to ADC path resolution. Passed in rather than read, so
