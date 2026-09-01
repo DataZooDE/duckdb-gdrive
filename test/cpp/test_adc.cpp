@@ -103,15 +103,60 @@ TEST_CASE("a service_account document is delegated to the key parser", "[adc]") 
 	REQUIRE(parsed.service_account.client_email == "sa@p.iam.gserviceaccount.com");
 }
 
-TEST_CASE("an external_account document is recognised and refused by name", "[adc]") {
-	// Workload identity federation. We do not support it, but saying so beats
-	// "missing client_id", which is what a naive parser would report.
-	const std::string json = R"({"type": "external_account", "audience": "//iam.googleapis.com/x"})";
+TEST_CASE("an external_account document yields what the exchange needs", "[adc]") {
+	// Workload identity federation. This is the shape a Kubernetes workload
+	// gets: a projected service-account token on disk, exchanged at STS for a
+	// federated token, then used to impersonate a real service account. There
+	// is no key anywhere in it, which is the entire point -- the alternative
+	// for a cluster is a downloaded service-account key that must be stored,
+	// mounted and rotated.
+	//
+	// Verbatim shape of a real credential config (the k8s/Talos one), minus
+	// nothing: every field below is required to perform the exchange, so a
+	// parser that dropped any of them would produce a document that looks
+	// parsed and cannot mint a token.
+	const std::string json = R"({
+	  "type": "external_account",
+	  "audience": "//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/k8s/providers/talos",
+	  "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+	  "token_url": "https://sts.googleapis.com/v1/token",
+	  "service_account_impersonation_url": "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/sa@p.iam.gserviceaccount.com:generateAccessToken",
+	  "credential_source": {
+	    "file": "/var/run/secrets/gcp/token",
+	    "format": { "type": "text" }
+	  }
+	})";
+
+	auto parsed = ParseAdcJson(json);
+	REQUIRE(parsed.ok);
+	REQUIRE(parsed.kind == AdcKind::EXTERNAL_ACCOUNT);
+	REQUIRE(parsed.external_account.audience ==
+	        "//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/k8s/providers/talos");
+	REQUIRE(parsed.external_account.subject_token_type == "urn:ietf:params:oauth:token-type:jwt");
+	REQUIRE(parsed.external_account.token_url == "https://sts.googleapis.com/v1/token");
+	REQUIRE(parsed.external_account.service_account_impersonation_url ==
+	        "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/"
+	        "sa@p.iam.gserviceaccount.com:generateAccessToken");
+	REQUIRE(parsed.external_account.subject_token_path == "/var/run/secrets/gcp/token");
+}
+
+TEST_CASE("an external_account without a file credential_source is refused by name", "[adc]") {
+	// `url`-sourced subject tokens (AWS/Azure/GCE metadata) are a different
+	// exchange with a different failure surface. Refusing them by name keeps
+	// the "recognised but unsupported" arm this file has always had, rather
+	// than accepting a config that would fail later with an empty token path.
+	const std::string json = R"({
+	  "type": "external_account",
+	  "audience": "//iam.googleapis.com/x",
+	  "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+	  "token_url": "https://sts.googleapis.com/v1/token",
+	  "credential_source": { "url": "http://169.254.169.254/token" }
+	})";
 
 	auto parsed = ParseAdcJson(json);
 	REQUIRE_FALSE(parsed.ok);
 	REQUIRE(parsed.kind == AdcKind::EXTERNAL_ACCOUNT);
-	REQUIRE(parsed.error.find("external_account") != std::string::npos);
+	REQUIRE(parsed.error.find("credential_source") != std::string::npos);
 }
 
 TEST_CASE("a non-JSON document is rejected without echoing its content", "[adc]") {

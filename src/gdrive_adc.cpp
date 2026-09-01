@@ -157,14 +157,54 @@ AdcParse ParseAdcJson(const std::string &json_text) {
 	}
 
 	if (type == "external_account") {
-		// Workload identity federation. Recognised on purpose: falling through
-		// to "unexpected type" would be true but useless, and the naive
-		// alternative ("missing client_id") would be actively misleading.
+		// Workload identity federation: no key anywhere in the document. The
+		// caller proves its identity with a short-lived token the platform
+		// writes to disk, which is why a cluster can use this and does not
+		// need a downloaded service-account key to store, mount and rotate.
 		result.kind = AdcKind::EXTERNAL_ACCOUNT;
-		result.error =
-		    "\"external_account\" credentials (workload identity federation) are not supported "
-		    "by the gdrive extension. Use PROVIDER service_account with a key file, or "
-		    "`gcloud auth application-default login` for a user credential.";
+		result.external_account.audience = FindString(obj, "audience");
+		result.external_account.subject_token_type = FindString(obj, "subject_token_type");
+		result.external_account.token_url = FindString(obj, "token_url");
+		result.external_account.service_account_impersonation_url =
+		    FindString(obj, "service_account_impersonation_url");
+
+		auto source = obj.find("credential_source");
+		if (source == obj.end() || !source->second.is<picojson::object>()) {
+			result.error = "an \"external_account\" document is missing \"credential_source\", "
+			               "so there is no subject token to exchange.";
+			return result;
+		}
+		const auto &src = source->second.get<picojson::object>();
+		result.external_account.subject_token_path = FindString(src, "file");
+		if (result.external_account.subject_token_path.empty()) {
+			// `url`-sourced tokens (AWS/Azure/GCE metadata) are a different
+			// exchange with a different failure surface. Refusing by name
+			// beats accepting a config with an empty path, which would fail
+			// later as "cannot open \"\"".
+			result.error =
+			    "this \"external_account\" document has no \"credential_source\".\"file\". Only a "
+			    "file-sourced subject token is supported (a projected Kubernetes token, for "
+			    "example); url-sourced tokens are not.";
+			return result;
+		}
+
+		// Every remaining field is needed to perform the exchange, so a
+		// missing one is named here rather than at token time -- the failure
+		// would otherwise surface as an opaque STS 400.
+		std::string missing;
+		if (result.external_account.audience.empty()) {
+			missing = "audience";
+		} else if (result.external_account.token_url.empty()) {
+			missing = "token_url";
+		} else if (result.external_account.subject_token_type.empty()) {
+			missing = "subject_token_type";
+		}
+		if (!missing.empty()) {
+			result.error = "an \"external_account\" document is missing " + missing + ".";
+			return result;
+		}
+
+		result.ok = true;
 		return result;
 	}
 

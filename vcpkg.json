@@ -3,7 +3,23 @@
         "openssl",
         "jwt-cpp",
         "picojson",
-        "catch2"
+        {
+            "$comment": [
+                "Not on Windows, matching what CMakeLists.txt already decides:",
+                "GDRIVE_BUILD_UNIT_TESTS defaults OFF under MSVC because vcpkg",
+                "builds Catch2 against the dynamic CRT while DuckDB compiles our",
+                "sources against the static one (LNK2038), and find_package is",
+                "QUIET, so the test binary is simply not built there.",
+                "Installing it anyway cost a full Catch2 build on the one",
+                "platform that never uses it -- and on 2026-09-01 that build",
+                "started failing outright: it pulls msys2-runtime-3.5.4-2, which",
+                "msys2 has since removed from every mirror, so the pinned vcpkg",
+                "(2025-04-09) 404s and the whole Windows job dies in a",
+                "dependency it did not need."
+            ],
+            "name": "catch2",
+            "platform": "!windows"
+        }
     ],
     "vcpkg-configuration": {
         "overlay-ports": [
