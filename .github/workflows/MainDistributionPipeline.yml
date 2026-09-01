@@ -55,18 +55,27 @@ jobs:
       duckdb_version: v1.4.5
       ci_tools_version: v1.4-andium
       extension_name: gdrive
-      exclude_archs: 'windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'
-      # v1.4-andium still defaults to vcpkg ce613c4137 (2025-04-09), and that
-      # tree pins msys2-runtime-3.5.4-2 -- which msys2 has since removed from
-      # every mirror. Any port whose portfile calls vcpkg_acquire_msys then
-      # 404s before a line of our code compiles. OpenSSL's pkgconfig fixup is
-      # one such port, so this is not avoidable by trimming dependencies.
+      # windows_amd64 is excluded from the LTS line only, and it is a real
+      # loss recorded here rather than a tidy-up.
       #
-      # This is the SAME commit v1.5-variegata already defaults to, and the
-      # v1.5.5 Windows job on this very PR builds green with it -- so it is a
-      # value proven on this platform in this repo, not a guess at a newer
-      # revision.
-      vcpkg_commit: "84bab45d415d22042bd0b9081aea57f362da3f35"
+      # v1.4-andium defaults to vcpkg ce613c4137 (2025-04-09), whose tree pins
+      # msys2-runtime-3.5.4-2 -- removed from every msys2 mirror since. Every
+      # port whose portfile calls vcpkg_acquire_msys now 404s before a line of
+      # our code compiles. Catch2 was one such port and is excluded from
+      # Windows in vcpkg.json; OpenSSL's pkgconfig fixup is another and cannot
+      # be dropped, so trimming dependencies cannot fix this.
+      #
+      # Pinning the LTS job forward to v1.5-variegata's vcpkg (84bab45d) was
+      # tried and REJECTED: it resolves the msys2 404 but the v1.4 toolchain
+      # does not take that tree -- linux_arm64 then fails inside the Docker
+      # build, so the matrix ends up worse, not better.
+      #
+      # THE COST: a Windows user still on DuckDB 1.4 gets no artifact and a
+      # 404 at INSTALL. Windows remains built and shipped for v1.5.5, the
+      # current stable line. Remove this exclusion once v1.4-andium moves its
+      # vcpkg default forward, or once a revision is found that satisfies both
+      # the msys2 fix and the v1.4 toolchain on all four platforms.
+      exclude_archs: 'windows_amd64;windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'
 
   # Publish the built binaries to the erpl.io distribution bucket, so users can
   #   INSTALL gdrive FROM 'http://get.erpl.io';   (DuckDB started with -unsigned,
@@ -116,7 +125,10 @@ jobs:
     with:
       duckdb_version: v1.4.5
       extension_name: gdrive
-      exclude_archs: 'windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'
+      # Must match duckdb-lts-build's exclusions exactly: this stage looks for
+      # an artifact per arch, so smoke-testing an arch the build no longer
+      # produces fails on a missing download rather than on the extension.
+      exclude_archs: 'windows_amd64;windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'
 
   duckdb-lts-deploy:
     name: Deploy extension binaries (v1.4.5 LTS)
@@ -128,6 +140,7 @@ jobs:
       extension_name: gdrive
       duckdb_version: v1.4.5
       ci_tools_version: v1.4-andium
-      exclude_archs: 'windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'
+      # Same exclusions as the LTS build and smoke test.
+      exclude_archs: 'windows_amd64;windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'
       deploy_latest: ${{ startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' }}
       deploy_versioned: ${{ startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' }}
