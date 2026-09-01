@@ -56,6 +56,17 @@ jobs:
       ci_tools_version: v1.4-andium
       extension_name: gdrive
       exclude_archs: 'windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'
+      # v1.4-andium still defaults to vcpkg ce613c4137 (2025-04-09), and that
+      # tree pins msys2-runtime-3.5.4-2 -- which msys2 has since removed from
+      # every mirror. Any port whose portfile calls vcpkg_acquire_msys then
+      # 404s before a line of our code compiles. OpenSSL's pkgconfig fixup is
+      # one such port, so this is not avoidable by trimming dependencies.
+      #
+      # This is the SAME commit v1.5-variegata already defaults to, and the
+      # v1.5.5 Windows job on this very PR builds green with it -- so it is a
+      # value proven on this platform in this repo, not a guess at a newer
+      # revision.
+      vcpkg_commit: "84bab45d415d22042bd0b9081aea57f362da3f35"
 
   # Publish the built binaries to the erpl.io distribution bucket, so users can
   #   INSTALL gdrive FROM 'http://get.erpl.io';   (DuckDB started with -unsigned,
