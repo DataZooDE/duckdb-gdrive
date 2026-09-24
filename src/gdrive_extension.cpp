@@ -1,6 +1,7 @@
 #define DUCKDB_EXTENSION_MAIN
 
 #include "gdrive_extension.hpp"
+#include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 #include "gdrive_filesystem.hpp"
 #include "gdrive_stats.hpp"
 #include "gdrive_version.hpp"
@@ -53,8 +54,16 @@ static void LoadInternal(ExtensionLoader &loader) {
 	PostHogTelemetry::Instance().CaptureExtensionLoad("gdrive", gdrive::GdriveVersion());
 #endif
 
-	ScalarFunction version_fn("gdrive_version", {}, LogicalType::VARCHAR, GdriveVersionScalar);
-	loader.RegisterFunction(version_fn);
+	{
+		CreateScalarFunctionInfo info(
+		    ScalarFunction("gdrive_version", {}, LogicalType::VARCHAR, GdriveVersionScalar));
+		FunctionDescription d;
+		d.description = "Returns the version of the loaded gdrive extension.";
+		d.examples = {"SELECT gdrive_version()"};
+		d.categories = {"gdrive", "meta"};
+		info.descriptions.push_back(std::move(d));
+		loader.RegisterFunction(std::move(info));
+	}
 
 	// The extension point (HLD section 2): everything layered on DuckDB's
 	// filesystem -- read_parquet, read_csv, COPY, glob, ATTACH -- inherits
