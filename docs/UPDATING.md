@@ -5,7 +5,7 @@ repository must be rebuilt for every DuckDB release. REQ-NF-06 records this as
 a standing cost for the life of the project, not a one-off — it is written
 down here so it is a routine rather than a rediscovery.
 
-Current targets: **stable v1.5.5** and the **1.4 LTS** line (source v1.4.5).
+Current targets: **stable v1.5.6** and the **1.4 LTS** line (source v1.4.5).
 Local development builds against stable only; CI builds both.
 
 ## The routine

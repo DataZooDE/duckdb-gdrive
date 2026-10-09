@@ -28,7 +28,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 EXT="$PWD/build/release/extension/gdrive/gdrive.duckdb_extension"
-WANT_VERSION="v1.5.5"
+WANT_VERSION="v1.5.6"
 STRICT="${SMOKE_LOADABLE_STRICT:-${CI:+1}}"
 STRICT="${STRICT:-0}"
 

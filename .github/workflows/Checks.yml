@@ -121,7 +121,7 @@ jobs:
       # The artifact users actually install. Everything above tests the
       # statically linked shell, which never exercises the LOAD-time DuckDB
       # version handshake -- a stale CMake cache once stamped the artifact
-      # for a commit hash instead of v1.5.5 and it could not be loaded by
+      # for a commit hash instead of v1.5.6 and it could not be loaded by
       # anyone, while every test stayed green.
       - name: Extension stamped for the target DuckDB
         run: make check_stamp
@@ -134,10 +134,10 @@ jobs:
       # facts, so smoke_loadable now treats a skip as FATAL whenever CI is set:
       # if this step breaks, or the version below drifts from the script's
       # WANT_VERSION, the gate fails loudly instead of passing on a skip.
-      - name: Install stock duckdb v1.5.5
+      - name: Install stock duckdb v1.5.6
         run: |
           curl -sSLo /tmp/duckdb.zip \
-            https://github.com/duckdb/duckdb/releases/download/v1.5.5/duckdb_cli-linux-amd64.zip
+            https://github.com/duckdb/duckdb/releases/download/v1.5.6/duckdb_cli-linux-amd64.zip
           unzip -q -o /tmp/duckdb.zip -d /tmp/duckdb-cli
           sudo install -m 0755 /tmp/duckdb-cli/duckdb /usr/local/bin/duckdb
           duckdb -noheader -list -c "SELECT version();"
@@ -198,10 +198,10 @@ jobs:
       # BRD criterion 1, end to end: the artifact users install, in a stock
       # DuckDB, reading real Google Drive. Everything else in this workflow
       # exercises our statically linked development shell.
-      - name: Install stock duckdb v1.5.5
+      - name: Install stock duckdb v1.5.6
         run: |
           curl -sSLo /tmp/duckdb.zip \
-            https://github.com/duckdb/duckdb/releases/download/v1.5.5/duckdb_cli-linux-amd64.zip
+            https://github.com/duckdb/duckdb/releases/download/v1.5.6/duckdb_cli-linux-amd64.zip
           unzip -q -o /tmp/duckdb.zip -d /tmp/duckdb-cli
           sudo install -m 0755 /tmp/duckdb-cli/duckdb /usr/local/bin/duckdb
       - name: Shipped artifact reads real Drive from a stock duckdb

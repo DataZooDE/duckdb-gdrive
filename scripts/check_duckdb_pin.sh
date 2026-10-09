@@ -25,8 +25,8 @@ cd "$(dirname "$0")/.."
 # Pinned by SHA, not by tag name. CI checks submodules out WITHOUT tags, so
 # `git rev-parse v1.5.5^{commit}` fails there and the tag-based check failed
 # on a perfectly correct tree. The tag is kept only to make messages readable.
-WANT_TAG="v1.5.5"
-WANT_SHA="d8cdaa33fda8df955cc76ef58a280f68f4cd43fa"
+WANT_TAG="v1.5.6"
+WANT_SHA="069cc9f9b5be802405797faecc284961b07c70ef"
 
 if [[ ! -e duckdb/.git ]]; then
     echo "FAIL: duckdb submodule is not checked out. Run:" >&2
