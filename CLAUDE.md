@@ -250,7 +250,7 @@ test/sql/                     SQLLogicTest; *.test.template gets fixture ids
                               substituted at run time into test/sql/live/
 e2e/                          uv + pytest harness: fixture provisioning,
                               API-call-count assertions, write round trips
-duckdb/                       submodule, v1.5.5 (latest stable)
+duckdb/                       submodule, v1.5.6 (latest stable)
 extension-ci-tools/           submodule, v1.5-variegata (rolling 1.5 branch)
 ```
 

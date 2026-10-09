@@ -64,7 +64,7 @@ gh run list --repo DataZooDE/duckdb-gdrive --limit 4
 
 `Checks` covers hygiene, musl, the artifact, and the live suite.
 `Main Extension Distribution Pipeline` is the one that matters for
-publishing: it builds v1.5.5 and v1.4.5 LTS across Linux amd64/arm64, musl,
+publishing: it builds v1.5.6 and v1.4.5 LTS across Linux amd64/arm64, musl,
 Windows and both macOS architectures.
 
 ## Tagging
