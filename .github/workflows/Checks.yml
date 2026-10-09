@@ -10,6 +10,8 @@
 name: Checks
 on:
   push:
+    branches: [main]
+    tags: ['**']
   pull_request:
   workflow_dispatch:
   schedule:
@@ -27,6 +29,7 @@ jobs:
   # ---------------------------------------------------------------------------
   hygiene:
     name: Credential hygiene
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -39,6 +42,7 @@ jobs:
   # before anything expensive.
   pin:
     name: duckdb submodule on the shipped tag
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -58,6 +62,7 @@ jobs:
   # ---------------------------------------------------------------------------
   musl:
     name: musl compatibility
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -89,6 +94,7 @@ jobs:
 
   unit:
     name: Pure-logic + credential-free SQL
+    timeout-minutes: 55
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -154,6 +160,7 @@ jobs:
   # ---------------------------------------------------------------------------
   live:
     name: Live tests against real Google Drive
+    timeout-minutes: 60
     runs-on: ubuntu-latest
     # `secrets` is not available in job-level `if`, so gate on the event
     # instead: fork PRs have a head repo different from the base repo.
@@ -232,6 +239,7 @@ jobs:
   sweep:
     name: Sweep orphaned scratch folders
     if: github.event_name == 'schedule'
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
