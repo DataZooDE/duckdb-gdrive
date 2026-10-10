@@ -317,6 +317,33 @@ statement ok
 DROP SECRET gdrive_test;
 
 
+# With ONLY a secret SCOPEd to this run's folder, write_blob must still create
+# missing parents. It used to walk DOWN from the root, asking DirectoryExists
+# for gdrive://scratch -- which no secret covers -- and fail. It now walks UP
+# to the nearest existing folder. (Found in duckdb-sharepoint, same code.)
+statement ok
+CREATE SECRET gdrive_scoped (
+    TYPE gdrive,
+    PROVIDER config,
+    CLIENT_ID '${OAUTH_CLIENT_ID}',
+    CLIENT_SECRET '${OAUTH_CLIENT_SECRET}',
+    REFRESH_TOKEN '${USER_REFRESH_TOKEN}',
+    ROOT_FOLDER_ID '${DRIVE_ID}',
+    DRIVE_SCOPE 'https://www.googleapis.com/auth/drive',
+    SCOPE 'gdrive://scratch/${SCRATCH}'
+);
+
+statement ok
+SELECT write_blob('gdrive://scratch/${SCRATCH}/scoped/deep/x.txt', 'x'::BLOB);
+
+query I
+SELECT content::VARCHAR FROM read_blob('gdrive://scratch/${SCRATCH}/scoped/deep/x.txt')
+----
+x
+
+statement ok
+DROP SECRET gdrive_scoped;
+
 # ---------------------------------------------------------------------------
 # REQ-NF-04 -- least privilege BY DEFAULT, and proof that it is enforced
 # rather than decorative.
