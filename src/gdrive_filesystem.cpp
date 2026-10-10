@@ -576,6 +576,11 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 		}
 		throw IOException("gdrive: no such file or directory: '%s'", parsed.uri.ToString());
 	}
+	// A folder is not a file, and not absent either: opening one as a file
+	// used to hand back a 0-byte handle, so file_size() of a folder said 0.
+	if (meta.IsFolder()) {
+		throw IOException("gdrive: '%s' is a directory, not a file", parsed.uri.ToString());
+	}
 
 	// The path-walk cache may serve a leaf entry captured during an earlier
 	// Glob/ListFiles call; OpenFile re-fetches that leaf's own metadata fresh
@@ -1238,6 +1243,18 @@ vector<OpenFileInfo> GDriveFileSystem::Glob(const string &path, FileOpener *open
 
 	vector<OpenFileInfo> result;
 	for (auto &one_pattern : expanded) {
+		// An expansion may be a plain literal path ("{a,b}.txt" -> "a.txt").
+		// SplitGlob would make that whole path the "literal prefix" and list
+		// its children -- a file has none, so it never matched. Resolve it
+		// directly instead, like the no-metacharacter path above.
+		if (!HasGlobMetacharacters(one_pattern)) {
+			auto literal = ParseGDriveUri(std::string(GDRIVE_SCHEME) + one_pattern);
+			DriveFileMeta meta;
+			if (literal.ok && TryResolvePath(cache, *client, auth, literal.uri, meta) && !meta.IsFolder()) {
+				result.emplace_back(std::string(GDRIVE_SCHEME) + one_pattern);
+			}
+			continue;
+		}
 		auto split = SplitGlob(one_pattern);
 
 		std::string parent_id;
