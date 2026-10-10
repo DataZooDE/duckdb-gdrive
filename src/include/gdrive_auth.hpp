@@ -1,10 +1,12 @@
 #pragma once
 
+#include "duckdb/common/optional_ptr.hpp"
 #include <string>
 
 namespace duckdb {
 
 class ClientContext;
+class FileOpener;
 
 namespace gdrive {
 
@@ -67,12 +69,12 @@ struct GDriveAuthContext {
 //! Throws (DuckDB-side) when no secret matches or a refresh fails. The
 //! message names the secret and what to do, and never contains token
 //! material (REQ-NF-03).
-GDriveAuthContext GetAuthContext(ClientContext &context, const std::string &path);
+GDriveAuthContext GetAuthContext(optional_ptr<FileOpener> opener, const std::string &path);
 
 //! True when at least one gdrive secret is registered. Lets the filesystem
 //! produce "no gdrive secret configured; CREATE SECRET ..." rather than an
 //! opaque 401 from Google.
-bool HasAnyGDriveSecret(ClientContext &context);
+bool HasAnyGDriveSecret(optional_ptr<FileOpener> opener);
 
 } // namespace gdrive
 } // namespace duckdb

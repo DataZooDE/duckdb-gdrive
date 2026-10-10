@@ -313,6 +313,33 @@ require-env GDRIVE_CI_SA_KEY_FILE
 # match every gdrive:// path and which one wins is DuckDB's scope-resolution
 # order, not ours -- the write could quietly succeed as the user and this
 # test would assert nothing. This block is last in the file for that reason.
+# ATTACH a DuckDB database file stored on Drive, read-only. DuckDB 1.5
+# canonicalized the path to "gdrive:/..." ("database does not exist") and then
+# opened it with a database-level opener that has no client connection, which
+# the secret lookup required. (Found in duckdb-sharepoint, same two bugs.)
+statement ok
+ATTACH '__TEST_DIR__/gd_attach.duckdb' AS loc;
+
+statement ok
+CREATE TABLE loc.t AS SELECT i FROM range(100000) t(i);
+
+statement ok
+DETACH loc;
+
+statement ok
+SELECT write_blob('gdrive://scratch/${SCRATCH}/attach/db.duckdb', content) FROM read_blob('__TEST_DIR__/gd_attach.duckdb');
+
+statement ok
+ATTACH 'gdrive://scratch/${SCRATCH}/attach/db.duckdb' AS remote (READ_ONLY);
+
+query II
+SELECT count(*), sum(i) FROM remote.t;
+----
+100000	4999950000
+
+statement ok
+DETACH remote;
+
 statement ok
 DROP SECRET gdrive_test;
 

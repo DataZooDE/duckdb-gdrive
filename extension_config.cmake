@@ -42,7 +42,10 @@ if(NOT _gdrive_ddb_ver)
 endif()
 if(_gdrive_ddb_ver MATCHES "^v?1\\.4\\.")
   add_compile_definitions(_HAS_STD_BYTE=0)
-  message(STATUS "gdrive: DuckDB ${_gdrive_ddb_ver} (1.4 LTS) -- defining _HAS_STD_BYTE=0")
+  # FileSystem API that differs between the lines is guarded on this (e.g.
+  # CanonicalizePath, virtual only from 1.5).
+  add_compile_definitions(GDRIVE_DUCKDB_LTS=1)
+  message(STATUS "gdrive: DuckDB ${_gdrive_ddb_ver} (1.4 LTS) -- defining _HAS_STD_BYTE=0, GDRIVE_DUCKDB_LTS")
 endif()
 
 # ---------------------------------------------------------------------------
