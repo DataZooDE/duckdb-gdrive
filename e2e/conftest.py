@@ -34,6 +34,16 @@ def _load_dotenv() -> None:
         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
+def scrub(text: str) -> str:
+    """Remove credential values from text that may end up in a failure report
+    (and so in CI logs)."""
+    for name in ("GDRIVE_OAUTH_CLIENT_SECRET", "GDRIVE_USER_REFRESH_TOKEN", "GDRIVE_OAUTH_CLIENT_ID",):
+        value = os.environ.get(name)
+        if value:
+            text = text.replace(value, f"<{name}>")
+    return text
+
+
 _load_dotenv()
 
 from helpers.drive import Drive, credentials_available, user_delegation_available  # noqa: E402
@@ -188,15 +198,17 @@ def sql(duckdb_cli: Path):
     """
     def _run(statements: str, expect_error: bool = False) -> str:
         proc = subprocess.run(
-            [str(duckdb_cli), "-noheader", "-list", "-c", statements],
+            # Over stdin, never argv: a CREATE SECRET on the command line is
+            # readable by every user of the machine via ps / /proc.
+            [str(duckdb_cli), "-noheader", "-list"], input=statements,
             capture_output=True, text=True, timeout=600,
         )
         output = proc.stdout + proc.stderr
         if expect_error:
             if proc.returncode == 0:
-                raise AssertionError(f"expected an error, got success:\n{output}")
+                raise AssertionError(f"expected an error, got success:\n{scrub(output)}")
         elif proc.returncode != 0:
-            raise AssertionError(f"duckdb failed ({proc.returncode}):\n{output}")
+            raise AssertionError(f"duckdb failed ({proc.returncode}):\n{scrub(output)}")
         return output.strip()
 
     return _run

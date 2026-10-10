@@ -31,10 +31,9 @@ pytestmark = pytest.mark.live
 
 def _run(duckdb_cli, secret_dir: Path, sql: str) -> subprocess.CompletedProcess:
     return subprocess.run(
-        [
-            str(duckdb_cli), "-noheader", "-list",
-            "-c", f"SET secret_directory = '{secret_dir}'; {sql}",
-        ],
+        # SQL over stdin, never argv (ps would show the CREATE SECRET).
+        [str(duckdb_cli), "-noheader", "-list"],
+        input=f"SET secret_directory = '{secret_dir}'; {sql}",
         capture_output=True, text=True, timeout=300,
     )
 

@@ -48,6 +48,7 @@
 
 #include "gdrive_adc.hpp"
 #include "gdrive_auth.hpp"
+#include "gdrive_identity.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "gdrive_oauth_params.hpp"
 #include "gdrive_service_account.hpp"
@@ -634,6 +635,24 @@ std::string GetEnvOrEmpty(const char *name) {
 	return value ? std::string(value) : std::string();
 }
 
+//! The ADC file a credential_chain secret authenticates with. The
+//! gdrive_adc_file setting outranks the environment: a DuckDB session cannot
+//! export a variable to itself, so this is the only way to point one
+//! connection at a specific credential. Empty if none is found.
+std::string ResolveChainAdcPath(optional_ptr<FileOpener> opener) {
+	Value setting;
+	if (FileOpener::TryGetCurrentSetting(opener, "gdrive_adc_file", setting) && !setting.IsNull() &&
+	    !setting.ToString().empty()) {
+		return setting.ToString();
+	}
+	AdcPathInputs inputs;
+	inputs.google_application_credentials = GetEnvOrEmpty("GOOGLE_APPLICATION_CREDENTIALS");
+	inputs.cloudsdk_config = GetEnvOrEmpty("CLOUDSDK_CONFIG");
+	inputs.home = GetEnvOrEmpty("HOME");
+	inputs.appdata = GetEnvOrEmpty("APPDATA");
+	return ResolveAdcPath(inputs);
+}
+
 GDriveAuthContext BuildContextFromCredentialChain(optional_ptr<FileOpener> opener, const KeyValueSecret &kv,
                                                    const std::string &secret_name) {
 	std::string scope = GetOrEmpty(kv, "drive_scope");
@@ -641,23 +660,7 @@ GDriveAuthContext BuildContextFromCredentialChain(optional_ptr<FileOpener> opene
 		scope = SCOPE_DRIVE_READONLY; // REQ-NF-04
 	}
 
-	AdcPathInputs inputs;
-	inputs.google_application_credentials = GetEnvOrEmpty("GOOGLE_APPLICATION_CREDENTIALS");
-	inputs.cloudsdk_config = GetEnvOrEmpty("CLOUDSDK_CONFIG");
-	inputs.home = GetEnvOrEmpty("HOME");
-	inputs.appdata = GetEnvOrEmpty("APPDATA");
-
-	// The gdrive_adc_file setting outranks the environment: a DuckDB session
-	// cannot export a variable to itself, so this is the only way to point one
-	// connection at a specific credential.
-	std::string adc_path;
-	Value setting;
-	if (FileOpener::TryGetCurrentSetting(opener, "gdrive_adc_file", setting) && !setting.IsNull() &&
-	    !setting.ToString().empty()) {
-		adc_path = setting.ToString();
-	} else {
-		adc_path = ResolveAdcPath(inputs);
-	}
+	const std::string adc_path = ResolveChainAdcPath(opener);
 
 	if (adc_path.empty()) {
 		throw IOException("gdrive secret '%s': %s", secret_name.c_str(),
@@ -826,7 +829,11 @@ GDriveAuthContext BuildContextFromAuthorizationCode(ClientContext &context, cons
 		return ctx;
 	};
 
-	const std::string cache_key = FingerprintKey(secret_name, "authorization_code", {client_id, client_secret, scope});
+	// The refresh token names the USER: without it, a same-named secret
+	// recreated with another user's refresh token was handed the first
+	// user's cached access token for up to an hour.
+	const std::string cache_key = FingerprintKey(secret_name, "authorization_code",
+	                                             {client_id, client_secret, scope, GetOrEmpty(kv, "refresh_token")});
 
 	{
 		std::lock_guard<std::mutex> lock(CacheMutex());
@@ -1063,18 +1070,20 @@ GDriveAuthContext GetAuthContext(optional_ptr<FileOpener> opener, const std::str
 	// broke every release build. Keep this on the released API.
 	const std::string secret_name = base.GetName();
 
-	// Everything the user put in the secret, except what the
-	// authorization_code flow rewrites on each refresh -- see
-	// GDriveAuthContext::identity.
-	std::vector<std::string> material;
+	// Cache identity: the secret's fields plus the credential actually used
+	// (see gdrive_identity.hpp for the rules, which are unit-tested).
+	std::vector<std::pair<std::string, std::string>> fields;
 	for (const auto &entry : kv->secret_map) {
-		std::string key = StringUtil::Lower(entry.first);
-		if (key == "access_token" || StringUtil::StartsWith(key, "expires") || key == "token_expiry") {
-			continue;
-		}
-		material.push_back(key + "=" + entry.second.ToString());
+		fields.emplace_back(entry.first, entry.second.ToString());
 	}
-	const std::string identity = FingerprintKey(secret_name, base.GetProvider(), material);
+	std::string identity_source;
+	if (base.GetProvider() == "service_account") {
+		identity_source = KeyFileStamp(GetOrEmpty(*kv, "key_file"));
+	} else if (base.GetProvider() == "credential_chain") {
+		identity_source = KeyFileStamp(ResolveChainAdcPath(opener));
+	}
+	const std::string identity =
+	    FingerprintKey(secret_name, base.GetProvider(), IdentityMaterial(base.GetProvider(), fields, identity_source));
 	auto with_identity = [&identity](GDriveAuthContext ctx) {
 		ctx.identity = identity;
 		return ctx;
