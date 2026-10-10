@@ -62,10 +62,10 @@ void MoveFileScalar(DataChunk &args, ExpressionState &state, Vector &result) {
 	                                                  });
 }
 
-// Create every missing directory above `target`, shallowest first. Walks
-// DOWNWARD from the scheme, which is scheme-agnostic -- FileSystem::
-// CreateDirectoriesRecursive walks upward with Path::Parent(), which does not
-// understand a URL-form path and stops after one level.
+// Create every missing directory above `target`, shallowest first. Splits on
+// '/' after the scheme, which is scheme-agnostic -- FileSystem::
+// CreateDirectoriesRecursive uses Path::Parent(), which does not understand a
+// URL-form path and stops after one level.
 void EnsureParentDirectories(FileSystem &fs, const string &target) {
 	// Walk UP from the target's parent to the nearest folder that exists, then
 	// create the missing ones top-down. Usually that is one existence check
@@ -137,6 +137,12 @@ void FileSizeScalar(DataChunk &args, ExpressionState &state, Vector &result) {
 		    // gdrive_stats() under a throttling burst.
 		    auto handle = fs.OpenFile(p, FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_NULL_IF_NOT_EXISTS);
 		    if (handle) {
+			    // A LOCAL directory opens fine and reports its inode size (remote
+			    // filesystems refuse folders in OpenFile), so local paths are
+			    // asked DirectoryExists -- a cheap local stat, never a round trip.
+			    if (p.find("://") == string::npos && fs.DirectoryExists(p)) {
+				    throw IOException("'%s' is a directory, not a file; it has no byte size", p);
+			    }
 			    return NumericCast<int64_t>(handle->GetFileSize());
 		    }
 		    if (fs.DirectoryExists(p)) {

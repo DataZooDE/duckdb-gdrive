@@ -18,7 +18,9 @@ on:
     - cron: '17 3 * * *'
 
 concurrency:
-  group: checks-${{ github.ref }}
+  # The nightly sweep gets its own group so it never cancels or queues
+  # behind a push run on main.
+  group: checks-${{ github.ref }}-${{ github.event_name == 'schedule' && 'nightly' || 'run' }}
   cancel-in-progress: true
 
 jobs:
@@ -280,4 +282,4 @@ jobs:
         # by cloning DuckDB nightly to delete some folders; running the module
         # directly needs no submodules at all. The make target stays for
         # humans.
-        run: cd e2e && uv run python -m helpers.sweep
+        run: cd e2e && uv run --locked python -m helpers.sweep
