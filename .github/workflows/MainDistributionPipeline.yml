@@ -105,9 +105,11 @@ jobs:
   duckdb-stable-deploy:
     name: Deploy extension binaries (v1.5.6)
     needs: [duckdb-stable-build, duckdb-stable-smoke-test]
-    # Run even if a non-essential matrix arch failed; the deploy fans out per
-    # arch and only uploads the artifacts that actually exist.
-    if: ${{ !cancelled() && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
+    # Run even if a non-essential BUILD arch failed (the deploy fans out per
+    # arch and only uploads artifacts that exist) -- but never past a failed
+    # smoke test. `!cancelled()` alone overrides the implicit success() check
+    # on `needs`, which let an artifact that fails to load in a stock CLI ship.
+    if: ${{ !cancelled() && needs.duckdb-stable-smoke-test.result == 'success' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
     uses: ./.github/workflows/_extension_deploy.yml
     secrets: inherit
     with:
@@ -133,7 +135,8 @@ jobs:
   duckdb-lts-deploy:
     name: Deploy extension binaries (v1.4.5 LTS)
     needs: [duckdb-lts-build, duckdb-lts-smoke-test]
-    if: ${{ !cancelled() && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
+    # Never past a failed smoke test; see duckdb-stable-deploy.
+    if: ${{ !cancelled() && needs.duckdb-lts-smoke-test.result == 'success' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
     uses: ./.github/workflows/_extension_deploy.yml
     secrets: inherit
     with:
