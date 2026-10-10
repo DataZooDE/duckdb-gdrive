@@ -212,6 +212,12 @@ void FileSizeScalar(DataChunk &args, ExpressionState &state, Vector &result) {
 
 } // namespace
 
+// The four functions are scheme-generic and shared, byte for byte in
+// behaviour, with the sibling sharepoint extension, which registers them too.
+// Registering with IGNORE_ON_CONFLICT lets both extensions load into one
+// database in either order: whichever loads second keeps the first's
+// (identical) definitions. Without it the second LOAD failed with
+// 'Scalar Function with name "remove_file" already exists!'.
 void RegisterVfsFunctions(ExtensionLoader &loader) {
 	{
 		ScalarFunction fn("remove_file", {LogicalType::VARCHAR}, LogicalType::BOOLEAN, RemoveFileScalar);
@@ -234,6 +240,7 @@ void RegisterVfsFunctions(ExtensionLoader &loader) {
 		desc.categories = {"gdrive"};
 		info.descriptions.push_back(std::move(desc));
 
+		info.on_conflict = OnCreateConflict::IGNORE_ON_CONFLICT;
 		loader.RegisterFunction(std::move(info));
 	}
 
@@ -254,6 +261,7 @@ void RegisterVfsFunctions(ExtensionLoader &loader) {
 	desc.categories = {"gdrive"};
 	info.descriptions.push_back(std::move(desc));
 
+	info.on_conflict = OnCreateConflict::IGNORE_ON_CONFLICT;
 	loader.RegisterFunction(std::move(info));
 
 	{
@@ -275,6 +283,7 @@ void RegisterVfsFunctions(ExtensionLoader &loader) {
 		write_desc.categories = {"gdrive"};
 		write_info.descriptions.push_back(std::move(write_desc));
 
+		write_info.on_conflict = OnCreateConflict::IGNORE_ON_CONFLICT;
 		loader.RegisterFunction(std::move(write_info));
 	}
 
@@ -295,6 +304,7 @@ void RegisterVfsFunctions(ExtensionLoader &loader) {
 	size_desc.categories = {"gdrive"};
 	size_info.descriptions.push_back(std::move(size_desc));
 
+	size_info.on_conflict = OnCreateConflict::IGNORE_ON_CONFLICT;
 	loader.RegisterFunction(std::move(size_info));
 }
 
