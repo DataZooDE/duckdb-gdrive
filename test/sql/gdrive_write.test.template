@@ -95,6 +95,18 @@ SELECT sum(d) FROM read_parquet('gdrive://scratch/${SCRATCH}/out.parquet')
 ----
 999000
 
+# A name that is also a glob pattern. Reading globs the path first, and
+# '[1]' is a character class that matches "report1.csv", not "report[1].csv":
+# without a literal fallback the file could never be read by its own name.
+# DuckDB's local filesystem falls back to the literal path; so does this.
+statement ok
+COPY (SELECT 7 AS a) TO 'gdrive://scratch/${SCRATCH}/report[1].csv' (FORMAT csv, HEADER);
+
+query I
+SELECT a FROM read_csv('gdrive://scratch/${SCRATCH}/report[1].csv')
+----
+7
+
 # ---------------------------------------------------------------------------
 # S-3.9 -- overwriting an existing name must files.update the resolved id,
 # NOT create a second file with the same name. Creating a duplicate would
