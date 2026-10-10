@@ -28,3 +28,12 @@ SET datazoo_banner = false;
 
 statement ok
 SET datazoo_banner = true;
+
+# The documented telemetry opt-out exists (it used to be documented only).
+statement ok
+SET gdrive_telemetry_enabled = false;
+
+query I
+SELECT current_setting('gdrive_telemetry_enabled');
+----
+false
