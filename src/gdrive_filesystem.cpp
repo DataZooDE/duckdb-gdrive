@@ -92,12 +92,14 @@ std::string GetStringSetting(optional_ptr<FileOpener> opener, const std::string 
 	return default_value;
 }
 
-ClientContext &RequireClientContext(optional_ptr<FileOpener> opener, const std::string &context) {
-	auto client_context = FileOpener::TryGetClientContext(opener);
-	if (!client_context) {
-		throw IOException("gdrive: no active connection context available to resolve '%s'", context);
+// Secrets and settings resolve through the opener, which works for a client
+// connection AND for the database-level opener DuckDB uses when it opens an
+// ATTACHed database file (which has no ClientContext).
+optional_ptr<FileOpener> RequireOpener(optional_ptr<FileOpener> opener, const std::string &context) {
+	if (!FileOpener::TryGetSecretManager(opener)) {
+		throw IOException("gdrive: no database context available to resolve '%s'", context);
 	}
-	return *client_context;
+	return opener;
 }
 
 namespace {
@@ -359,7 +361,7 @@ bool GDriveFileSystem::CanHandleFile(const string &fpath) {
 	return IsGDriveUri(fpath);
 }
 
-DriveFileMeta GDriveFileSystem::ResolveOrThrow(ClientContext &context, const GDriveUri &uri) {
+DriveFileMeta GDriveFileSystem::ResolveOrThrow(optional_ptr<FileOpener> context, const GDriveUri &uri) {
 	if (!HasAnyGDriveSecret(context)) {
 		throw IOException(
 		    "gdrive: no gdrive secret configured for '%s' -- run CREATE SECRET (TYPE gdrive, ...) first.",
@@ -381,7 +383,7 @@ std::string GDriveFileSystem::DisambiguatePath(const std::string &parent_path, c
 unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFlags flags,
                                                   optional_ptr<FileOpener> opener) {
 	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, {
-	auto &context = RequireClientContext(opener, path);
+	auto context = RequireOpener(opener, path);
 	auto parsed = ParseGDriveUri(path);
 	if (!parsed.ok) {
 		throw IOException("gdrive: %s", parsed.error);
@@ -1012,7 +1014,7 @@ std::string GDriveFileSystem::GetVersionTag(FileHandle &handle) {
 // layer up.
 // ---------------------------------------------------------------------------
 bool GDriveFileSystem::FileExists(const string &filename, optional_ptr<FileOpener> opener) {
-	auto &context = RequireClientContext(opener, filename);
+	auto context = RequireOpener(opener, filename);
 	if (!HasAnyGDriveSecret(context)) {
 		// No gdrive secret at all: nothing to check against, and erroring here
 		// would break DuckDB probing a path it is merely considering.
@@ -1032,7 +1034,7 @@ bool GDriveFileSystem::FileExists(const string &filename, optional_ptr<FileOpene
 }
 
 bool GDriveFileSystem::DirectoryExists(const string &directory, optional_ptr<FileOpener> opener) {
-	auto &context = RequireClientContext(opener, directory);
+	auto context = RequireOpener(opener, directory);
 	if (!HasAnyGDriveSecret(context)) {
 		return false;
 	}
@@ -1054,7 +1056,7 @@ bool GDriveFileSystem::DirectoryExists(const string &directory, optional_ptr<Fil
 
 void GDriveFileSystem::CreateDirectory(const string &directory, optional_ptr<FileOpener> opener) {
 	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, {
-	auto &context = RequireClientContext(opener, directory);
+	auto context = RequireOpener(opener, directory);
 	auto parsed = ParseGDriveUri(directory);
 	if (!parsed.ok) {
 		throw IOException("gdrive: %s", parsed.error);
@@ -1066,7 +1068,7 @@ void GDriveFileSystem::CreateDirectory(const string &directory, optional_ptr<Fil
 }
 
 void GDriveFileSystem::RemoveDirectory(const string &directory, optional_ptr<FileOpener> opener) {
-	auto &context = RequireClientContext(opener, directory);
+	auto context = RequireOpener(opener, directory);
 	auto parsed = ParseGDriveUri(directory);
 	if (!parsed.ok) {
 		throw IOException("gdrive: %s", parsed.error);
@@ -1081,7 +1083,7 @@ bool GDriveFileSystem::ListFiles(const string &directory, const std::function<vo
                                  FileOpener *opener) {
 	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, {
 	optional_ptr<FileOpener> op(opener);
-	auto &context = RequireClientContext(op, directory);
+	auto context = RequireOpener(op, directory);
 	if (!HasAnyGDriveSecret(context)) {
 		return false;
 	}
@@ -1127,7 +1129,7 @@ bool GDriveFileSystem::ListFiles(const string &directory, const std::function<vo
 
 void GDriveFileSystem::MoveFile(const string &source, const string &target, optional_ptr<FileOpener> opener) {
 	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, {
-	auto &context = RequireClientContext(opener, source);
+	auto context = RequireOpener(opener, source);
 	auto src_parsed = ParseGDriveUri(source);
 	if (!src_parsed.ok) {
 		throw IOException("gdrive: %s", src_parsed.error);
@@ -1145,7 +1147,7 @@ void GDriveFileSystem::MoveFile(const string &source, const string &target, opti
 
 void GDriveFileSystem::RemoveFile(const string &filename, optional_ptr<FileOpener> opener) {
 	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, {
-	auto &context = RequireClientContext(opener, filename);
+	auto context = RequireOpener(opener, filename);
 	auto parsed = ParseGDriveUri(filename);
 	if (!parsed.ok) {
 		throw IOException("gdrive: %s", parsed.error);
@@ -1160,7 +1162,7 @@ void GDriveFileSystem::RemoveFile(const string &filename, optional_ptr<FileOpene
 vector<OpenFileInfo> GDriveFileSystem::Glob(const string &path, FileOpener *opener) {
 	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, {
 	optional_ptr<FileOpener> op(opener);
-	auto &context = RequireClientContext(op, path);
+	auto context = RequireOpener(op, path);
 	// Deliberately NOT swallowed into "no matches": a missing secret is a
 	// configuration error, not an empty result, and reporting it as zero
 	// rows is exactly the misleading-failure pattern R-2/REQ-F-08 exist to

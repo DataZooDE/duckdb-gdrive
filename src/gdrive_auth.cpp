@@ -59,6 +59,7 @@
 
 #include "duckdb/catalog/catalog_transaction.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/file_opener.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 
@@ -633,7 +634,7 @@ std::string GetEnvOrEmpty(const char *name) {
 	return value ? std::string(value) : std::string();
 }
 
-GDriveAuthContext BuildContextFromCredentialChain(ClientContext &context, const KeyValueSecret &kv,
+GDriveAuthContext BuildContextFromCredentialChain(optional_ptr<FileOpener> opener, const KeyValueSecret &kv,
                                                    const std::string &secret_name) {
 	std::string scope = GetOrEmpty(kv, "drive_scope");
 	if (scope.empty()) {
@@ -651,7 +652,7 @@ GDriveAuthContext BuildContextFromCredentialChain(ClientContext &context, const 
 	// connection at a specific credential.
 	std::string adc_path;
 	Value setting;
-	if (context.TryGetCurrentSetting("gdrive_adc_file", setting) && !setting.IsNull() &&
+	if (FileOpener::TryGetCurrentSetting(opener, "gdrive_adc_file", setting) && !setting.IsNull() &&
 	    !setting.ToString().empty()) {
 		adc_path = setting.ToString();
 	} else {
@@ -1007,10 +1008,16 @@ GDriveAuthContext BuildContextFromConfig(const KeyValueSecret &kv, const std::st
 
 } // namespace
 
-GDriveAuthContext GetAuthContext(ClientContext &context, const std::string &path) {
-	auto &secret_manager = SecretManager::Get(context);
-	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
-	auto match = secret_manager.LookupSecret(transaction, path, "gdrive");
+GDriveAuthContext GetAuthContext(optional_ptr<FileOpener> opener, const std::string &path) {
+	// Through the opener, not a ClientContext: DuckDB opens an ATTACHed
+	// database file with a database-level opener that has no client
+	// connection, and secrets and settings are still reachable through it.
+	auto secret_manager = FileOpener::TryGetSecretManager(opener);
+	auto transaction = FileOpener::TryGetCatalogTransaction(opener);
+	if (!secret_manager || !transaction) {
+		throw IOException("gdrive: '%s' was opened without a database context, so no secret can be looked up", path);
+	}
+	auto match = secret_manager->LookupSecret(*transaction, path, "gdrive");
 
 	if (!match.HasMatch()) {
 		// A gdrive secret may EXIST and still not match: DuckDB's SCOPE clause
@@ -1021,7 +1028,7 @@ GDriveAuthContext GetAuthContext(ClientContext &context, const std::string &path
 		// the secret then matches nothing. Telling that user "no secret
 		// configured" sends them off to create a second one, which will not
 		// match either. Say what actually happened.
-		if (HasAnyGDriveSecret(context)) {
+		if (HasAnyGDriveSecret(opener)) {
 			throw IOException(
 			    "gdrive: a gdrive secret exists, but none of them apply to '%s'.\n"
 			    "A secret's SCOPE clause limits which paths it covers. If you meant to set the "
@@ -1080,10 +1087,19 @@ GDriveAuthContext GetAuthContext(ClientContext &context, const std::string &path
 		return with_identity(BuildContextFromConfig(*kv, secret_name));
 	}
 	if (base.GetProvider() == "credential_chain") {
-		return with_identity(BuildContextFromCredentialChain(context, *kv, secret_name));
+		return with_identity(BuildContextFromCredentialChain(opener, *kv, secret_name));
 	}
 	if (base.GetProvider() == "authorization_code") {
-		return with_identity(BuildContextFromAuthorizationCode(context, *kv, secret_name));
+		// The one provider that needs a client connection: it writes refreshed
+		// tokens back into the secret.
+		auto client_context = FileOpener::TryGetClientContext(opener);
+		if (!client_context) {
+			throw IOException("gdrive secret '%s' (PROVIDER authorization_code) needs a client connection to "
+			                  "refresh its tokens, and '%s' was opened without one (e.g. by ATTACH). Use a "
+			                  "service_account, config or credential_chain secret for it.",
+			                  secret_name.c_str(), path.c_str());
+		}
+		return with_identity(BuildContextFromAuthorizationCode(*client_context, *kv, secret_name));
 	}
 
 	throw InvalidInputException("gdrive secret '%s' has unsupported provider '%s'; expected 'service_account', "
@@ -1091,10 +1107,13 @@ GDriveAuthContext GetAuthContext(ClientContext &context, const std::string &path
 	                             secret_name.c_str(), base.GetProvider().c_str());
 }
 
-bool HasAnyGDriveSecret(ClientContext &context) {
-	auto &secret_manager = SecretManager::Get(context);
-	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
-	auto secrets = secret_manager.AllSecrets(transaction);
+bool HasAnyGDriveSecret(optional_ptr<FileOpener> opener) {
+	auto secret_manager = FileOpener::TryGetSecretManager(opener);
+	auto transaction = FileOpener::TryGetCatalogTransaction(opener);
+	if (!secret_manager || !transaction) {
+		return false;
+	}
+	auto secrets = secret_manager->AllSecrets(*transaction);
 	for (const auto &entry : secrets) {
 		if (entry.secret && entry.secret->GetType() == "gdrive") {
 			return true;
