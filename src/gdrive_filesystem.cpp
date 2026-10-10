@@ -1373,6 +1373,18 @@ vector<OpenFileInfo> GDriveFileSystem::Glob(const string &path, FileOpener *open
 			result.emplace_back(DisambiguatePath(entry_parent, meta, ambiguous));
 		}
 	}
+	// Names may legitimately contain glob characters: "report[1].csv" is a
+	// valid Drive name, but '[1]' as a pattern matches "report1.csv". When the
+	// pattern matched nothing, try it as a literal path -- DuckDB's local
+	// filesystem does the same -- or such a file could never be read by its
+	// own name. One resolve, only on an empty match; ambiguity and API errors
+	// still surface (TryResolvePath returns false only for not-found).
+	if (result.empty()) {
+		DriveFileMeta meta;
+		if (TryResolvePath(cache, *client, auth, parsed.uri, meta) && !meta.IsFolder()) {
+			result.emplace_back(path);
+		}
+	}
 	return result;
 	});
 }
