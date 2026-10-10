@@ -19,8 +19,10 @@
 
 // Deliberately outside namespace duckdb: the banner library is DuckDB-agnostic
 // and the guarded filesystem methods refer to this object.
-const datazoo::BannerInfo GDRIVE_BANNER {
-    "gdrive", "0.1.0", "https://github.com/DataZooDE/duckdb-gdrive"};
+// The version comes from GdriveVersionCString(): a copied literal had left
+// the banner announcing "0.1.0" while the extension was at 2026.09.26.
+const datazoo::BannerInfo GDRIVE_BANNER {"gdrive", duckdb::gdrive::GdriveVersionCString(),
+                                         "https://github.com/DataZooDE/duckdb-gdrive"};
 
 namespace duckdb {
 
@@ -52,6 +54,15 @@ static void LoadInternal(ExtensionLoader &loader) {
 	PostHogTelemetry::Instance().SetProduct("gdrive", gdrive::GdriveVersion(), "oss");
 	PostHogTelemetry::Instance().AssociateGroup("deployment", PostHogTelemetry::GetDistinctId());
 	PostHogTelemetry::Instance().CaptureExtensionLoad("gdrive", gdrive::GdriveVersion());
+	// The opt-out the CMake comment and the docs promise. It was never
+	// registered, so `SET gdrive_telemetry_enabled = false` failed and only
+	// DATAZOO_DISABLE_TELEMETRY worked. Registered like the sibling DataZoo
+	// extensions (anofox-*, erpl, sharepoint) do.
+	loader.GetDatabaseInstance().config.AddExtensionOption(
+	    "gdrive_telemetry_enabled", "Enable or disable anonymous usage telemetry for the gdrive extension.",
+	    LogicalType::BOOLEAN, Value::BOOLEAN(true), [](ClientContext &, SetScope, Value &parameter) {
+		    PostHogTelemetry::Instance().SetEnabled(BooleanValue::Get(parameter));
+	    });
 #endif
 
 	{
