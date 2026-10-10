@@ -135,6 +135,17 @@ def scratch(writer: Drive):
             print(f"WARNING: could not clean up scratch {name}: {e}")
 
 
+class RedactedSQL(str):
+    """A str whose repr hides it. pytest prints a failing test's fixture
+    arguments in its traceback; for this fixture that is the OAuth client
+    secret and the user's refresh token, straight into CI logs. Found in the
+    sibling duckdb-sharepoint's harness, which printed its client secret on
+    the first failing run."""
+
+    def __repr__(self) -> str:
+        return "<RedactedSQL: CREATE SECRET ... (credentials hidden)>"
+
+
 @pytest.fixture(scope="session")
 def gdrive_secret_sql() -> str:
     """CREATE SECRET for a delegated user, as SQL.
@@ -149,7 +160,7 @@ def gdrive_secret_sql() -> str:
     missing = [n for n in needed if not os.environ.get(n)]
     if missing:
         pytest.skip(f"missing {', '.join(missing)}; run `make oauth_consent`")
-    return (
+    return RedactedSQL(
         "CREATE SECRET gdrive_e2e (TYPE gdrive, PROVIDER config, "
         f"CLIENT_ID '{os.environ['GDRIVE_OAUTH_CLIENT_ID']}', "
         f"CLIENT_SECRET '{os.environ['GDRIVE_OAUTH_CLIENT_SECRET']}', "
