@@ -196,23 +196,20 @@ void FileSizeScalar(DataChunk &args, ExpressionState &state, Vector &result) {
 		    auto p = path.GetString();
 		    // NULL for absent, mirroring remove_file's false: "no such file"
 		    // is an expected answer on a remote store, not an exception. But
-		    // ONLY for genuine absence -- see ConfirmedAbsent.
-		    if (!fs.FileExists(p)) {
-			    if (ConfirmedAbsent(fs, p)) {
-				    mask.SetInvalid(idx);
-				    return 0;
-			    }
-			    if (fs.DirectoryExists(p)) {
-				    throw IOException("gdrive: '%s' is a directory, not a file; it has no byte size", p);
-			    }
-			    throw IOException("gdrive: '%s' exists but its size cannot be read as a file", p);
+		    // ONLY for genuine absence: opening with NULL_IF_NOT_EXISTS is the
+		    // strict test (a missing secret still throws). Opening FIRST
+		    // answers "exists, this big" in one resolve instead of asking
+		    // FileExists and then opening -- found by duckdb-sharepoint, whose
+		    // stats showed the extra round trip per call.
+		    auto handle = fs.OpenFile(p, FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_NULL_IF_NOT_EXISTS);
+		    if (handle) {
+			    return NumericCast<int64_t>(handle->GetFileSize());
 		    }
-		    auto handle = fs.OpenFile(p, FileFlags::FILE_FLAGS_READ);
-		    if (!handle) {
-			    mask.SetInvalid(idx);
-			    return 0;
+		    if (fs.DirectoryExists(p)) {
+			    throw IOException("gdrive: '%s' is a directory, not a file; it has no byte size", p);
 		    }
-		    return NumericCast<int64_t>(handle->GetFileSize());
+		    mask.SetInvalid(idx);
+		    return 0;
 	    });
 }
 
