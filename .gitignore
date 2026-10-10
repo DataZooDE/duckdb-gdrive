@@ -44,3 +44,6 @@ e2e/.uv-cache/
 
 # Deep Research job state and cached responses
 .deep-research/
+
+# agent-crew review runs (local only)
+.crew/

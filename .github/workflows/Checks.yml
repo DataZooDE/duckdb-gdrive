@@ -76,7 +76,7 @@ jobs:
             cp -r /tmp/jwt/include/jwt-cpp /tmp/inc/
             fail=0
             for f in src/gdrive_uri.cpp src/gdrive_errors.cpp src/gdrive_glob.cpp \
-                     src/gdrive_service_account_pure.cpp src/gdrive_version.cpp; do
+                     src/gdrive_service_account_pure.cpp src/gdrive_version.cpp src/gdrive_identity.cpp src/gdrive_blockcache.cpp; do
               if g++ -std=c++17 -fsyntax-only -DPICOJSON_USE_INT64 \
                      -Isrc/include -I/tmp/inc "$f"; then
                 echo "  ok   $f"
