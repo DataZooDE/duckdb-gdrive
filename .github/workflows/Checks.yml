@@ -87,6 +87,21 @@ jobs:
             exit $fail
           '
 
+  # Seconds-long gate, before the ~20-minute full build. The pure layer builds
+  # standalone (test/cpp/CMakeLists.txt): Catch2, header-only picojson and
+  # jwt-cpp (fetched at the vcpkg versions) and the runner's OpenSSL -- no
+  # DuckDB, no vcpkg. Ported from duckdb-sharepoint.
+  unit-fast:
+    name: Catch2 pure-logic tests (standalone)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build + run the pure-logic tests
+        run: |
+          cmake -S test/cpp -B build/unit
+          cmake --build build/unit -j
+          ./build/unit/gdrive_unit_tests --reporter console::out=-
+
   unit:
     name: Pure-logic + credential-free SQL
     runs-on: ubuntu-latest
