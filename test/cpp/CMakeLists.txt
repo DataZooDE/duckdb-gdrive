@@ -57,6 +57,7 @@ add_executable(gdrive_unit_tests
     ${GD_ROOT}/src/gdrive_service_account_pure.cpp
     ${GD_ROOT}/src/gdrive_adc.cpp
     ${GD_ROOT}/src/gdrive_oauth_params.cpp
+    ${GD_ROOT}/src/gdrive_blockcache.cpp
     ${GD_TESTS}
 )
 # Same ODR-relevant define as the extension build (see the root CMakeLists).

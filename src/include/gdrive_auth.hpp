@@ -35,6 +35,13 @@ struct GDriveAuthContext {
 	//! The secret's name, for error messages that tell the user which
 	//! credential to fix. NEVER accompanied by the token itself.
 	std::string secret_name;
+	//! Cache identity: a SHA-256 fingerprint of the secret's provider, name and
+	//! full contents (minus the access token and expiry the authorization_code
+	//! flow writes back on every refresh). The path cache and the block cache
+	//! key on THIS, never on the name alone: a secret recreated under the same
+	//! name with different credentials must not be served the previous
+	//! principal's cached ids or bytes.
+	std::string identity;
 	//! GCP project to bill Drive API quota to, sent as `x-goog-user-project`.
 	//!
 	//! Only ever set for an `authorized_user` ADC document, and REQUIRED

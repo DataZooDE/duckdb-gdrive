@@ -1,5 +1,6 @@
 #pragma once
 
+#include "gdrive_blockcache.hpp"
 #include "gdrive_client.hpp"
 #include "gdrive_uri.hpp"
 
@@ -52,13 +53,15 @@ namespace gdrive {
 //! different secret and a different root -- a cross-tenant leak that looks
 //! like a caching bug and reads like a permissions bug.
 //!
-//! CacheKey therefore includes the secret name, drive id and root folder, and
-//! a hit is only honoured when the *current* auth context matches. Found in
+//! CacheKey therefore includes the identity (a fingerprint of the secret's
+//! credentials -- GDriveAuthContext::identity -- not merely its name), drive id
+//! and root folder, and a hit is only honoured when the *current* auth context
+//! matches. Found in
 //! codex review #1 (docs/reviews/2026-07-26-codex-review-1-wave0.md), before
 //! any of it was implemented.
 //! ---------------------------------------------------------------------
 struct CacheKey {
-	std::string secret_name;
+	std::string identity;
 	std::string drive_id;
 	std::string root_folder_id;
 	std::string canonical_path;
@@ -68,59 +71,7 @@ struct CacheKey {
 	std::string ToString() const;
 };
 
-//! ---------------------------------------------------------------------------
-//! Shared block cache for file CONTENT.
-//!
-//! Why a shared cache and not per-handle read-ahead: measured, one Parquet
-//! scan issued 35 ranged GETs across 18 handles, and although half of them
-//! began exactly where another ended, NO adjacent pair shared a handle. A
-//! per-handle buffer therefore never sees the follow-on read. That version was
-//! built, measured (136 MB fetched instead of 54.9 MB, request count
-//! unchanged) and reverted -- see docs/benchmark.md.
-//!
-//! Why blocks at all: Drive's media endpoint costs ~1.2 s per request
-//! REGARDLESS OF SIZE. A 1 KB read and a 1 MB read cost the same; the whole
-//! 87 MB file in one request costs 2.06 s. So the winning move on Drive is
-//! the opposite of the usual one -- fetch MORE in FEWER requests.
-//!
-//! Keyed by identity + file id + headRevisionId + block index:
-//!   * identity, because one FileSystem object serves every ClientContext and
-//!     a content cache keyed by file id alone would hand one tenant another's
-//!     bytes. (The token cache shipped exactly that bug once.)
-//!   * headRevisionId, because Drive keeps the file id across an overwrite --
-//!     without it, rewritten content would be served from a stale block.
-//!
-//! Concurrent readers of the same block share ONE fetch via a shared_future:
-//! 18 threads hitting a cold block must not issue 18 identical requests.
-//! ---------------------------------------------------------------------------
-class GDriveBlockCache {
-public:
-	//! The block containing `block_index`, fetching it if absent. `fetch`
-	//! receives (start, length) and fills the buffer; it runs at most once per
-	//! block no matter how many threads ask concurrently.
-	shared_ptr<const std::string> GetBlock(const std::string &key, idx_t block_index, idx_t block_size,
-	                                        idx_t file_size,
-	                                        const std::function<void(idx_t, idx_t, std::string &)> &fetch);
-	void SetCapacity(idx_t bytes);
-	void InvalidateSecret(const std::string &secret_name);
-	void Clear();
-	idx_t BytesCached();
-
-private:
-	mutex lock;
-	struct Entry {
-		std::shared_future<shared_ptr<const std::string>> value;
-		idx_t bytes = 0;
-		uint64_t used_at = 0;
-	};
-	unordered_map<std::string, Entry> blocks;
-	idx_t capacity_bytes = 0;
-	idx_t cached_bytes = 0;
-	uint64_t clock = 0;
-
-	//! Caller must hold `lock`.
-	void EvictLocked();
-};
+// GDriveBlockCache lives in gdrive_blockcache.hpp (pure, unit-tested).
 
 class GDrivePathCache {
 public:
@@ -194,9 +145,6 @@ public:
 	//! later create must be visible) and throws for anything else.
 	bool GetOrFetchMetadata(const CacheKey &identity, const std::string &file_id,
 	                        const std::function<bool(DriveFileMeta &)> &fetch, DriveFileMeta &out);
-	//! Drop everything belonging to one secret -- called when a secret is
-	//! dropped or re-created, since its ids may no longer be reachable.
-	void InvalidateSecret(const std::string &secret_name);
 	void Clear();
 	idx_t Size();
 
