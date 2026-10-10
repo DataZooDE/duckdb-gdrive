@@ -106,43 +106,49 @@ void MoveFileScalar(DataChunk &args, ExpressionState &state, Vector &result) {
 // tenant, not a rare edge. It is also the only way to create a directory at
 // all from SQL, CreateDirectory being equally unreachable.
 void EnsureParentDirectories(FileSystem &fs, const string &target) {
-	auto last_sep = target.find_last_of('/');
-	if (last_sep == string::npos) {
-		return;
-	}
 	// Skip past "scheme://" (or a leading "/") so the scheme's own slashes
 	// are never mistaken for directory separators.
-	size_t start = 0;
+	size_t root_end = 0;
 	auto scheme = target.find("://");
 	if (scheme != string::npos) {
-		start = scheme + 3;
+		root_end = scheme + 3;
 	} else if (!target.empty() && target.front() == '/') {
-		start = 1;
+		root_end = 1;
 	}
 
-	for (auto i = target.find('/', start); i != string::npos && i <= last_sep; i = target.find('/', i + 1)) {
-		auto dir = target.substr(0, i);
-		if (dir.empty()) {
-			continue;
-		}
+	// Walk UP from the target's parent to the nearest folder that exists, then
+	// create the missing ones top-down. Usually one existence check instead of
+	// one per path level -- and it never touches an ancestor ABOVE an existing
+	// folder. Walking DOWN from the root asked DirectoryExists about
+	// `gdrive://scratch` even when the only applicable secret was SCOPEd to
+	// `gdrive://scratch/run-x`, and the write failed with "none of them apply".
+	vector<string> missing;
+	auto sep = target.find_last_of('/');
+	while (sep != string::npos && sep > root_end) {
+		auto dir = target.substr(0, sep);
 		// DirectoryExists first: on a remote filesystem a redundant create is
 		// a wasted round trip, and on Drive it can produce a DUPLICATE folder
 		// of the same name rather than an error.
-		if (!fs.DirectoryExists(dir)) {
-			// ...but "not a directory" is not the same as "not there". If a
-			// FILE already occupies this segment, creating a folder beside it
-			// gives Drive two entries with one name -- an R-4 ambiguity
-			// manufactured by us, which then makes the original file
-			// unreadable. Every other filesystem answers ENOTDIR here.
-			if (fs.FileExists(dir)) {
-				throw IOException(
-				    "gdrive: cannot create directory '%s': a file of that name already exists. "
-				    "Writing under it would create a second entry with the same name, which Drive "
-				    "allows and which would make both unaddressable by path.",
-				    dir);
-			}
-			fs.CreateDirectory(dir);
+		if (fs.DirectoryExists(dir)) {
+			break;
 		}
+		// ...but "not a directory" is not the same as "not there". If a FILE
+		// already occupies this segment, creating a folder beside it gives
+		// Drive two entries with one name -- an R-4 ambiguity manufactured by
+		// us, which then makes the original file unreadable. Every other
+		// filesystem answers ENOTDIR here.
+		if (fs.FileExists(dir)) {
+			throw IOException(
+			    "gdrive: cannot create directory '%s': a file of that name already exists. "
+			    "Writing under it would create a second entry with the same name, which Drive "
+			    "allows and which would make both unaddressable by path.",
+			    dir);
+		}
+		missing.push_back(dir);
+		sep = target.find_last_of('/', sep - 1);
+	}
+	for (auto it = missing.rbegin(); it != missing.rend(); ++it) {
+		fs.CreateDirectory(*it);
 	}
 }
 
