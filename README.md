@@ -46,20 +46,20 @@ Because DuckDB dispatches all file access through its virtual filesystem,
 anything built on that layer inherits the scheme for free — `read_parquet`,
 `read_csv`, `COPY`, `glob`, and table formats such as DuckLake.
 
-`ATTACH` is the exception, in both directions. Attaching a **DuckLake** whose
-`DATA_PATH` is on Drive works and is tested. Attaching a **DuckDB database
-file** on `gdrive://` does not, and the reason is worth stating precisely
-because it is not the one you would guess: DuckDB opens database files
-through a path that never consults the virtual filesystem, so `gdrive://` is
-normalised to `gdrive:/` and handed to the LOCAL filesystem, which reports
-`No such file or directory`. This extension is never called at all.
+`ATTACH` works too. Attaching a **DuckLake** whose `DATA_PATH` is on Drive is
+tested, and so is attaching a **DuckDB database file** on `gdrive://`
+**read-only**: `ATTACH 'gdrive://warehouse/sales.duckdb' AS s (READ_ONLY)`.
+(DuckDB 1.5 used to canonicalise `gdrive://` to `gdrive:/` and hand the path to
+the local filesystem; the extension now keeps its paths, and resolves secrets
+through the database-level opener DuckDB uses for attached files.)
 
-That it fails is fine — Drive has neither atomic renames nor byte-offset
-writes, so a database file there could not work regardless — but it fails
-before reaching us, which is why the guard rails in this filesystem
-(`Truncate`, `Trim`, positional `Write`) are unreachable from SQL and
-therefore untested. Stated rather than implied; see `docs/benchmark.md` and
-the plan's coverage table.
+Two constraints follow from that opener. It sees only **global** settings, so
+a `gdrive_adc_file` (or any `gdrive_*` setting) made with a plain `SET` in
+the session does not apply to the attached file -- use `SET GLOBAL`. And a
+`PROVIDER authorization_code` secret cannot be used for it, because refreshing
+that secret writes to the session; such an ATTACH fails with an error that
+says so. Writable attachment is impossible regardless: Drive has neither
+atomic renames nor byte-offset writes.
 
 ## DuckLake on Drive
 
@@ -444,8 +444,8 @@ throwaway Google project and doing it to a real one degrades Drive for
 everyone on that account. The classification logic is tested; the live path
 through it is not.
 
-**`ATTACH` of a DuckDB database file does not work** — see *Addressing*. Only
-DuckLake `DATA_PATH` works.
+**`ATTACH` of a DuckDB database file is read-only** and uses global settings
+only — see *Addressing*.
 
 **Native Sheets and Docs are re-exported per open.** Two queries against the
 same Sheet cost two exports. Materialise into a table if you query it
