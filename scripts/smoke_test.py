@@ -41,7 +41,7 @@ SMOKE_QUERY = "SELECT gdrive_version();"
 
 ARCH_TO_CLI_ZIP: dict[str, str] = {
     "linux_amd64": "duckdb_cli-linux-amd64.zip",
-    "linux_arm64": "duckdb_cli-linux-aarch64.zip",
+    "linux_arm64": "duckdb_cli-linux-arm64.zip",
     "linux_amd64_musl": "duckdb_cli-linux-amd64.zip",
     "osx_amd64": "duckdb_cli-osx-universal.zip",
     "osx_arm64": "duckdb_cli-osx-universal.zip",
