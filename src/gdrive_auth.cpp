@@ -48,6 +48,7 @@
 
 #include "gdrive_adc.hpp"
 #include "gdrive_auth.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "gdrive_oauth_params.hpp"
 #include "gdrive_service_account.hpp"
 
@@ -1055,17 +1056,34 @@ GDriveAuthContext GetAuthContext(ClientContext &context, const std::string &path
 	// broke every release build. Keep this on the released API.
 	const std::string secret_name = base.GetName();
 
+	// Everything the user put in the secret, except what the
+	// authorization_code flow rewrites on each refresh -- see
+	// GDriveAuthContext::identity.
+	std::vector<std::string> material;
+	for (const auto &entry : kv->secret_map) {
+		std::string key = StringUtil::Lower(entry.first);
+		if (key == "access_token" || StringUtil::StartsWith(key, "expires") || key == "token_expiry") {
+			continue;
+		}
+		material.push_back(key + "=" + entry.second.ToString());
+	}
+	const std::string identity = FingerprintKey(secret_name, base.GetProvider(), material);
+	auto with_identity = [&identity](GDriveAuthContext ctx) {
+		ctx.identity = identity;
+		return ctx;
+	};
+
 	if (base.GetProvider() == "service_account") {
-		return BuildContextFromServiceAccount(*kv, secret_name);
+		return with_identity(BuildContextFromServiceAccount(*kv, secret_name));
 	}
 	if (base.GetProvider() == "config") {
-		return BuildContextFromConfig(*kv, secret_name);
+		return with_identity(BuildContextFromConfig(*kv, secret_name));
 	}
 	if (base.GetProvider() == "credential_chain") {
-		return BuildContextFromCredentialChain(context, *kv, secret_name);
+		return with_identity(BuildContextFromCredentialChain(context, *kv, secret_name));
 	}
 	if (base.GetProvider() == "authorization_code") {
-		return BuildContextFromAuthorizationCode(context, *kv, secret_name);
+		return with_identity(BuildContextFromAuthorizationCode(context, *kv, secret_name));
 	}
 
 	throw InvalidInputException("gdrive secret '%s' has unsupported provider '%s'; expected 'service_account', "

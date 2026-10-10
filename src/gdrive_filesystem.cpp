@@ -253,7 +253,7 @@ bool TryResolvePath(GDrivePathCache &cache, GDriveClient &client, const GDriveAu
 		// form -- the one documented as the zero-round-trip fast path --
 		// still cost one files.get per thread.
 		CacheKey meta_key;
-		meta_key.secret_name = auth.secret_name;
+		meta_key.identity = auth.identity;
 		meta_key.drive_id = auth.drive_id;
 		meta_key.root_folder_id = auth.root_folder_id;
 		return cache.GetOrFetchMetadata(meta_key, uri.file_id,
@@ -284,7 +284,7 @@ bool TryResolvePath(GDrivePathCache &cache, GDriveClient &client, const GDriveAu
 		canonical += (canonical.empty() ? "" : "/") + segment;
 		bool is_last = (i + 1 == uri.segments.size());
 
-		CacheKey key {auth.secret_name, auth.drive_id, auth.root_folder_id, canonical};
+		CacheKey key {auth.identity, auth.drive_id, auth.root_folder_id, canonical};
 		DriveFileMeta cached;
 		bool cached_fresh = false;
 		if (cache.TryGet(key, cached, &cached_fresh)) {
@@ -425,7 +425,7 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 				const auto &segment = parsed.uri.segments[i];
 				parent_path_accum += (parent_path_accum.empty() ? "" : "/") + segment;
 
-				CacheKey key {auth.secret_name, auth.drive_id, auth.root_folder_id, parent_path_accum};
+				CacheKey key {auth.identity, auth.drive_id, auth.root_folder_id, parent_path_accum};
 				if (!parent_is_new) {
 					DriveFileMeta cached;
 					if (cache.TryGet(key, cached)) {
@@ -581,7 +581,7 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 	// (S-2.16). The FILE_ID form already did exactly this files.get inside
 	// ResolvePath, so skip the duplicate call there.
 	CacheKey meta_identity;
-	meta_identity.secret_name = auth.secret_name;
+	meta_identity.identity = auth.identity;
 	meta_identity.drive_id = auth.drive_id;
 	meta_identity.root_folder_id = auth.root_folder_id;
 
@@ -645,7 +645,7 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 			// Exactly once: if the second resolve also cannot find it, the
 			// file really is gone and that error is the honest answer.
 			CacheKey key;
-			key.secret_name = auth.secret_name;
+			key.identity = auth.identity;
 			key.drive_id = auth.drive_id;
 			key.root_folder_id = auth.root_folder_id;
 			key.canonical_path = CanonicalPathOf(parsed.uri);
@@ -693,7 +693,7 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 //! it did not use to be, and a recovered handle kept reading the dead file's
 //! blocks out of cache.
 std::string BuildBlockKey(const GDriveAuthContext &auth, const DriveFileMeta &meta) {
-	return auth.secret_name + '\x1f' + auth.drive_id + '\x1f' + auth.root_folder_id + '\x1f' + meta.id + '\x1f' +
+	return auth.identity + '\x1f' + auth.drive_id + '\x1f' + auth.root_folder_id + '\x1f' + meta.id + '\x1f' +
 	       meta.head_revision_id;
 }
 
@@ -725,7 +725,7 @@ bool GDriveFileSystem::TryRecoverStaleHandle(GDriveFileHandle &base) {
 	}
 
 	CacheKey key;
-	key.secret_name = h.auth_context.secret_name;
+	key.identity = h.auth_context.identity;
 	key.drive_id = h.auth_context.drive_id;
 	key.root_folder_id = h.auth_context.root_folder_id;
 	key.canonical_path = CanonicalPathOf(parsed.uri);
@@ -1332,7 +1332,7 @@ vector<OpenFileInfo> GDriveFileSystem::Glob(const string &path, FileOpener *open
 				                           : (split.literal_prefix + "/" + entry.first);
 				// Must match CanonicalPathOf's form exactly, or this is a
 				// cache that can never be hit.
-				CacheKey key {auth.secret_name, auth.drive_id, auth.root_folder_id, full_rel};
+				CacheKey key {auth.identity, auth.drive_id, auth.root_folder_id, full_rel};
 				cache.Put(key, entry.second);
 			}
 		}
