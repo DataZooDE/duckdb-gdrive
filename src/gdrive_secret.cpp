@@ -18,6 +18,7 @@
 // so `SELECT * FROM duckdb_secrets()` never displays it. KEY_FILE is a path,
 // not key material, so it is deliberately NOT redacted -- but its *contents*
 // are never copied into the secret_map or into any error message (S-1.8).
+#include "gdrive_credential_file.hpp"
 #include "gdrive_service_account.hpp"
 
 #include "duckdb/common/exception.hpp"
@@ -44,16 +45,17 @@ constexpr const char *kSecretTypeName = "gdrive";
 // free) and are never themselves interpolated into an exception message.
 // ---------------------------------------------------------------------------
 std::string ReadKeyFileOrThrow(const std::string &path) {
-	std::ifstream f(path, std::ios::binary);
-	if (!f.good()) {
-		throw InvalidInputException(
-		    "gdrive: service-account key file not found or not readable: '%s'. "
-		    "Check the KEY_FILE path passed to CREATE SECRET.",
-		    path.c_str());
+	std::string contents, why;
+	if (!ReadCredentialFile(path, contents, why)) {
+		// "key file not found" is the established wording (users and
+		// scripts/verify_readme.py match it); other refusals say why.
+		throw InvalidInputException("gdrive: service-account key file %s: '%s'. "
+		                            "Check the KEY_FILE path passed to CREATE SECRET.",
+		                            why == "not found or not readable" ? "not found or not readable"
+		                                                                : ("cannot be used, " + why).c_str(),
+		                            path.c_str());
 	}
-	std::ostringstream ss;
-	ss << f.rdbuf();
-	return ss.str();
+	return contents;
 }
 
 void CopyOption(CreateSecretInput &input, KeyValueSecret &result, const char *key) {

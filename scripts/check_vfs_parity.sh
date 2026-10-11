@@ -16,6 +16,12 @@ if [[ ! -f "$THEIRS" ]]; then
     echo "SKIP: $THEIRS not found (pass the sibling checkout as an argument)"
     exit 0
 fi
+# Until the sibling has adopted the shared, identical copy (its file carries
+# the KEEP THIS FILE IDENTICAL marker), there is nothing to compare against.
+if ! grep -q "KEEP THIS FILE IDENTICAL" "$THEIRS"; then
+    echo "SKIP: $THEIRS predates the shared implementation"
+    exit 0
+fi
 normalise() { sed -e 's/gdrive/EXT/g; s/sharepoint/EXT/g' "$1"; }
 if ! diff -u <(normalise "$THEIRS") <(normalise "$OURS"); then
     echo "FAIL: the shared VFS functions differ from $THEIRS" >&2

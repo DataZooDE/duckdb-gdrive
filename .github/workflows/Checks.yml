@@ -18,7 +18,9 @@ on:
     - cron: '17 3 * * *'
 
 concurrency:
-  group: checks-${{ github.ref }}
+  # The nightly sweep gets its own group so it never cancels or queues
+  # behind a push run on main.
+  group: checks-${{ github.ref }}-${{ github.event_name == 'schedule' && 'nightly' || 'run' }}
   cancel-in-progress: true
 
 jobs:
@@ -26,22 +28,39 @@ jobs:
   # Always runs. No credentials, no network. Anyone can reproduce this.
   # ---------------------------------------------------------------------------
   hygiene:
+    timeout-minutes: 15
     name: Credential hygiene
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: No credentials tracked (REQ-NF-03)
         run: ./scripts/check_no_credentials.sh
+
+  # write_blob/remove_file/move_file/file_size are registered by this extension
+  # AND duckdb-sharepoint with IGNORE_ON_CONFLICT; whichever loads first wins,
+  # so the two copies must stay identical. Compares against the sibling's main.
+  vfs-parity:
+    timeout-minutes: 15
+    name: Shared VFS functions identical to duckdb-sharepoint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: DataZooDE/duckdb-sharepoint
+          path: sibling
+      - run: ./scripts/check_vfs_parity.sh sibling
 
   # A submodule that has drifted off the shipped tag makes every local green
   # meaningless: DuckDB's C++ API differs between versions, so code can
   # compile for the developer and fail on all platforms. Cheap, so it runs
   # before anything expensive.
   pin:
+    timeout-minutes: 15
     name: duckdb submodule on the shipped tag
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           submodules: recursive
       - run: ./scripts/check_duckdb_pin.sh
@@ -57,10 +76,11 @@ jobs:
   # not think of. Both finish long before the ~20-minute matrix build would.
   # ---------------------------------------------------------------------------
   musl:
+    timeout-minutes: 15
     name: musl compatibility
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Fixed-width integer types include <cstdint>
         run: ./scripts/check_cstdint.sh
       - name: Compile pure sources against musl
@@ -92,10 +112,11 @@ jobs:
   # jwt-cpp (fetched at the vcpkg versions) and the runner's OpenSSL -- no
   # DuckDB, no vcpkg. Ported from duckdb-sharepoint.
   unit-fast:
+    timeout-minutes: 15
     name: Catch2 pure-logic tests (standalone)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Build + run the pure-logic tests
         run: |
           cmake -S test/cpp -B build/unit
@@ -103,10 +124,11 @@ jobs:
           ./build/unit/gdrive_unit_tests --reporter console::out=-
 
   unit:
+    timeout-minutes: 90
     name: Pure-logic + credential-free SQL
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           submodules: recursive
       # actions/checkout does not fetch submodule TAGS, and DuckDB derives its
@@ -117,7 +139,7 @@ jobs:
       # this is only about the artifact THIS workflow builds and then checks.
       - name: Fetch duckdb tags (DuckDB versions itself from git describe)
         run: git -C duckdb fetch --tags --force origin
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with: { python-version: '3.12' }
       # Pinned to the commit extension-ci-tools' v1.5 distribution uses, never
       # HEAD: the live job holds Drive credentials, so nothing it runs may float.
@@ -173,13 +195,14 @@ jobs:
   # The real thing. Needs secrets, so it cannot run on fork PRs.
   # ---------------------------------------------------------------------------
   live:
+    timeout-minutes: 120
     name: Live tests against real Google Drive
     runs-on: ubuntu-latest
     # `secrets` is not available in job-level `if`, so gate on the event
     # instead: fork PRs have a head repo different from the base repo.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           submodules: recursive
       # actions/checkout does not fetch submodule TAGS, and DuckDB derives its
@@ -190,10 +213,9 @@ jobs:
       # this is only about the artifact THIS workflow builds and then checks.
       - name: Fetch duckdb tags (DuckDB versions itself from git describe)
         run: git -C duckdb fetch --tags --force origin
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with: { python-version: '3.12' }
-      - uses: astral-sh/setup-uv@v5
-      # Pinned to the commit extension-ci-tools' v1.5 distribution uses, never
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
       # HEAD: the live job holds Drive credentials, so nothing it runs may float.
       - name: Install vcpkg (pinned)
         run: |
@@ -255,12 +277,13 @@ jobs:
   # Drive and every later test fails for an unrelated reason.
   # ---------------------------------------------------------------------------
   sweep:
+    timeout-minutes: 30
     name: Sweep orphaned scratch folders
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
       - env:
           GDRIVE_CI_SA_KEY_B64: ${{ secrets.GDRIVE_CI_SA_KEY_B64 }}
           GDRIVE_CI_DRIVE_ID: ${{ secrets.GDRIVE_CI_DRIVE_ID }}
@@ -280,4 +303,4 @@ jobs:
         # by cloning DuckDB nightly to delete some folders; running the module
         # directly needs no submodules at all. The make target stays for
         # humans.
-        run: cd e2e && uv run python -m helpers.sweep
+        run: cd e2e && uv run --locked python -m helpers.sweep

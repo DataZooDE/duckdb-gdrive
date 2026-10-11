@@ -120,7 +120,10 @@ def test_expired_access_token_is_refreshed(tmp_path, duckdb_cli, gdrive_secret_s
     # the refresh grant at all.
     bad_dir = tmp_path / "bad"
     bad_dir.mkdir(mode=0o700)
-    bad = create.replace("REFRESH_TOKEN '", "REFRESH_TOKEN 'not-a-real-token-")
+    # The fixture reads the token with getenv(); swap in a garbage literal.
+    bad = create.replace("REFRESH_TOKEN getenv('GDRIVE_USER_REFRESH_TOKEN')",
+                         "REFRESH_TOKEN 'not-a-real-token-garbage'")
+    assert bad != create, "the fixture's REFRESH_TOKEN form changed; this test would prove nothing"
     broken = _run(duckdb_cli, bad_dir,
                   bad + " SELECT count(*) FROM read_csv('gdrive://fixtures/small.csv');")
     assert broken.returncode != 0, (
