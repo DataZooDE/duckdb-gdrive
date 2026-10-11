@@ -30,8 +30,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Least privilege: only the two deploy jobs may mint an OIDC token (to assume
+# the erpl AWS role); the build and smoke jobs get read-only contents.
 permissions:
-  id-token: write
   contents: read
 
 concurrency:
@@ -91,7 +92,7 @@ jobs:
   #
   # Gated to main / version tags: PRs build and test but never deploy, so the
   # deploy never needs OIDC credentials on a pull request. The reusable deploy
-  # workflow assumes the erpl AWS role via OIDC (id-token: write above) and
+  # workflow assumes the erpl AWS role via OIDC (id-token: write, granted to the deploy jobs only) and
   # reads the bucket from the DEPLOY_S3_BUCKET repo/org variable.
   duckdb-stable-smoke-test:
     name: Smoke test (v1.5.6)
@@ -105,10 +106,14 @@ jobs:
   duckdb-stable-deploy:
     name: Deploy extension binaries (v1.5.6)
     needs: [duckdb-stable-build, duckdb-stable-smoke-test]
-    # Run even if a non-essential BUILD arch failed (the deploy fans out per
-    # arch and only uploads artifacts that exist) -- but never past a failed
-    # smoke test. `!cancelled()` alone overrides the implicit success() check
-    # on `needs`, which let an artifact that fails to load in a stock CLI ship.
+    # Never past a failed smoke test. `!cancelled()` alone overrides the
+    # implicit success() check on `needs`, which let an artifact that fails to
+    # load in a stock CLI ship. Note the consequence, intended: an arch whose
+    # BUILD fails has no artifact, so its smoke test -- and with it the whole
+    # deploy of that line -- fails too. Nothing ships half a matrix.
+    permissions:
+      id-token: write
+      contents: read
     if: ${{ !cancelled() && needs.duckdb-stable-smoke-test.result == 'success' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
     uses: ./.github/workflows/_extension_deploy.yml
     secrets: inherit
@@ -136,6 +141,9 @@ jobs:
     name: Deploy extension binaries (v1.4.5 LTS)
     needs: [duckdb-lts-build, duckdb-lts-smoke-test]
     # Never past a failed smoke test; see duckdb-stable-deploy.
+    permissions:
+      id-token: write
+      contents: read
     if: ${{ !cancelled() && needs.duckdb-lts-smoke-test.result == 'success' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
     uses: ./.github/workflows/_extension_deploy.yml
     secrets: inherit

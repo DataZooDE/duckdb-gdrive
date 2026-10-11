@@ -98,7 +98,7 @@ void MutateRemoveFile(GDriveClient &client, GDrivePathCache &cache, const GDrive
 	}
 
 	if (uri.kind == GDriveUriKind::PATH) {
-		CacheKey key {auth.secret_name, auth.drive_id, auth.root_folder_id, CanonicalPathOf(uri)};
+		CacheKey key {auth.identity, auth.drive_id, auth.root_folder_id, CanonicalPathOf(uri)};
 		cache.InvalidatePrefix(key);
 	}
 }
@@ -209,7 +209,7 @@ void MutateMoveFile(GDriveClient &client, GDrivePathCache &cache, const GDriveAu
 	}
 
 	if (source_uri.kind == GDriveUriKind::PATH) {
-		CacheKey src_key {auth.secret_name, auth.drive_id, auth.root_folder_id, CanonicalPathOf(source_uri)};
+		CacheKey src_key {auth.identity, auth.drive_id, auth.root_folder_id, CanonicalPathOf(source_uri)};
 		cache.InvalidatePrefix(src_key);
 	}
 	// BUG FIX (live run 2026-07-26): this used to build the key from
@@ -227,7 +227,7 @@ void MutateMoveFile(GDriveClient &client, GDrivePathCache &cache, const GDriveAu
 	// Invalidating the destination's own canonical path (exact leaf, plus
 	// any descendants) is what actually needs to go.
 	if (target_uri.kind == GDriveUriKind::PATH) {
-		CacheKey dst_key {auth.secret_name, auth.drive_id, auth.root_folder_id, CanonicalPathOf(target_uri)};
+		CacheKey dst_key {auth.identity, auth.drive_id, auth.root_folder_id, CanonicalPathOf(target_uri)};
 		cache.InvalidatePrefix(dst_key);
 	}
 }
@@ -252,7 +252,7 @@ void MutateCreateDirectory(GDriveClient &client, GDrivePathCache &cache, const G
 		ThrowGDriveError(resp.error, uri.ToString());
 	}
 
-	CacheKey key {auth.secret_name, auth.drive_id, auth.root_folder_id, parent_path};
+	CacheKey key {auth.identity, auth.drive_id, auth.root_folder_id, parent_path};
 	cache.InvalidatePrefix(key);
 }
 
@@ -269,7 +269,7 @@ void MutateRemoveDirectory(GDriveClient &client, GDrivePathCache &cache, const G
 	}
 
 	if (uri.kind == GDriveUriKind::PATH) {
-		CacheKey key {auth.secret_name, auth.drive_id, auth.root_folder_id, CanonicalPathOf(uri)};
+		CacheKey key {auth.identity, auth.drive_id, auth.root_folder_id, CanonicalPathOf(uri)};
 		cache.InvalidatePrefix(key);
 	}
 }

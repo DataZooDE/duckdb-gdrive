@@ -34,6 +34,16 @@ def _load_dotenv() -> None:
         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
 
 
+def scrub(text: str) -> str:
+    """Remove credential values from text that may end up in a failure report
+    (and so in CI logs)."""
+    for name in ("GDRIVE_OAUTH_CLIENT_SECRET", "GDRIVE_USER_REFRESH_TOKEN", "GDRIVE_OAUTH_CLIENT_ID",):
+        value = os.environ.get(name)
+        if value:
+            text = text.replace(value, f"<{name}>")
+    return text
+
+
 _load_dotenv()
 
 from helpers.drive import Drive, credentials_available, user_delegation_available  # noqa: E402
@@ -149,12 +159,14 @@ def gdrive_secret_sql() -> str:
     missing = [n for n in needed if not os.environ.get(n)]
     if missing:
         pytest.skip(f"missing {', '.join(missing)}; run `make oauth_consent`")
+    # getenv(): the SQL text never holds a credential, so it can show up in
+    # argv, a traceback or a log without leaking anything.
     return (
         "CREATE SECRET gdrive_e2e (TYPE gdrive, PROVIDER config, "
-        f"CLIENT_ID '{os.environ['GDRIVE_OAUTH_CLIENT_ID']}', "
-        f"CLIENT_SECRET '{os.environ['GDRIVE_OAUTH_CLIENT_SECRET']}', "
-        f"REFRESH_TOKEN '{os.environ['GDRIVE_USER_REFRESH_TOKEN']}', "
-        f"ROOT_FOLDER_ID '{os.environ['GDRIVE_CI_DRIVE_ID']}', "
+        "CLIENT_ID getenv('GDRIVE_OAUTH_CLIENT_ID'), "
+        "CLIENT_SECRET getenv('GDRIVE_OAUTH_CLIENT_SECRET'), "
+        "REFRESH_TOKEN getenv('GDRIVE_USER_REFRESH_TOKEN'), "
+        "ROOT_FOLDER_ID getenv('GDRIVE_CI_DRIVE_ID'), "
         "DRIVE_SCOPE 'https://www.googleapis.com/auth/drive');"
     )
 
@@ -176,16 +188,19 @@ def sql(duckdb_cli: Path):
     under test is exactly the artifact we ship, not a separately built one.
     """
     def _run(statements: str, expect_error: bool = False) -> str:
+        __tracebackhide__ = True  # keep the SQL out of failure reports
         proc = subprocess.run(
-            [str(duckdb_cli), "-noheader", "-list", "-c", statements],
+            # Over stdin, never argv: a CREATE SECRET on the command line is
+            # readable by every user of the machine via ps / /proc.
+            [str(duckdb_cli), "-noheader", "-list"], input=statements,
             capture_output=True, text=True, timeout=600,
         )
         output = proc.stdout + proc.stderr
         if expect_error:
             if proc.returncode == 0:
-                raise AssertionError(f"expected an error, got success:\n{output}")
+                raise AssertionError(f"expected an error, got success:\n{scrub(output)}")
         elif proc.returncode != 0:
-            raise AssertionError(f"duckdb failed ({proc.returncode}):\n{output}")
+            raise AssertionError(f"duckdb failed ({proc.returncode}):\n{scrub(output)}")
         return output.strip()
 
     return _run
