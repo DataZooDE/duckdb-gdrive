@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Enforce that the loadable extension only dynamically links against the
-# platform standard libraries. See docs/IMPLEMENTATION.md section 6.
+# platform standard libraries. OpenSSL is linked statically from vcpkg, so
+# a dynamic libssl/libcrypto would be a regression (trust store, ABI).
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
@@ -15,7 +16,7 @@ if [[ ! -f "$target" ]]; then
 fi
 
 # Platform-libs allowlist. Anything else is a static-linkage violation.
-allowlist_pattern='^(linux-vdso|libpthread|libdl|librt|libm|libgcc_s|libstdc\+\+|libc|ld-linux-x86-64|ld-linux-aarch64|libssl|libcrypto)\.so'
+allowlist_pattern='^(linux-vdso|libpthread|libdl|librt|libm|libgcc_s|libstdc\+\+|libc|ld-linux-x86-64|ld-linux-aarch64)\.so'
 
 violations=$(ldd "$target" 2>/dev/null \
     | awk '{ print $1 }' \
