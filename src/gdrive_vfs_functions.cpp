@@ -135,14 +135,16 @@ void FileSizeScalar(DataChunk &args, ExpressionState &state, Vector &result) {
 		    // FileExists and DirectoryExists up front cost three remote stats
 		    // for an absent file and two for a present one -- measured with
 		    // gdrive_stats() under a throttling burst.
+		    //
+		    // A LOCAL directory is asked first: POSIX opens it and reports its
+		    // inode size, Windows refuses it with "Access is denied". Remote
+		    // filesystems refuse folders in OpenFile, so they are only asked
+		    // DirectoryExists after an absent open -- no extra round trip.
+		    if (p.find("://") == string::npos && fs.DirectoryExists(p)) {
+			    throw IOException("'%s' is a directory, not a file; it has no byte size", p);
+		    }
 		    auto handle = fs.OpenFile(p, FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_NULL_IF_NOT_EXISTS);
 		    if (handle) {
-			    // A LOCAL directory opens fine and reports its inode size (remote
-			    // filesystems refuse folders in OpenFile), so local paths are
-			    // asked DirectoryExists -- a cheap local stat, never a round trip.
-			    if (p.find("://") == string::npos && fs.DirectoryExists(p)) {
-				    throw IOException("'%s' is a directory, not a file; it has no byte size", p);
-			    }
 			    return NumericCast<int64_t>(handle->GetFileSize());
 		    }
 		    if (fs.DirectoryExists(p)) {
