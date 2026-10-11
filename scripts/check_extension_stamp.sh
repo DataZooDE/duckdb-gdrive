@@ -26,7 +26,9 @@ EXT="${1:-build/release/extension/gdrive/gdrive.duckdb_extension}"
 
 # Keep in step with scripts/check_duckdb_pin.sh and the stable job in
 # .github/workflows/MainDistributionPipeline.yml.
-WANT_VERSION="v1.5.6"
+# shellcheck source=duckdb_version.env
+source scripts/duckdb_version.env
+WANT_VERSION="$DUCKDB_TAG"
 
 if [[ ! -f "$EXT" ]]; then
     echo "FAIL: $EXT not built. Run \`make\` first." >&2

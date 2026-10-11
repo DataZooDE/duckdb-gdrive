@@ -145,17 +145,6 @@ def scratch(writer: Drive):
             print(f"WARNING: could not clean up scratch {name}: {e}")
 
 
-class RedactedSQL(str):
-    """A str whose repr hides it. pytest prints a failing test's fixture
-    arguments in its traceback; for this fixture that is the OAuth client
-    secret and the user's refresh token, straight into CI logs. Found in the
-    sibling duckdb-sharepoint's harness, which printed its client secret on
-    the first failing run."""
-
-    def __repr__(self) -> str:
-        return "<RedactedSQL: CREATE SECRET ... (credentials hidden)>"
-
-
 @pytest.fixture(scope="session")
 def gdrive_secret_sql() -> str:
     """CREATE SECRET for a delegated user, as SQL.
@@ -170,12 +159,14 @@ def gdrive_secret_sql() -> str:
     missing = [n for n in needed if not os.environ.get(n)]
     if missing:
         pytest.skip(f"missing {', '.join(missing)}; run `make oauth_consent`")
-    return RedactedSQL(
+    # getenv(): the SQL text never holds a credential, so it can show up in
+    # argv, a traceback or a log without leaking anything.
+    return (
         "CREATE SECRET gdrive_e2e (TYPE gdrive, PROVIDER config, "
-        f"CLIENT_ID '{os.environ['GDRIVE_OAUTH_CLIENT_ID']}', "
-        f"CLIENT_SECRET '{os.environ['GDRIVE_OAUTH_CLIENT_SECRET']}', "
-        f"REFRESH_TOKEN '{os.environ['GDRIVE_USER_REFRESH_TOKEN']}', "
-        f"ROOT_FOLDER_ID '{os.environ['GDRIVE_CI_DRIVE_ID']}', "
+        "CLIENT_ID getenv('GDRIVE_OAUTH_CLIENT_ID'), "
+        "CLIENT_SECRET getenv('GDRIVE_OAUTH_CLIENT_SECRET'), "
+        "REFRESH_TOKEN getenv('GDRIVE_USER_REFRESH_TOKEN'), "
+        "ROOT_FOLDER_ID getenv('GDRIVE_CI_DRIVE_ID'), "
         "DRIVE_SCOPE 'https://www.googleapis.com/auth/drive');"
     )
 
@@ -197,6 +188,7 @@ def sql(duckdb_cli: Path):
     under test is exactly the artifact we ship, not a separately built one.
     """
     def _run(statements: str, expect_error: bool = False) -> str:
+        __tracebackhide__ = True  # keep the SQL out of failure reports
         proc = subprocess.run(
             # Over stdin, never argv: a CREATE SECRET on the command line is
             # readable by every user of the machine via ps / /proc.
