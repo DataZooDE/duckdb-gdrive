@@ -213,6 +213,16 @@ public:
 
 	//! Cheap prefix test; DuckDB calls this on every path for every filesystem.
 	bool CanHandleFile(const string &fpath) override;
+#ifndef GDRIVE_DUCKDB_LTS
+	//! gdrive:// paths are already canonical. The base implementation
+	//! collapses "//" for any scheme missing from DuckDB's hard-coded list of
+	//! remote prefixes, which turned `ATTACH 'gdrive://a/db.duckdb'` into
+	//! "gdrive:/a/db.duckdb" and "database does not exist". (DuckDB 1.5+;
+	//! 1.4 does not canonicalize ATTACH paths.)
+	string CanonicalizePath(const string &path, optional_ptr<FileOpener> opener = nullptr) override {
+		return path;
+	}
+#endif
 	std::string GetName() const override {
 		return "GDriveFileSystem";
 	}
@@ -274,7 +284,7 @@ private:
 	//! the id: form (R-4). Drive permits duplicate names in one folder, so
 	//! silently picking one would make query results depend on Drive's
 	//! internal ordering -- a bug that reproduces only sometimes.
-	DriveFileMeta ResolveOrThrow(ClientContext &context, const GDriveUri &uri);
+	DriveFileMeta ResolveOrThrow(optional_ptr<FileOpener> context, const GDriveUri &uri);
 
 	//! R-4 applies to LISTING too, not just resolution.
 	//!
