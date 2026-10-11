@@ -37,7 +37,6 @@ on:
 
 jobs:
   smoke-test:
-    timeout-minutes: 30
     name: Smoke test (${{ matrix.arch }})
     strategy:
       # Run every platform even if one fails, so a single broken arch does not
@@ -56,6 +55,7 @@ jobs:
             runner: macos-15-intel
           - arch: windows_amd64
             runner: windows-latest
+    timeout-minutes: 15
     runs-on: ${{ matrix.runner }}
     steps:
       # Skip at step level, not job level: a job-level `if:` is evaluated before

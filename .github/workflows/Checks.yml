@@ -10,6 +10,8 @@
 name: Checks
 on:
   push:
+    branches: [main]
+    tags: ['**']
   pull_request:
   workflow_dispatch:
   schedule:
@@ -28,8 +30,8 @@ jobs:
   # Always runs. No credentials, no network. Anyone can reproduce this.
   # ---------------------------------------------------------------------------
   hygiene:
-    timeout-minutes: 15
     name: Credential hygiene
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -56,8 +58,8 @@ jobs:
   # compile for the developer and fail on all platforms. Cheap, so it runs
   # before anything expensive.
   pin:
-    timeout-minutes: 15
     name: duckdb submodule on the shipped tag
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -76,8 +78,8 @@ jobs:
   # not think of. Both finish long before the ~20-minute matrix build would.
   # ---------------------------------------------------------------------------
   musl:
-    timeout-minutes: 15
     name: musl compatibility
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -124,8 +126,8 @@ jobs:
           ./build/unit/gdrive_unit_tests --reporter console::out=-
 
   unit:
-    timeout-minutes: 90
     name: Pure-logic + credential-free SQL
+    timeout-minutes: 55
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -162,7 +164,7 @@ jobs:
       # The artifact users actually install. Everything above tests the
       # statically linked shell, which never exercises the LOAD-time DuckDB
       # version handshake -- a stale CMake cache once stamped the artifact
-      # for a commit hash instead of v1.5.5 and it could not be loaded by
+      # for a commit hash instead of v1.5.6 and it could not be loaded by
       # anyone, while every test stayed green.
       - name: Extension stamped for the target DuckDB
         run: make check_stamp
@@ -195,8 +197,8 @@ jobs:
   # The real thing. Needs secrets, so it cannot run on fork PRs.
   # ---------------------------------------------------------------------------
   live:
-    timeout-minutes: 120
     name: Live tests against real Google Drive
+    timeout-minutes: 60
     runs-on: ubuntu-latest
     # `secrets` is not available in job-level `if`, so gate on the event
     # instead: fork PRs have a head repo different from the base repo.
@@ -277,9 +279,9 @@ jobs:
   # Drive and every later test fails for an unrelated reason.
   # ---------------------------------------------------------------------------
   sweep:
-    timeout-minutes: 30
     name: Sweep orphaned scratch folders
     if: github.event_name == 'schedule'
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
