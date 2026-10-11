@@ -340,6 +340,31 @@ SELECT count(*), sum(i) FROM remote.t;
 statement ok
 DETACH remote;
 
+# Cross-check against duckdb-sharepoint (same scenario script, both backends):
+# file_size of a FOLDER is an error, not 0, and {a,b} alternation whose
+# expansions are plain literal names finds them (it found nothing: a literal
+# expansion was treated as a folder prefix and its "children" listed).
+statement ok
+SELECT write_blob('gdrive://scratch/${SCRATCH}/xc/a.txt', 'a'::BLOB);
+
+statement ok
+SELECT write_blob('gdrive://scratch/${SCRATCH}/xc/b.txt', 'b'::BLOB);
+
+statement error
+SELECT file_size('gdrive://scratch/${SCRATCH}/xc');
+----
+is a directory
+
+query I
+SELECT count(*) FROM glob('gdrive://scratch/${SCRATCH}/xc/{a,b}.txt');
+----
+2
+
+query I
+SELECT count(*) FROM glob('gdrive://scratch/${SCRATCH}/xc/{a}.txt');
+----
+1
+
 statement ok
 DROP SECRET gdrive_test;
 
