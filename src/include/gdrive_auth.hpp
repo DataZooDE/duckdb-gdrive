@@ -1,10 +1,12 @@
 #pragma once
 
+#include "duckdb/common/optional_ptr.hpp"
 #include <string>
 
 namespace duckdb {
 
 class ClientContext;
+class FileOpener;
 
 namespace gdrive {
 
@@ -35,6 +37,13 @@ struct GDriveAuthContext {
 	//! The secret's name, for error messages that tell the user which
 	//! credential to fix. NEVER accompanied by the token itself.
 	std::string secret_name;
+	//! Cache identity: a SHA-256 fingerprint of the secret's provider, name,
+	//! fields and the credential actually resolved (key file / ADC file stamp)
+	//! -- see gdrive_identity.hpp for the exact, unit-tested rules. The path cache and the block cache
+	//! key on THIS, never on the name alone: a secret recreated under the same
+	//! name with different credentials must not be served the previous
+	//! principal's cached ids or bytes.
+	std::string identity;
 	//! GCP project to bill Drive API quota to, sent as `x-goog-user-project`.
 	//!
 	//! Only ever set for an `authorized_user` ADC document, and REQUIRED
@@ -60,12 +69,12 @@ struct GDriveAuthContext {
 //! Throws (DuckDB-side) when no secret matches or a refresh fails. The
 //! message names the secret and what to do, and never contains token
 //! material (REQ-NF-03).
-GDriveAuthContext GetAuthContext(ClientContext &context, const std::string &path);
+GDriveAuthContext GetAuthContext(optional_ptr<FileOpener> opener, const std::string &path);
 
 //! True when at least one gdrive secret is registered. Lets the filesystem
 //! produce "no gdrive secret configured; CREATE SECRET ..." rather than an
 //! opaque 401 from Google.
-bool HasAnyGDriveSecret(ClientContext &context);
+bool HasAnyGDriveSecret(optional_ptr<FileOpener> opener);
 
 } // namespace gdrive
 } // namespace duckdb

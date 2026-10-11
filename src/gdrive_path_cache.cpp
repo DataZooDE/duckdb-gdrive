@@ -33,7 +33,7 @@ thread_local idx_t t_query_generation = 0;
 } // namespace
 
 bool CacheKey::operator==(const CacheKey &other) const {
-	return secret_name == other.secret_name && drive_id == other.drive_id && root_folder_id == other.root_folder_id &&
+	return identity == other.identity && drive_id == other.drive_id && root_folder_id == other.root_folder_id &&
 	       canonical_path == other.canonical_path;
 }
 
@@ -42,8 +42,8 @@ std::string CacheKey::ToString() const {
 	// '/' or other path-ish characters, so two different (secret, path)
 	// combinations can never collide onto the same string key.
 	std::string out;
-	out.reserve(secret_name.size() + drive_id.size() + root_folder_id.size() + canonical_path.size() + 4);
-	out += secret_name;
+	out.reserve(identity.size() + drive_id.size() + root_folder_id.size() + canonical_path.size() + 4);
+	out += identity;
 	out += '\x1f';
 	out += drive_id;
 	out += '\x1f';
@@ -134,7 +134,7 @@ namespace {
 //! Identity + file id. NOT file id alone -- see the header's SECURITY note.
 std::string MetadataKey(const CacheKey &identity, const std::string &file_id) {
 	std::string out;
-	out += identity.secret_name;
+	out += identity.identity;
 	out += '\x1f';
 	out += identity.drive_id;
 	out += '\x1f';
@@ -248,7 +248,7 @@ void GDrivePathCache::InvalidatePrefix(const CacheKey &key) {
 	// delete; the cost of being wrong is serving a stale size for a file that
 	// was just rewritten, and the cost of being coarse is a few extra
 	// files.get calls after a write. That is not a close trade.
-	std::string identity = key.secret_name;
+	std::string identity = key.identity;
 	identity += '\x1f';
 	identity += key.drive_id;
 	identity += '\x1f';
@@ -262,7 +262,7 @@ void GDrivePathCache::InvalidatePrefix(const CacheKey &key) {
 	// Everything under the same identity whose canonical_path is `key`'s path
 	// or a descendant of it (path + "/" + anything) must go: a rename or
 	// delete invalidates the whole subtree, not just the one entry.
-	std::string identity_prefix = key.secret_name;
+	std::string identity_prefix = key.identity;
 	identity_prefix += '\x1f';
 	identity_prefix += key.drive_id;
 	identity_prefix += '\x1f';
@@ -283,25 +283,6 @@ void GDrivePathCache::InvalidatePrefix(const CacheKey &key) {
 	}
 }
 
-void GDrivePathCache::InvalidateSecret(const std::string &secret_name) {
-	lock_guard<mutex> guard(lock);
-	// Both maps are keyed with the secret name first, so one prefix serves
-	// both. Metadata entries go too: they describe files reachable only
-	// through this secret's identity.
-	std::string prefix = secret_name;
-	prefix += '\x1f';
-	for (auto it = metadata_entries.begin(); it != metadata_entries.end();) {
-		it = (it->first.compare(0, prefix.size(), prefix) == 0) ? metadata_entries.erase(it) : std::next(it);
-	}
-	for (auto it = entries.begin(); it != entries.end();) {
-		if (it->first.compare(0, prefix.size(), prefix) == 0) {
-			it = entries.erase(it);
-		} else {
-			++it;
-		}
-	}
-}
-
 void GDrivePathCache::Clear() {
 	lock_guard<mutex> guard(lock);
 	entries.clear();
@@ -311,141 +292,6 @@ void GDrivePathCache::Clear() {
 idx_t GDrivePathCache::Size() {
 	lock_guard<mutex> guard(lock);
 	return entries.size();
-}
-
-// ---------------------------------------------------------------------------
-// GDriveBlockCache -- see the contract in gdrive_filesystem.hpp for WHY this
-// is shared rather than per-handle, and why blocks are large.
-// ---------------------------------------------------------------------------
-
-void GDriveBlockCache::SetCapacity(idx_t bytes) {
-	lock_guard<mutex> guard(lock);
-	capacity_bytes = bytes;
-	EvictLocked();
-}
-
-idx_t GDriveBlockCache::BytesCached() {
-	lock_guard<mutex> guard(lock);
-	return cached_bytes;
-}
-
-void GDriveBlockCache::Clear() {
-	lock_guard<mutex> guard(lock);
-	blocks.clear();
-	cached_bytes = 0;
-}
-
-void GDriveBlockCache::InvalidateSecret(const std::string &secret_name) {
-	lock_guard<mutex> guard(lock);
-	std::string prefix = secret_name;
-	prefix += '\x1f';
-	for (auto it = blocks.begin(); it != blocks.end();) {
-		if (it->first.compare(0, prefix.size(), prefix) == 0) {
-			cached_bytes -= it->second.bytes;
-			it = blocks.erase(it);
-		} else {
-			++it;
-		}
-	}
-}
-
-//! Least-recently-used eviction. Caller holds `lock`.
-//!
-//! Only entries whose fetch has COMPLETED are evictable: dropping an in-flight
-//! entry would let a second thread start a duplicate request for the same
-//! block, which is the one thing this cache exists to prevent. A block still
-//! held by a reader stays alive through its shared_ptr regardless.
-void GDriveBlockCache::EvictLocked() {
-	if (capacity_bytes == 0) {
-		blocks.clear();
-		cached_bytes = 0;
-		return;
-	}
-	while (cached_bytes > capacity_bytes) {
-		auto victim = blocks.end();
-		for (auto it = blocks.begin(); it != blocks.end(); ++it) {
-			if (it->second.value.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
-				continue; // in flight
-			}
-			if (victim == blocks.end() || it->second.used_at < victim->second.used_at) {
-				victim = it;
-			}
-		}
-		if (victim == blocks.end()) {
-			return; // everything in flight; let the next insert try again
-		}
-		cached_bytes -= victim->second.bytes;
-		blocks.erase(victim);
-	}
-}
-
-shared_ptr<const std::string> GDriveBlockCache::GetBlock(const std::string &key, idx_t block_index, idx_t block_size,
-                                                          idx_t file_size,
-                                                          const std::function<void(idx_t, idx_t, std::string &)> &fetch) {
-	std::string full_key = key;
-	full_key += '\x1f';
-	full_key += std::to_string(block_index);
-
-	std::shared_future<shared_ptr<const std::string>> future;
-	std::promise<shared_ptr<const std::string>> promise;
-	bool i_fetch = false;
-
-	{
-		lock_guard<mutex> guard(lock);
-		auto it = blocks.find(full_key);
-		if (it != blocks.end()) {
-			it->second.used_at = ++clock;
-			future = it->second.value;
-		} else {
-			// Insert the FUTURE before releasing the lock, so a second thread
-			// arriving for the same block waits on this fetch instead of
-			// starting its own. With 18 threads scanning one file, the
-			// difference is 1 request versus 18 identical ones.
-			future = promise.get_future().share();
-			Entry entry;
-			entry.value = future;
-			entry.bytes = 0;
-			entry.used_at = ++clock;
-			blocks.emplace(full_key, entry);
-			i_fetch = true;
-		}
-	}
-
-	if (i_fetch) {
-		idx_t start = block_index * block_size;
-		idx_t len = MinValue<idx_t>(block_size, file_size > start ? file_size - start : 0);
-		try {
-			auto data = make_shared_ptr<std::string>();
-			fetch(start, len, *data);
-			auto stored = shared_ptr<const std::string>(std::move(data));
-			{
-				lock_guard<mutex> guard(lock);
-				auto it = blocks.find(full_key);
-				if (it != blocks.end()) {
-					it->second.bytes = stored->size();
-					cached_bytes += stored->size();
-				}
-				EvictLocked();
-			}
-			promise.set_value(stored);
-			return stored;
-		} catch (...) {
-			// A failed fetch must not be cached, and every waiter must see the
-			// error rather than hang.
-			{
-				lock_guard<mutex> guard(lock);
-				auto it = blocks.find(full_key);
-				if (it != blocks.end()) {
-					cached_bytes -= it->second.bytes;
-					blocks.erase(it);
-				}
-			}
-			promise.set_exception(std::current_exception());
-			throw;
-		}
-	}
-
-	return future.get();
 }
 
 } // namespace gdrive

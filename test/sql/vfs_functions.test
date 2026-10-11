@@ -205,3 +205,10 @@ query I
 SELECT file_size(NULL) IS NULL
 ----
 true
+
+# A LOCAL directory opens like a file and would report its inode size; it is
+# an error, exactly as for a remote folder.
+statement error
+SELECT file_size('__TEST_DIR__');
+----
+is a directory

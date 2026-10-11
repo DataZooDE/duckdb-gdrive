@@ -46,7 +46,7 @@ def _file_state(drive, file_id: str) -> str:
 
 def _overwrite(duckdb_cli, secret_sql: str, path: str, extra_setup: str = "") -> None:
     sql = f"{secret_sql}\n{extra_setup}\nCOPY (SELECT 42 AS a) TO '{path}' (FORMAT csv);"
-    proc = subprocess.run([str(duckdb_cli), "-noheader", "-list", "-c", sql],
+    proc = subprocess.run([str(duckdb_cli), "-noheader", "-list"], input=sql,
                           capture_output=True, text=True, timeout=300)
     if proc.returncode != 0:
         raise AssertionError(f"overwrite failed:\n{proc.stdout}{proc.stderr}")

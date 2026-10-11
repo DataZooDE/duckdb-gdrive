@@ -48,6 +48,9 @@
 
 #include "gdrive_adc.hpp"
 #include "gdrive_auth.hpp"
+#include "gdrive_credential_file.hpp"
+#include "gdrive_identity.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "gdrive_oauth_params.hpp"
 #include "gdrive_service_account.hpp"
 
@@ -58,6 +61,7 @@
 
 #include "duckdb/catalog/catalog_transaction.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/file_opener.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 
@@ -182,8 +186,13 @@ std::string KeyFileStamp(const std::string &key_file) {
 	if (stat(key_file.c_str(), &st) != 0) {
 		return key_file; // let the later open() produce the real error
 	}
+	// Path + size + mtime alone can collide (a credential replaced within the
+	// same second at the same size); the inode and ctime change on every
+	// replacement. This stamp keys the path and block caches, not just tokens.
 	return key_file + ":" + std::to_string(static_cast<long long>(st.st_size)) + ":" +
-	       std::to_string(static_cast<long long>(st.st_mtime));
+	       std::to_string(static_cast<long long>(st.st_mtime)) + ":" +
+	       std::to_string(static_cast<long long>(st.st_ctime)) + ":" +
+	       std::to_string(static_cast<unsigned long long>(st.st_ino));
 }
 
 int64_t NowUnix() {
@@ -386,16 +395,13 @@ RefreshResult ExchangeExternalAccountToken(const AdcExternalAccount &ext, const 
 
 	// The platform writes this; a missing file means the pod is not configured
 	// for federation, which is worth saying plainly rather than as an STS 400.
-	std::ifstream token_file(ext.subject_token_path, std::ios::binary);
-	if (!token_file.good()) {
-		result.error = "no workload-identity token at '" + ext.subject_token_path +
-		                "'. This path is written by the platform (a projected service-account "
+	std::string subject_token, why;
+	if (!ReadCredentialFile(ext.subject_token_path, subject_token, why)) {
+		result.error = "no workload-identity token at '" + ext.subject_token_path + "' (" + why +
+		                "). This path is written by the platform (a projected service-account "
 		                "token, on Kubernetes); if it is absent the workload is not federated.";
 		return result;
 	}
-	std::ostringstream token_ss;
-	token_ss << token_file.rdbuf();
-	std::string subject_token = token_ss.str();
 	// A projected token file ends with a newline often enough to matter, and
 	// STS rejects the token rather than trimming it.
 	while (!subject_token.empty() && (subject_token.back() == '\n' || subject_token.back() == '\r')) {
@@ -529,17 +535,16 @@ std::string GetOrEmpty(const KeyValueSecret &kv, const char *key) {
 // key file. Never reads the file's *contents* into this message -- only the
 // path, which is not secret material.
 std::string ReadFileOrThrow(const std::string &path, const std::string &secret_name) {
-	std::ifstream f(path, std::ios::binary);
-	if (!f.good()) {
+	std::string contents, why;
+	if (!ReadCredentialFile(path, contents, why)) {
 		throw IOException(
-		    "gdrive secret '%s': service-account key file not found or not readable: '%s'. "
+		    "gdrive secret '%s': service-account key file " +
+		        (why == "not found or not readable" ? why : "cannot be used, " + why) + ": '%s'. "
 		    "Check the KEY_FILE path, or recreate the secret, e.g.:\n"
 		    "  CREATE SECRET %s (TYPE gdrive, PROVIDER service_account, KEY_FILE '/etc/creds/sa.json');",
 		    secret_name.c_str(), path.c_str(), secret_name.c_str());
 	}
-	std::ostringstream ss;
-	ss << f.rdbuf();
-	return ss.str();
+	return contents;
 }
 
 GDriveAuthContext BuildContextFromServiceAccount(const KeyValueSecret &kv, const std::string &secret_name) {
@@ -632,46 +637,45 @@ std::string GetEnvOrEmpty(const char *name) {
 	return value ? std::string(value) : std::string();
 }
 
-GDriveAuthContext BuildContextFromCredentialChain(ClientContext &context, const KeyValueSecret &kv,
+//! The ADC file a credential_chain secret authenticates with. The
+//! gdrive_adc_file setting outranks the environment: a DuckDB session cannot
+//! export a variable to itself, so this is the only way to point one
+//! connection at a specific credential. Empty if none is found.
+std::string ResolveChainAdcPath(optional_ptr<FileOpener> opener) {
+	Value setting;
+	if (FileOpener::TryGetCurrentSetting(opener, "gdrive_adc_file", setting) && !setting.IsNull() &&
+	    !setting.ToString().empty()) {
+		return setting.ToString();
+	}
+	AdcPathInputs inputs;
+	inputs.google_application_credentials = GetEnvOrEmpty("GOOGLE_APPLICATION_CREDENTIALS");
+	inputs.cloudsdk_config = GetEnvOrEmpty("CLOUDSDK_CONFIG");
+	inputs.home = GetEnvOrEmpty("HOME");
+	inputs.appdata = GetEnvOrEmpty("APPDATA");
+	return ResolveAdcPath(inputs);
+}
+
+GDriveAuthContext BuildContextFromCredentialChain(optional_ptr<FileOpener> opener, const KeyValueSecret &kv,
                                                    const std::string &secret_name) {
 	std::string scope = GetOrEmpty(kv, "drive_scope");
 	if (scope.empty()) {
 		scope = SCOPE_DRIVE_READONLY; // REQ-NF-04
 	}
 
-	AdcPathInputs inputs;
-	inputs.google_application_credentials = GetEnvOrEmpty("GOOGLE_APPLICATION_CREDENTIALS");
-	inputs.cloudsdk_config = GetEnvOrEmpty("CLOUDSDK_CONFIG");
-	inputs.home = GetEnvOrEmpty("HOME");
-	inputs.appdata = GetEnvOrEmpty("APPDATA");
-
-	// The gdrive_adc_file setting outranks the environment: a DuckDB session
-	// cannot export a variable to itself, so this is the only way to point one
-	// connection at a specific credential.
-	std::string adc_path;
-	Value setting;
-	if (context.TryGetCurrentSetting("gdrive_adc_file", setting) && !setting.IsNull() &&
-	    !setting.ToString().empty()) {
-		adc_path = setting.ToString();
-	} else {
-		adc_path = ResolveAdcPath(inputs);
-	}
+	const std::string adc_path = ResolveChainAdcPath(opener);
 
 	if (adc_path.empty()) {
 		throw IOException("gdrive secret '%s': %s", secret_name.c_str(),
 		                   NoCredentialsMessage().c_str());
 	}
 
-	std::ifstream f(adc_path, std::ios::binary);
-	if (!f.good()) {
+	std::string adc_json, why;
+	if (!ReadCredentialFile(adc_path, adc_json, why)) {
 		// The path is not secret, and naming it is what turns "no credentials"
 		// from a riddle into a fact the reader can check with `ls`.
-		throw IOException("gdrive secret '%s': no credentials file at '%s'.\n\n%s", secret_name.c_str(),
-		                   adc_path.c_str(), NoCredentialsMessage().c_str());
+		throw IOException("gdrive secret '%s': no usable credentials file at '%s' (%s).\n\n%s",
+		                   secret_name.c_str(), adc_path.c_str(), why.c_str(), NoCredentialsMessage().c_str());
 	}
-	std::ostringstream ss;
-	ss << f.rdbuf();
-	std::string adc_json = ss.str();
 
 	AdcParse parsed = ParseAdcJson(adc_json);
 	adc_json.clear(); // never keep credential text around longer than needed
@@ -824,7 +828,11 @@ GDriveAuthContext BuildContextFromAuthorizationCode(ClientContext &context, cons
 		return ctx;
 	};
 
-	const std::string cache_key = FingerprintKey(secret_name, "authorization_code", {client_id, client_secret, scope});
+	// The refresh token names the USER: without it, a same-named secret
+	// recreated with another user's refresh token was handed the first
+	// user's cached access token for up to an hour.
+	const std::string cache_key = FingerprintKey(secret_name, "authorization_code",
+	                                             {client_id, client_secret, scope, GetOrEmpty(kv, "refresh_token")});
 
 	{
 		std::lock_guard<std::mutex> lock(CacheMutex());
@@ -1006,10 +1014,16 @@ GDriveAuthContext BuildContextFromConfig(const KeyValueSecret &kv, const std::st
 
 } // namespace
 
-GDriveAuthContext GetAuthContext(ClientContext &context, const std::string &path) {
-	auto &secret_manager = SecretManager::Get(context);
-	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
-	auto match = secret_manager.LookupSecret(transaction, path, "gdrive");
+GDriveAuthContext GetAuthContext(optional_ptr<FileOpener> opener, const std::string &path) {
+	// Through the opener, not a ClientContext: DuckDB opens an ATTACHed
+	// database file with a database-level opener that has no client
+	// connection, and secrets and settings are still reachable through it.
+	auto secret_manager = FileOpener::TryGetSecretManager(opener);
+	auto transaction = FileOpener::TryGetCatalogTransaction(opener);
+	if (!secret_manager || !transaction) {
+		throw IOException("gdrive: '%s' was opened without a database context, so no secret can be looked up", path);
+	}
+	auto match = secret_manager->LookupSecret(*transaction, path, "gdrive");
 
 	if (!match.HasMatch()) {
 		// A gdrive secret may EXIST and still not match: DuckDB's SCOPE clause
@@ -1020,7 +1034,7 @@ GDriveAuthContext GetAuthContext(ClientContext &context, const std::string &path
 		// the secret then matches nothing. Telling that user "no secret
 		// configured" sends them off to create a second one, which will not
 		// match either. Say what actually happened.
-		if (HasAnyGDriveSecret(context)) {
+		if (HasAnyGDriveSecret(opener)) {
 			throw IOException(
 			    "gdrive: a gdrive secret exists, but none of them apply to '%s'.\n"
 			    "A secret's SCOPE clause limits which paths it covers. If you meant to set the "
@@ -1055,17 +1069,45 @@ GDriveAuthContext GetAuthContext(ClientContext &context, const std::string &path
 	// broke every release build. Keep this on the released API.
 	const std::string secret_name = base.GetName();
 
+	// Cache identity: the secret's fields plus the credential actually used
+	// (see gdrive_identity.hpp for the rules, which are unit-tested).
+	std::vector<std::pair<std::string, std::string>> fields;
+	for (const auto &entry : kv->secret_map) {
+		fields.emplace_back(entry.first, entry.second.ToString());
+	}
+	std::string identity_source;
 	if (base.GetProvider() == "service_account") {
-		return BuildContextFromServiceAccount(*kv, secret_name);
+		identity_source = KeyFileStamp(GetOrEmpty(*kv, "key_file"));
+	} else if (base.GetProvider() == "credential_chain") {
+		identity_source = KeyFileStamp(ResolveChainAdcPath(opener));
+	}
+	const std::string identity =
+	    FingerprintKey(secret_name, base.GetProvider(), IdentityMaterial(base.GetProvider(), fields, identity_source));
+	auto with_identity = [&identity](GDriveAuthContext ctx) {
+		ctx.identity = identity;
+		return ctx;
+	};
+
+	if (base.GetProvider() == "service_account") {
+		return with_identity(BuildContextFromServiceAccount(*kv, secret_name));
 	}
 	if (base.GetProvider() == "config") {
-		return BuildContextFromConfig(*kv, secret_name);
+		return with_identity(BuildContextFromConfig(*kv, secret_name));
 	}
 	if (base.GetProvider() == "credential_chain") {
-		return BuildContextFromCredentialChain(context, *kv, secret_name);
+		return with_identity(BuildContextFromCredentialChain(opener, *kv, secret_name));
 	}
 	if (base.GetProvider() == "authorization_code") {
-		return BuildContextFromAuthorizationCode(context, *kv, secret_name);
+		// The one provider that needs a client connection: it writes refreshed
+		// tokens back into the secret.
+		auto client_context = FileOpener::TryGetClientContext(opener);
+		if (!client_context) {
+			throw IOException("gdrive secret '%s' (PROVIDER authorization_code) needs a client connection to "
+			                  "refresh its tokens, and '%s' was opened without one (e.g. by ATTACH). Use a "
+			                  "service_account, config or credential_chain secret for it.",
+			                  secret_name.c_str(), path.c_str());
+		}
+		return with_identity(BuildContextFromAuthorizationCode(*client_context, *kv, secret_name));
 	}
 
 	throw InvalidInputException("gdrive secret '%s' has unsupported provider '%s'; expected 'service_account', "
@@ -1073,10 +1115,13 @@ GDriveAuthContext GetAuthContext(ClientContext &context, const std::string &path
 	                             secret_name.c_str(), base.GetProvider().c_str());
 }
 
-bool HasAnyGDriveSecret(ClientContext &context) {
-	auto &secret_manager = SecretManager::Get(context);
-	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(context);
-	auto secrets = secret_manager.AllSecrets(transaction);
+bool HasAnyGDriveSecret(optional_ptr<FileOpener> opener) {
+	auto secret_manager = FileOpener::TryGetSecretManager(opener);
+	auto transaction = FileOpener::TryGetCatalogTransaction(opener);
+	if (!secret_manager || !transaction) {
+		return false;
+	}
+	auto secrets = secret_manager->AllSecrets(*transaction);
 	for (const auto &entry : secrets) {
 		if (entry.secret && entry.secret->GetType() == "gdrive") {
 			return true;
