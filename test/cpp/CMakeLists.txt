@@ -9,6 +9,7 @@
 # `make test` still runs the same tests through the in-tree build.
 #
 # Ported from the sibling duckdb-sharepoint's test/cpp/CMakeLists.txt.
+# Fetched sources are pinned by commit, not tag: tags can be moved.
 # Catch2 comes from the system if present, else is fetched; picojson and
 # jwt-cpp are fetched at the versions vcpkg pins; OpenSSL is the system one
 # (libssl-dev on the CI runner).
@@ -25,7 +26,7 @@ if(NOT Catch2_FOUND)
     FetchContent_Declare(
         Catch2
         GIT_REPOSITORY https://github.com/catchorg/Catch2.git
-        GIT_TAG v3.5.2
+        GIT_TAG 05e10dfccc28c7f973727c54f850237d07d5e10f # v3.5.2
     )
     FetchContent_MakeAvailable(Catch2)
 endif()
@@ -33,8 +34,8 @@ endif()
 find_package(OpenSSL REQUIRED)
 
 # Header-only; populate without running their own CMake.
-FetchContent_Declare(picojson GIT_REPOSITORY https://github.com/kazuho/picojson.git GIT_TAG v1.3.0)
-FetchContent_Declare(jwtcpp GIT_REPOSITORY https://github.com/Thalhammer/jwt-cpp.git GIT_TAG v0.7.1)
+FetchContent_Declare(picojson GIT_REPOSITORY https://github.com/kazuho/picojson.git GIT_TAG 25fc213cca61ea22b3c2e4db8def9927562ba5f7) # v1.3.0
+FetchContent_Declare(jwtcpp GIT_REPOSITORY https://github.com/Thalhammer/jwt-cpp.git GIT_TAG e71e0c2d584baff06925bbb3aad683f677e4d498) # v0.7.1
 FetchContent_GetProperties(picojson)
 if(NOT picojson_POPULATED)
     FetchContent_Populate(picojson)
@@ -58,6 +59,7 @@ add_executable(gdrive_unit_tests
     ${GD_ROOT}/src/gdrive_adc.cpp
     ${GD_ROOT}/src/gdrive_oauth_params.cpp
     ${GD_ROOT}/src/gdrive_blockcache.cpp
+    ${GD_ROOT}/src/gdrive_identity.cpp
     ${GD_TESTS}
 )
 # Same ODR-relevant define as the extension build (see the root CMakeLists).

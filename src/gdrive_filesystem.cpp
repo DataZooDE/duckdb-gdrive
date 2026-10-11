@@ -10,6 +10,7 @@
 #include "duckdb/main/client_context.hpp"
 
 #include <cstdint>
+#include <unordered_set>
 #include <cstring>
 #include <functional>
 #include <limits>
@@ -1391,6 +1392,18 @@ vector<OpenFileInfo> GDriveFileSystem::Glob(const string &path, FileOpener *open
 			std::string entry_parent = (slash == std::string::npos) ? "" : full_rel_path.substr(0, slash);
 			result.emplace_back(DisambiguatePath(entry_parent, meta, ambiguous));
 		}
+	}
+	// Overlapping {a,b} expansions ("{a,a}.csv", "{x,*}.csv") must not return a
+	// file twice -- DuckDB's multi-file readers would read it twice.
+	{
+		std::unordered_set<std::string> seen;
+		vector<OpenFileInfo> unique;
+		for (auto &info : result) {
+			if (seen.insert(info.path).second) {
+				unique.push_back(std::move(info));
+			}
+		}
+		result = std::move(unique);
 	}
 	// Names may legitimately contain glob characters: "report[1].csv" is a
 	// valid Drive name, but '[1]' as a pattern matches "report1.csv". When the
