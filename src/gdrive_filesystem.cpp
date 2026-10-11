@@ -10,6 +10,7 @@
 #include "duckdb/main/client_context.hpp"
 
 #include <cstdint>
+#include <unordered_set>
 #include <cstring>
 #include <functional>
 #include <limits>
@@ -92,12 +93,14 @@ std::string GetStringSetting(optional_ptr<FileOpener> opener, const std::string 
 	return default_value;
 }
 
-ClientContext &RequireClientContext(optional_ptr<FileOpener> opener, const std::string &context) {
-	auto client_context = FileOpener::TryGetClientContext(opener);
-	if (!client_context) {
-		throw IOException("gdrive: no active connection context available to resolve '%s'", context);
+// Secrets and settings resolve through the opener, which works for a client
+// connection AND for the database-level opener DuckDB uses when it opens an
+// ATTACHed database file (which has no ClientContext).
+optional_ptr<FileOpener> RequireOpener(optional_ptr<FileOpener> opener, const std::string &context) {
+	if (!FileOpener::TryGetSecretManager(opener)) {
+		throw IOException("gdrive: no database context available to resolve '%s'", context);
 	}
-	return *client_context;
+	return opener;
 }
 
 namespace {
@@ -253,7 +256,7 @@ bool TryResolvePath(GDrivePathCache &cache, GDriveClient &client, const GDriveAu
 		// form -- the one documented as the zero-round-trip fast path --
 		// still cost one files.get per thread.
 		CacheKey meta_key;
-		meta_key.secret_name = auth.secret_name;
+		meta_key.identity = auth.identity;
 		meta_key.drive_id = auth.drive_id;
 		meta_key.root_folder_id = auth.root_folder_id;
 		return cache.GetOrFetchMetadata(meta_key, uri.file_id,
@@ -284,7 +287,7 @@ bool TryResolvePath(GDrivePathCache &cache, GDriveClient &client, const GDriveAu
 		canonical += (canonical.empty() ? "" : "/") + segment;
 		bool is_last = (i + 1 == uri.segments.size());
 
-		CacheKey key {auth.secret_name, auth.drive_id, auth.root_folder_id, canonical};
+		CacheKey key {auth.identity, auth.drive_id, auth.root_folder_id, canonical};
 		DriveFileMeta cached;
 		bool cached_fresh = false;
 		if (cache.TryGet(key, cached, &cached_fresh)) {
@@ -359,7 +362,7 @@ bool GDriveFileSystem::CanHandleFile(const string &fpath) {
 	return IsGDriveUri(fpath);
 }
 
-DriveFileMeta GDriveFileSystem::ResolveOrThrow(ClientContext &context, const GDriveUri &uri) {
+DriveFileMeta GDriveFileSystem::ResolveOrThrow(optional_ptr<FileOpener> context, const GDriveUri &uri) {
 	if (!HasAnyGDriveSecret(context)) {
 		throw IOException(
 		    "gdrive: no gdrive secret configured for '%s' -- run CREATE SECRET (TYPE gdrive, ...) first.",
@@ -381,7 +384,7 @@ std::string GDriveFileSystem::DisambiguatePath(const std::string &parent_path, c
 unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFlags flags,
                                                   optional_ptr<FileOpener> opener) {
 	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, {
-	auto &context = RequireClientContext(opener, path);
+	auto context = RequireOpener(opener, path);
 	auto parsed = ParseGDriveUri(path);
 	if (!parsed.ok) {
 		throw IOException("gdrive: %s", parsed.error);
@@ -425,7 +428,7 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 				const auto &segment = parsed.uri.segments[i];
 				parent_path_accum += (parent_path_accum.empty() ? "" : "/") + segment;
 
-				CacheKey key {auth.secret_name, auth.drive_id, auth.root_folder_id, parent_path_accum};
+				CacheKey key {auth.identity, auth.drive_id, auth.root_folder_id, parent_path_accum};
 				if (!parent_is_new) {
 					DriveFileMeta cached;
 					if (cache.TryGet(key, cached)) {
@@ -574,6 +577,11 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 		}
 		throw IOException("gdrive: no such file or directory: '%s'", parsed.uri.ToString());
 	}
+	// A folder is not a file, and not absent either: opening one as a file
+	// used to hand back a 0-byte handle, so file_size() of a folder said 0.
+	if (meta.IsFolder()) {
+		throw IOException("gdrive: '%s' is a directory, not a file", parsed.uri.ToString());
+	}
 
 	// The path-walk cache may serve a leaf entry captured during an earlier
 	// Glob/ListFiles call; OpenFile re-fetches that leaf's own metadata fresh
@@ -581,7 +589,7 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 	// (S-2.16). The FILE_ID form already did exactly this files.get inside
 	// ResolvePath, so skip the duplicate call there.
 	CacheKey meta_identity;
-	meta_identity.secret_name = auth.secret_name;
+	meta_identity.identity = auth.identity;
 	meta_identity.drive_id = auth.drive_id;
 	meta_identity.root_folder_id = auth.root_folder_id;
 
@@ -645,7 +653,7 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 			// Exactly once: if the second resolve also cannot find it, the
 			// file really is gone and that error is the honest answer.
 			CacheKey key;
-			key.secret_name = auth.secret_name;
+			key.identity = auth.identity;
 			key.drive_id = auth.drive_id;
 			key.root_folder_id = auth.root_folder_id;
 			key.canonical_path = CanonicalPathOf(parsed.uri);
@@ -693,7 +701,7 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 //! it did not use to be, and a recovered handle kept reading the dead file's
 //! blocks out of cache.
 std::string BuildBlockKey(const GDriveAuthContext &auth, const DriveFileMeta &meta) {
-	return auth.secret_name + '\x1f' + auth.drive_id + '\x1f' + auth.root_folder_id + '\x1f' + meta.id + '\x1f' +
+	return auth.identity + '\x1f' + auth.drive_id + '\x1f' + auth.root_folder_id + '\x1f' + meta.id + '\x1f' +
 	       meta.head_revision_id;
 }
 
@@ -725,7 +733,7 @@ bool GDriveFileSystem::TryRecoverStaleHandle(GDriveFileHandle &base) {
 	}
 
 	CacheKey key;
-	key.secret_name = h.auth_context.secret_name;
+	key.identity = h.auth_context.identity;
 	key.drive_id = h.auth_context.drive_id;
 	key.root_folder_id = h.auth_context.root_folder_id;
 	key.canonical_path = CanonicalPathOf(parsed.uri);
@@ -1012,7 +1020,7 @@ std::string GDriveFileSystem::GetVersionTag(FileHandle &handle) {
 // layer up.
 // ---------------------------------------------------------------------------
 bool GDriveFileSystem::FileExists(const string &filename, optional_ptr<FileOpener> opener) {
-	auto &context = RequireClientContext(opener, filename);
+	auto context = RequireOpener(opener, filename);
 	if (!HasAnyGDriveSecret(context)) {
 		// No gdrive secret at all: nothing to check against, and erroring here
 		// would break DuckDB probing a path it is merely considering.
@@ -1032,7 +1040,7 @@ bool GDriveFileSystem::FileExists(const string &filename, optional_ptr<FileOpene
 }
 
 bool GDriveFileSystem::DirectoryExists(const string &directory, optional_ptr<FileOpener> opener) {
-	auto &context = RequireClientContext(opener, directory);
+	auto context = RequireOpener(opener, directory);
 	if (!HasAnyGDriveSecret(context)) {
 		return false;
 	}
@@ -1054,7 +1062,7 @@ bool GDriveFileSystem::DirectoryExists(const string &directory, optional_ptr<Fil
 
 void GDriveFileSystem::CreateDirectory(const string &directory, optional_ptr<FileOpener> opener) {
 	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, {
-	auto &context = RequireClientContext(opener, directory);
+	auto context = RequireOpener(opener, directory);
 	auto parsed = ParseGDriveUri(directory);
 	if (!parsed.ok) {
 		throw IOException("gdrive: %s", parsed.error);
@@ -1066,7 +1074,7 @@ void GDriveFileSystem::CreateDirectory(const string &directory, optional_ptr<Fil
 }
 
 void GDriveFileSystem::RemoveDirectory(const string &directory, optional_ptr<FileOpener> opener) {
-	auto &context = RequireClientContext(opener, directory);
+	auto context = RequireOpener(opener, directory);
 	auto parsed = ParseGDriveUri(directory);
 	if (!parsed.ok) {
 		throw IOException("gdrive: %s", parsed.error);
@@ -1081,7 +1089,7 @@ bool GDriveFileSystem::ListFiles(const string &directory, const std::function<vo
                                  FileOpener *opener) {
 	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, {
 	optional_ptr<FileOpener> op(opener);
-	auto &context = RequireClientContext(op, directory);
+	auto context = RequireOpener(op, directory);
 	if (!HasAnyGDriveSecret(context)) {
 		return false;
 	}
@@ -1127,7 +1135,7 @@ bool GDriveFileSystem::ListFiles(const string &directory, const std::function<vo
 
 void GDriveFileSystem::MoveFile(const string &source, const string &target, optional_ptr<FileOpener> opener) {
 	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, {
-	auto &context = RequireClientContext(opener, source);
+	auto context = RequireOpener(opener, source);
 	auto src_parsed = ParseGDriveUri(source);
 	if (!src_parsed.ok) {
 		throw IOException("gdrive: %s", src_parsed.error);
@@ -1145,7 +1153,7 @@ void GDriveFileSystem::MoveFile(const string &source, const string &target, opti
 
 void GDriveFileSystem::RemoveFile(const string &filename, optional_ptr<FileOpener> opener) {
 	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, {
-	auto &context = RequireClientContext(opener, filename);
+	auto context = RequireOpener(opener, filename);
 	auto parsed = ParseGDriveUri(filename);
 	if (!parsed.ok) {
 		throw IOException("gdrive: %s", parsed.error);
@@ -1160,7 +1168,7 @@ void GDriveFileSystem::RemoveFile(const string &filename, optional_ptr<FileOpene
 vector<OpenFileInfo> GDriveFileSystem::Glob(const string &path, FileOpener *opener) {
 	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, {
 	optional_ptr<FileOpener> op(opener);
-	auto &context = RequireClientContext(op, path);
+	auto context = RequireOpener(op, path);
 	// Deliberately NOT swallowed into "no matches": a missing secret is a
 	// configuration error, not an empty result, and reporting it as zero
 	// rows is exactly the misleading-failure pattern R-2/REQ-F-08 exist to
@@ -1236,6 +1244,18 @@ vector<OpenFileInfo> GDriveFileSystem::Glob(const string &path, FileOpener *open
 
 	vector<OpenFileInfo> result;
 	for (auto &one_pattern : expanded) {
+		// An expansion may be a plain literal path ("{a,b}.txt" -> "a.txt").
+		// SplitGlob would make that whole path the "literal prefix" and list
+		// its children -- a file has none, so it never matched. Resolve it
+		// directly instead, like the no-metacharacter path above.
+		if (!HasGlobMetacharacters(one_pattern)) {
+			auto literal = ParseGDriveUri(std::string(GDRIVE_SCHEME) + one_pattern);
+			DriveFileMeta meta;
+			if (literal.ok && TryResolvePath(cache, *client, auth, literal.uri, meta) && !meta.IsFolder()) {
+				result.emplace_back(std::string(GDRIVE_SCHEME) + one_pattern);
+			}
+			continue;
+		}
 		auto split = SplitGlob(one_pattern);
 
 		std::string parent_id;
@@ -1332,7 +1352,7 @@ vector<OpenFileInfo> GDriveFileSystem::Glob(const string &path, FileOpener *open
 				                           : (split.literal_prefix + "/" + entry.first);
 				// Must match CanonicalPathOf's form exactly, or this is a
 				// cache that can never be hit.
-				CacheKey key {auth.secret_name, auth.drive_id, auth.root_folder_id, full_rel};
+				CacheKey key {auth.identity, auth.drive_id, auth.root_folder_id, full_rel};
 				cache.Put(key, entry.second);
 			}
 		}
@@ -1372,6 +1392,18 @@ vector<OpenFileInfo> GDriveFileSystem::Glob(const string &path, FileOpener *open
 			std::string entry_parent = (slash == std::string::npos) ? "" : full_rel_path.substr(0, slash);
 			result.emplace_back(DisambiguatePath(entry_parent, meta, ambiguous));
 		}
+	}
+	// Overlapping {a,b} expansions ("{a,a}.csv", "{x,*}.csv") must not return a
+	// file twice -- DuckDB's multi-file readers would read it twice.
+	{
+		std::unordered_set<std::string> seen;
+		vector<OpenFileInfo> unique;
+		for (auto &info : result) {
+			if (seen.insert(info.path).second) {
+				unique.push_back(std::move(info));
+			}
+		}
+		result = std::move(unique);
 	}
 	// Names may legitimately contain glob characters: "report[1].csv" is a
 	// valid Drive name, but '[1]' as a pattern matches "report1.csv". When the

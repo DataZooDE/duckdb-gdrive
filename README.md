@@ -46,20 +46,20 @@ Because DuckDB dispatches all file access through its virtual filesystem,
 anything built on that layer inherits the scheme for free — `read_parquet`,
 `read_csv`, `COPY`, `glob`, and table formats such as DuckLake.
 
-`ATTACH` is the exception, in both directions. Attaching a **DuckLake** whose
-`DATA_PATH` is on Drive works and is tested. Attaching a **DuckDB database
-file** on `gdrive://` does not, and the reason is worth stating precisely
-because it is not the one you would guess: DuckDB opens database files
-through a path that never consults the virtual filesystem, so `gdrive://` is
-normalised to `gdrive:/` and handed to the LOCAL filesystem, which reports
-`No such file or directory`. This extension is never called at all.
+`ATTACH` works too. Attaching a **DuckLake** whose `DATA_PATH` is on Drive is
+tested, and so is attaching a **DuckDB database file** on `gdrive://`
+**read-only**: `ATTACH 'gdrive://warehouse/sales.duckdb' AS s (READ_ONLY)`.
+(DuckDB 1.5 used to canonicalise `gdrive://` to `gdrive:/` and hand the path to
+the local filesystem; the extension now keeps its paths, and resolves secrets
+through the database-level opener DuckDB uses for attached files.)
 
-That it fails is fine — Drive has neither atomic renames nor byte-offset
-writes, so a database file there could not work regardless — but it fails
-before reaching us, which is why the guard rails in this filesystem
-(`Truncate`, `Trim`, positional `Write`) are unreachable from SQL and
-therefore untested. Stated rather than implied; see `docs/benchmark.md` and
-the plan's coverage table.
+Two constraints follow from that opener. It sees only **global** settings, so
+a `gdrive_adc_file` (or any `gdrive_*` setting) made with a plain `SET` in
+the session does not apply to the attached file -- use `SET GLOBAL`. And a
+`PROVIDER authorization_code` secret cannot be used for it, because refreshing
+that secret writes to the session; such an ATTACH fails with an error that
+says so. Writable attachment is impossible regardless: Drive has neither
+atomic renames nor byte-offset writes.
 
 ## DuckLake on Drive
 
@@ -444,8 +444,8 @@ throwaway Google project and doing it to a real one degrades Drive for
 everyone on that account. The classification logic is tested; the live path
 through it is not.
 
-**`ATTACH` of a DuckDB database file does not work** — see *Addressing*. Only
-DuckLake `DATA_PATH` works.
+**`ATTACH` of a DuckDB database file is read-only** and uses global settings
+only — see *Addressing*.
 
 **Native Sheets and Docs are re-exported per open.** Two queries against the
 same Sheet cost two exports. Materialise into a table if you query it
@@ -528,6 +528,7 @@ and nothing registered that is not here.
 |---|---|---|
 | `gdrive_docs_export_mime` | `text/plain` | Export format for a Google **Doc**. `text/markdown` keeps structure. Sheets are always `text/csv`. |
 | `gdrive_permanent_delete` | `false` | `false` moves a deleted file to the Drive trash (recoverable); `true` deletes it outright. |
+| `gdrive_telemetry_enabled` | `true` | Anonymous usage telemetry shared with the other DataZoo extensions. `false` turns it off for the rest of the session; the environment variable `DATAZOO_DISABLE_TELEMETRY=1` turns it off entirely, including the load event. |
 | `gdrive_block_size_bytes` | 16 MiB | Read granularity. Drive charges ~1.3 s per ranged request regardless of size, so larger blocks mean fewer, faster requests — but a `count(*)` over a Parquet footer then pays for a whole block it does not need. 16 MiB is the compromise; see `docs/benchmark.md` for the sweep. |
 | `gdrive_block_cache_bytes` | 256 MiB | Total cap on the shared block cache, across all files and handles. Blocks are keyed by identity + file id + revision, so a file changing on Drive cannot be served stale. |
 | `gdrive_immutable_prefixes` | *(empty)* | Comma-separated `gdrive://` prefixes whose files are **never overwritten in place** — typically a DuckLake/Iceberg `DATA_PATH`. Skips the per-open metadata refresh (~270 ms per file per query) for them. Matching is on whole path segments, so `gdrive://lake` does not cover `gdrive://lakehouse`. **Declaring a prefix whose files change causes stale reads that nothing can detect.** The promise you are making is stronger than "not overwritten": files under it must not be modified, replaced, *or* deleted-and-recreated at the same path while the process runs — Drive keeps a file's id across an overwrite, returns no ETag, and ignores `If-Match`. Leave empty unless you know the files are immutable. |
