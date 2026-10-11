@@ -48,6 +48,7 @@
 
 #include "gdrive_adc.hpp"
 #include "gdrive_auth.hpp"
+#include "gdrive_credential_file.hpp"
 #include "gdrive_identity.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "gdrive_oauth_params.hpp"
@@ -185,8 +186,13 @@ std::string KeyFileStamp(const std::string &key_file) {
 	if (stat(key_file.c_str(), &st) != 0) {
 		return key_file; // let the later open() produce the real error
 	}
+	// Path + size + mtime alone can collide (a credential replaced within the
+	// same second at the same size); the inode and ctime change on every
+	// replacement. This stamp keys the path and block caches, not just tokens.
 	return key_file + ":" + std::to_string(static_cast<long long>(st.st_size)) + ":" +
-	       std::to_string(static_cast<long long>(st.st_mtime));
+	       std::to_string(static_cast<long long>(st.st_mtime)) + ":" +
+	       std::to_string(static_cast<long long>(st.st_ctime)) + ":" +
+	       std::to_string(static_cast<unsigned long long>(st.st_ino));
 }
 
 int64_t NowUnix() {
@@ -389,16 +395,13 @@ RefreshResult ExchangeExternalAccountToken(const AdcExternalAccount &ext, const 
 
 	// The platform writes this; a missing file means the pod is not configured
 	// for federation, which is worth saying plainly rather than as an STS 400.
-	std::ifstream token_file(ext.subject_token_path, std::ios::binary);
-	if (!token_file.good()) {
-		result.error = "no workload-identity token at '" + ext.subject_token_path +
-		                "'. This path is written by the platform (a projected service-account "
+	std::string subject_token, why;
+	if (!ReadCredentialFile(ext.subject_token_path, subject_token, why)) {
+		result.error = "no workload-identity token at '" + ext.subject_token_path + "' (" + why +
+		                "). This path is written by the platform (a projected service-account "
 		                "token, on Kubernetes); if it is absent the workload is not federated.";
 		return result;
 	}
-	std::ostringstream token_ss;
-	token_ss << token_file.rdbuf();
-	std::string subject_token = token_ss.str();
 	// A projected token file ends with a newline often enough to matter, and
 	// STS rejects the token rather than trimming it.
 	while (!subject_token.empty() && (subject_token.back() == '\n' || subject_token.back() == '\r')) {
@@ -532,17 +535,16 @@ std::string GetOrEmpty(const KeyValueSecret &kv, const char *key) {
 // key file. Never reads the file's *contents* into this message -- only the
 // path, which is not secret material.
 std::string ReadFileOrThrow(const std::string &path, const std::string &secret_name) {
-	std::ifstream f(path, std::ios::binary);
-	if (!f.good()) {
+	std::string contents, why;
+	if (!ReadCredentialFile(path, contents, why)) {
 		throw IOException(
-		    "gdrive secret '%s': service-account key file not found or not readable: '%s'. "
+		    "gdrive secret '%s': service-account key file " +
+		        (why == "not found or not readable" ? why : "cannot be used, " + why) + ": '%s'. "
 		    "Check the KEY_FILE path, or recreate the secret, e.g.:\n"
 		    "  CREATE SECRET %s (TYPE gdrive, PROVIDER service_account, KEY_FILE '/etc/creds/sa.json');",
 		    secret_name.c_str(), path.c_str(), secret_name.c_str());
 	}
-	std::ostringstream ss;
-	ss << f.rdbuf();
-	return ss.str();
+	return contents;
 }
 
 GDriveAuthContext BuildContextFromServiceAccount(const KeyValueSecret &kv, const std::string &secret_name) {
@@ -667,16 +669,13 @@ GDriveAuthContext BuildContextFromCredentialChain(optional_ptr<FileOpener> opene
 		                   NoCredentialsMessage().c_str());
 	}
 
-	std::ifstream f(adc_path, std::ios::binary);
-	if (!f.good()) {
+	std::string adc_json, why;
+	if (!ReadCredentialFile(adc_path, adc_json, why)) {
 		// The path is not secret, and naming it is what turns "no credentials"
 		// from a riddle into a fact the reader can check with `ls`.
-		throw IOException("gdrive secret '%s': no credentials file at '%s'.\n\n%s", secret_name.c_str(),
-		                   adc_path.c_str(), NoCredentialsMessage().c_str());
+		throw IOException("gdrive secret '%s': no usable credentials file at '%s' (%s).\n\n%s",
+		                   secret_name.c_str(), adc_path.c_str(), why.c_str(), NoCredentialsMessage().c_str());
 	}
-	std::ostringstream ss;
-	ss << f.rdbuf();
-	std::string adc_json = ss.str();
 
 	AdcParse parsed = ParseAdcJson(adc_json);
 	adc_json.clear(); // never keep credential text around longer than needed
