@@ -103,6 +103,7 @@ file(GLOB PURE_SOURCES CONFIGURE_DEPENDS
     src/gdrive_adc.cpp
     src/gdrive_oauth_params.cpp
     src/gdrive_blockcache.cpp
+    src/gdrive_identity.cpp
 )
 
 # ---------------------------------------------------------------------------
