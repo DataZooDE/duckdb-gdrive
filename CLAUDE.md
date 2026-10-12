@@ -525,3 +525,15 @@ Google key-file patterns and on PEM private-key content in tracked files.
 Tokens live in memory or DuckDB secrets, are never written to disk by this
 extension, and never appear in error text — there are tests asserting the
 last part specifically (REQ-NF-03).
+
+## Sibling contract with duckdb-sharepoint
+
+`../duckdb-sharepoint` is the same extension over Microsoft Graph. Two things
+are shared and must stay in step:
+- `src/gdrive_vfs_functions.cpp` (write_blob / remove_file / move_file /
+  file_size) is registered by BOTH extensions with `IGNORE_ON_CONFLICT`, so
+  whichever loads first provides it. Keep it identical to sharepoint's copy up
+  to the names: `scripts/check_vfs_parity.sh [../duckdb-sharepoint]`.
+- CI, pin and artifact gates, the e2e harness shape and the scenario matrix
+  (`e2e/tests/test_scenario_matrix.py`) are deliberately parallel; a fix found
+  in one repo is checked in the other (see `docs/exploratory-testing.md`).

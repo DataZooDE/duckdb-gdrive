@@ -51,7 +51,7 @@ def test_a_failing_refresh_never_echoes_the_credential(duckdb_cli):
         "DRIVE_SCOPE 'https://www.googleapis.com/auth/drive.readonly');\n"
         "SELECT count(*) FROM read_csv('gdrive://fixtures/small.csv');"
     )
-    proc = subprocess.run([str(duckdb_cli), "-noheader", "-list", "-c", sql],
+    proc = subprocess.run([str(duckdb_cli), "-noheader", "-list"], input=sql,
                           capture_output=True, text=True, timeout=300)
     output = proc.stdout + proc.stderr
 
@@ -109,7 +109,7 @@ def test_a_malformed_service_account_key_never_echoes_its_contents(
         "DRIVE_SCOPE 'https://www.googleapis.com/auth/drive.readonly');\n"
         "SELECT count(*) FROM read_csv('gdrive://fixtures/small.csv');"
     )
-    proc = subprocess.run([str(duckdb_cli), "-noheader", "-list", "-c", sql],
+    proc = subprocess.run([str(duckdb_cli), "-noheader", "-list"], input=sql,
                           capture_output=True, text=True, timeout=300)
     output = proc.stdout + proc.stderr
 

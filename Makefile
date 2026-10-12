@@ -180,3 +180,9 @@ smoke_loadable: release
 .PHONY: ducklake_conformance
 ducklake_conformance: release
 	@python3 scripts/ducklake_conformance.py
+
+# The shared VFS functions must stay identical to duckdb-sharepoint's copy
+# (both register them; whichever loads first wins). Needs a sibling checkout.
+.PHONY: check_vfs_parity
+check_vfs_parity:
+	@./scripts/check_vfs_parity.sh
