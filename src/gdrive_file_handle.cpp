@@ -51,8 +51,9 @@ void GDriveFileHandle::Close() {
 		auto client = CreateGDriveClient(impl.auth_context);
 		UploadHandleContents(*client, impl);
 	} catch (...) {
-		// A failed close is a failed write: cancel (nothing is published) and
-		// let the error surface -- never report it as success.
+		// A failed close is a failed write: cancel and let the error surface --
+		// never report it as success. Nothing is published, unless the final
+		// chunk's outcome was ambiguous, which the error then says.
 		write_failed = true;
 		AbortUpload(impl);
 		throw;

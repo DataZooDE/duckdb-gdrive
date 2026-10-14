@@ -67,9 +67,13 @@ struct DriveCallStats {
 	//! failure that never reached an endpoint counts too. A mint skipped
 	//! because the same credential failed moments ago does not.
 	int64_t token_request = 0;
-	//! Chunk PUTs to a resumable upload session (streaming writes). The
-	//! session's initiation is counted as files_create / files_update.
+	//! Chunk PUTs carrying data to a resumable upload session (streaming
+	//! writes), every attempt. The session's initiation is counted as
+	//! files_create / files_update.
 	int64_t upload_chunks = 0;
+	//! Empty status-query PUTs ("bytes */*") a resumable upload sends before
+	//! resuming after an error, counted apart from data chunks.
+	int64_t upload_status_queries = 0;
 	//! Resumable sessions cancelled: an error mid-stream, or a write handle
 	//! destroyed without a successful Close(). Nothing was published.
 	int64_t upload_aborts = 0;
@@ -142,9 +146,10 @@ public:
 	//! pending chunk ("bytes a-b/*" unless `final`), retrying with backoff
 	//! and resuming from the session's own Range report; a final chunk
 	//! answers with the file's metadata in `body`. CancelUpload discards the
-	//! session (best effort; nothing is published). Chunk PUTs carry no
-	//! bearer token -- the session URI is the credential -- so a long upload
-	//! cannot fail on token expiry mid-stream.
+	//! session (best effort, short timeout). Chunk PUTs carry no bearer token
+	//! -- the session URI is the credential -- so once the session is open, a
+	//! long upload cannot fail on token expiry. (Initiation itself uses the
+	//! token captured at OpenFile.)
 	virtual DriveResponse StartResumableUpload(const std::string &file_id, const std::string &parent_id,
 	                                           const std::string &name, const std::string &content_type) = 0;
 	virtual DriveResponse UploadChunk(const std::string &session_uri, const ChunkedUploadBuffer &buf,

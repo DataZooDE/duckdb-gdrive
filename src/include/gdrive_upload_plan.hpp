@@ -117,5 +117,49 @@ private:
 	bool sent_any = false;
 };
 
+//! One reply from the session -- to a chunk PUT or to a status query.
+struct UploadReply {
+	bool transport_ok = false; //!< false: no HTTP response at all
+	int status = 0;
+	std::string range; //!< the Range header of a 308 ("" when absent)
+	//! For an error status: does the error classification say retrying could
+	//! help (5xx, 429, rate limit)?
+	bool retryable = false;
+};
+
+//! Per-chunk progress, carried across NextUploadStep calls for ONE chunk.
+struct ChunkUploadState {
+	std::size_t skip = 0; //!< bytes of Pending() the session already holds
+	int stalls = 0;       //!< consecutive 308s that moved nothing (reset by progress)
+	int failures = 0;     //!< errors / transport failures so far
+	//! A FINAL-chunk attempt may have reached Drive (transport failure or 5xx
+	//! after sending): if this chunk then fails, the outcome is unknown.
+	bool final_maybe_sent = false;
+};
+
+enum class UploadStepKind {
+	DONE,     //!< final chunk: the file is published (body = its metadata)
+	ACCEPTED, //!< non-final chunk: Drive holds all of it
+	SEND,     //!< send Pending() from state.skip (skip == size: a status query with the total)
+	ASK_STATUS, //!< ask the session what it holds (PUT "bytes */*" or "*/total")
+	FAIL      //!< give up; `error` says why
+};
+
+struct UploadStep {
+	UploadStepKind kind = UploadStepKind::SEND;
+	bool backoff = false;   //!< sleep (jittered backoff) before the next request
+	bool ambiguous = false; //!< FAIL of a final chunk that may have been applied
+	std::string error;
+};
+
+//! Bound on errors, and on consecutive no-progress 308s, per chunk.
+constexpr int kMaxChunkAttempts = 5;
+
+//! The per-chunk retry/resume state machine of a resumable upload, pure: feed
+//! each reply in, do what the step says. GDriveClientImpl::UploadChunk is the
+//! I/O around it.
+UploadStep NextUploadStep(const ChunkedUploadBuffer &buf, bool final, ChunkUploadState &state,
+                          const UploadReply &reply);
+
 } // namespace gdrive
 } // namespace duckdb

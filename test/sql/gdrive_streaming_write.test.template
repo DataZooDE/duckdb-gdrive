@@ -68,10 +68,16 @@ SELECT (SELECT value FROM gdrive_stats() WHERE metric = 'upload_aborts'),
 ----
 0	262144
 
+# upload_chunks counts every data PUT attempt: exact when nothing was
+# retried, otherwise at least one per chunk (a busy Drive must not turn this
+# gate red).
 query II
 SELECT file_size('gdrive://scratch/${SCRATCH}/stream/s.csv') > 3 * 262144,
-       (SELECT value FROM gdrive_stats() WHERE metric = 'upload_chunks')
-           = ceil(file_size('gdrive://scratch/${SCRATCH}/stream/s.csv') / 262144.0);
+       CASE WHEN (SELECT value FROM gdrive_stats() WHERE metric = 'retries') = 0
+            THEN (SELECT value FROM gdrive_stats() WHERE metric = 'upload_chunks')
+                 = ceil(file_size('gdrive://scratch/${SCRATCH}/stream/s.csv') / 262144.0)
+            ELSE (SELECT value FROM gdrive_stats() WHERE metric = 'upload_chunks')
+                 >= ceil(file_size('gdrive://scratch/${SCRATCH}/stream/s.csv') / 262144.0) END;
 ----
 true	true
 
@@ -99,16 +105,28 @@ statement ok
 SELECT write_blob('gdrive://scratch/${SCRATCH}/stream/blob.bin', repeat('x', 900000)::BLOB);
 
 query III
-SELECT (SELECT value FROM gdrive_stats() WHERE metric = 'upload_chunks'),
+SELECT (SELECT CASE WHEN (SELECT value FROM gdrive_stats() WHERE metric = 'retries') = 0
+                    THEN value = 4 ELSE value >= 4 END FROM gdrive_stats() WHERE metric = 'upload_chunks'),
        (SELECT value FROM gdrive_stats() WHERE metric = 'upload_buffer_peak_bytes'),
        (SELECT octet_length(content) FROM read_blob('gdrive://scratch/${SCRATCH}/stream/blob.bin'));
 ----
-4	262144	900000
+true	262144	900000
 
 # Overwrite in place, streamed: write_blob onto an EXISTING file goes through a
-# resumable files.update session (no tmp_ staging), keeping the file id.
+# resumable files.update session (no tmp_ staging, no files.create), keeping
+# the file id (the id itself is compared in e2e).
+statement ok
+CALL gdrive_reset_stats();
+
 statement ok
 SELECT write_blob('gdrive://scratch/${SCRATCH}/stream/blob.bin', repeat('y', 700000)::BLOB);
+
+query III
+SELECT (SELECT value >= 3 FROM gdrive_stats() WHERE metric = 'upload_chunks'),
+       (SELECT value >= 1 FROM gdrive_stats() WHERE metric = 'files_update'),
+       (SELECT value FROM gdrive_stats() WHERE metric = 'files_create');
+----
+true	true	0
 
 query II
 SELECT octet_length(content), content[1:1] FROM read_blob('gdrive://scratch/${SCRATCH}/stream/blob.bin');

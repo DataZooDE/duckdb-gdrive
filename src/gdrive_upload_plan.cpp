@@ -6,6 +6,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <climits>
+#include <cstdint>
 #include <string>
 
 namespace duckdb {
@@ -21,15 +23,21 @@ std::uint64_t NormalizeDriveChunkSize(std::uint64_t requested) {
 
 namespace {
 
+//! Up to 19 decimal digits (always fits in uint64_t); more is refused.
 bool ParseDigits(const std::string &s, std::size_t &pos, std::uint64_t &out) {
 	const std::size_t start = pos;
+	std::uint64_t value = 0;
 	while (pos < s.size() && s[pos] >= '0' && s[pos] <= '9') {
+		if (pos - start >= 19) {
+			return false;
+		}
+		value = value * 10 + static_cast<std::uint64_t>(s[pos] - '0');
 		pos++;
 	}
 	if (pos == start) {
 		return false;
 	}
-	out = std::strtoull(s.substr(start, pos - start).c_str(), nullptr, 10);
+	out = value;
 	return true;
 }
 
@@ -53,6 +61,11 @@ bool ParseDriveRangeNext(const std::string &range_header, std::uint64_t &next) {
 	if (!ParseDigits(range_header, pos, last) || pos != range_header.size() || last < first) {
 		return false;
 	}
+	// A session holds a prefix of the upload; anything else is not a reply we
+	// understand. And last + 1 must not wrap.
+	if (first != 0 || last == UINT64_MAX) {
+		return false;
+	}
 	next = last + 1;
 	return true;
 }
@@ -73,9 +86,12 @@ std::size_t ChunkedUploadBuffer::Fill(const char *data, std::size_t len) {
 	const std::size_t room = static_cast<std::size_t>(chunk - std::min<std::uint64_t>(chunk, pending.size()));
 	const std::size_t take = std::min(room, len);
 	if (take > 0) {
-		if (pending.capacity() < chunk) {
-			// One allocation of exactly one chunk, never grown past it.
-			pending.reserve(static_cast<std::size_t>(chunk));
+		const std::size_t needed = pending.size() + take;
+		if (needed > pending.capacity()) {
+			// Grow geometrically, as the bytes arrive -- a small file costs
+			// what it wrote, not a whole chunk -- but never past one chunk.
+			const std::size_t doubled = std::max<std::size_t>(needed, 2 * pending.capacity());
+			pending.reserve(static_cast<std::size_t>(std::min<std::uint64_t>(chunk, doubled)));
 		}
 		pending.append(data, take);
 		peak = std::max<std::uint64_t>(peak, pending.size());
@@ -102,6 +118,72 @@ bool ChunkedUploadBuffer::ResumeSkip(std::uint64_t next_expected, std::size_t &s
 	}
 	skip = static_cast<std::size_t>(next_expected - offset);
 	return true;
+}
+
+UploadStep NextUploadStep(const ChunkedUploadBuffer &buf, bool final, ChunkUploadState &state,
+                          const UploadReply &reply) {
+	UploadStep step;
+	auto fail = [&](const std::string &why) {
+		step.kind = UploadStepKind::FAIL;
+		step.error = why;
+		step.ambiguous = final && state.final_maybe_sent;
+		return step;
+	};
+	const std::size_t pending = buf.Pending().size();
+
+	if (reply.transport_ok && (reply.status == 200 || reply.status == 201)) {
+		if (!final) {
+			return fail("resumable upload: Drive completed the upload before its final chunk");
+		}
+		step.kind = UploadStepKind::DONE;
+		return step;
+	}
+
+	if (reply.transport_ok && reply.status == 308) {
+		std::uint64_t next = 0;
+		if (!ParseDriveRangeNext(reply.range, next)) {
+			return fail("resumable upload: Drive answered with a Range header that is not \"bytes=0-N\"");
+		}
+		std::size_t skip = 0;
+		if (!buf.ResumeSkip(next, skip)) {
+			return fail("resumable upload: Drive reports holding bytes outside the chunk still in memory; the "
+			            "upload cannot be resumed");
+		}
+		if (skip > state.skip || (skip == pending && !final)) {
+			state.stalls = 0;
+		} else if (++state.stalls > kMaxChunkAttempts) {
+			return fail("resumable upload made no progress after repeated attempts");
+		}
+		step.backoff = state.stalls > 0;
+		state.skip = skip;
+		if (skip == pending && !final) {
+			step.kind = UploadStepKind::ACCEPTED;
+			return step;
+		}
+		if (!final && skip < pending && (buf.Offset() + skip) % kDriveUploadChunkMultiple != 0) {
+			// The rest would be a non-final chunk not on a 256 KiB boundary,
+			// which Drive refuses with an opaque 400. Say what happened.
+			return fail("resumable upload: Drive acknowledged a non-final chunk up to a byte that is not a "
+			            "multiple of 256 KiB; the rest cannot be sent as a valid chunk");
+		}
+		step.kind = UploadStepKind::SEND; // skip == pending on a final chunk: query with the total
+		return step;
+	}
+
+	// No response, or an error status.
+	const bool retryable = !reply.transport_ok || reply.retryable;
+	if (final && (!reply.transport_ok || reply.status >= 500)) {
+		state.final_maybe_sent = true;
+	}
+	if (retryable && ++state.failures <= kMaxChunkAttempts) {
+		step.kind = UploadStepKind::ASK_STATUS;
+		step.backoff = true;
+		return step;
+	}
+	if (!reply.transport_ok) {
+		return fail("network transport failure uploading a chunk (no response from Drive)");
+	}
+	return fail("resumable upload chunk rejected with HTTP " + std::to_string(reply.status));
 }
 
 } // namespace gdrive
