@@ -185,8 +185,14 @@ def test_failure_mid_stream_publishes_nothing(writer, scratch, duckdb_cli, gdriv
     finally:
         text = _finish(proc, output)
     assert proc.returncode != 0, f"COPY reported success:\n{text}"
-    assert "Error" in text, text
     print("mid-stream failure surfaced as:", [l for l in text.splitlines() if "Error" in l][:1])
+    # The missing thing is the FOLDER, not the file being written: the message
+    # must say so (naming the folder path), must still say nothing was
+    # written, and must keep the same error class (IO Error) as before.
+    assert "IO Error" in text, text
+    assert "no such file" not in text, text
+    assert f"destination folder '{_base(writer, scratch)}/doomed' no longer exists" in text, text
+    assert "nothing was written" in text.lower(), text
     assert _files_named(writer, name) == []
 
 
