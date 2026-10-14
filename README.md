@@ -162,9 +162,11 @@ Google's own tooling uses:
 4. `~/.config/gcloud/application_default_credentials.json`
    (`%APPDATA%\gcloud\…` on Windows)
 
-Both document kinds are accepted: an `authorized_user` file (what `gcloud auth
-application-default login` writes) refreshes access tokens as it goes, and a
-`service_account` key file is used to mint them via RFC 7523.
+Three document kinds are accepted: an `authorized_user` file (what `gcloud
+auth application-default login` writes) refreshes access tokens as it goes, a
+`service_account` key file is used to mint them via RFC 7523, and an
+`external_account` file (workload identity federation, below) exchanges a
+platform-issued token for one.
 
 > **Request the Drive scope at login.** gcloud's default ADC scope is
 > `cloud-platform`, which does **not** include Drive, so a plain `gcloud auth
@@ -214,8 +216,55 @@ application-default login` writes) refreshes access tokens as it goes, and a
 > Drive *and* ordinary Cloud API access from the same ADC file, ask for both
 > in a single login — `--scopes=openid,https://www.googleapis.com/auth/cloud-platform,https://www.googleapis.com/auth/drive`.
 
-Workload identity federation (`external_account`) is not supported; the
-extension names it explicitly rather than failing obscurely.
+#### Workload identity federation (`external_account`)
+
+For a workload that should not hold a downloaded key — a Kubernetes pod, for
+example — `credential_chain` also accepts an `external_account` credential
+configuration (what `gcloud iam workload-identity-pools create-cred-config`
+writes). It contains no secret. On each token mint the extension reads the
+subject token from disk, exchanges it at STS (`token_url`) for a federated
+token, then impersonates the service account named by
+`service_account_impersonation_url` with the Drive scope. Point
+`credential_chain` at the file like any other ADC document:
+
+```sql
+SET gdrive_adc_file = '/etc/gdrive/wif-config.json';
+CREATE SECRET wif_drive (TYPE gdrive);
+```
+
+or set `GOOGLE_APPLICATION_CREDENTIALS` to it. A minimal configuration:
+
+```json
+{
+  "type": "external_account",
+  "audience": "//iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL/providers/PROVIDER",
+  "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+  "token_url": "https://sts.googleapis.com/v1/token",
+  "service_account_impersonation_url": "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/SA_EMAIL:generateAccessToken",
+  "credential_source": { "file": "/var/run/secrets/gcp/token" }
+}
+```
+
+What is supported, exactly:
+
+- **Only a file-sourced subject token** (`credential_source.file`), such as a
+  projected Kubernetes service-account token. The file is re-read on every
+  mint, so the platform's hourly rotation is picked up. It must hold the bare
+  token (`format.type` `text`, the default); trailing newlines are trimmed.
+  A `format.type` of `json` is not supported — the file would be sent as-is.
+- **`url`-sourced tokens (Azure, GCE/OIDC metadata), AWS-sourced tokens and
+  `executable`-sourced tokens are not supported.** A configuration without
+  `credential_source.file` is refused when the secret is first used, with a
+  message naming `credential_source`.
+- **`service_account_impersonation_url` is required.** A federated token alone
+  cannot carry the Drive scope; without it the mint fails, after the STS hop,
+  with a message saying so. The federated principal needs `roles/iam.workloadIdentityUser`
+  on that service account.
+- `audience`, `token_url` and `subject_token_type` are required and named if
+  missing. The impersonated token is requested for one hour; workforce pools
+  (`workforce_pool_user_project`) and
+  `service_account_impersonation.token_lifetime_seconds` are not read.
+- As with any service account, writes only succeed inside a **Shared Drive**.
 
 ### `config` — a token you already have
 
@@ -324,7 +373,7 @@ the difference is not ours to fix:
 |---|---|
 | `service_account` | **Enforced.** The scope is a claim in the signed assertion, so Google refuses a write with *"Request had insufficient authentication scopes"* — tested. |
 | `config` | **Advisory.** A refresh-token exchange returns an access token carrying the scopes granted at *consent* time; asking for a narrower one does not narrow it. If the token was consented for full Drive access, it keeps it. |
-| `credential_chain` | **Depends on what was found.** A `service_account` document behaves as the first row; an `authorized_user` document behaves as the second, so the scope is fixed by the `--scopes` you passed to `gcloud`. |
+| `credential_chain` | **Depends on what was found.** A `service_account` or `external_account` document behaves as the first row (for `external_account` the scope is requested at impersonation); an `authorized_user` document behaves as the second, so the scope is fixed by the `--scopes` you passed to `gcloud`. |
 | `authorization_code` | **Enforced at consent.** `DRIVE_SCOPE` is what the consent screen asks for, so this is the one interactive case where the default genuinely narrows access. |
 
 So with `config` — and with a `gcloud` credential — restrict at consent time;
