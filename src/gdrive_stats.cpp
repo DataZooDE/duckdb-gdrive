@@ -63,6 +63,11 @@ unique_ptr<FunctionData> GDriveStatsBind(ClientContext &, TableFunctionBindInput
 	    // (successful or not). See DriveCallStats for the exact rules.
 	    {"auth_refresh", stats.auth_refresh},
 	    {"token_request", stats.token_request},
+	    {"upload_chunks", stats.upload_chunks},
+	    {"upload_aborts", stats.upload_aborts},
+	    // A HIGH-WATER MARK since the last reset: the most bytes one write
+	    // handle held in memory. Streaming writes bound it to one chunk.
+	    {"upload_buffer_peak_bytes", stats.upload_buffer_peak_bytes},
 	    // A GAUGE, not a counter: the live size of the path cache, which S-2.11
 	    // requires to be bounded. Asserting the bound needs a way to see it.
 	    {"path_cache_entries", static_cast<int64_t>(GetGlobalPathCacheEntries())},
@@ -162,8 +167,10 @@ void RegisterGDriveStats(ExtensionLoader &loader) {
 	    "files_create, files_update, files_delete (calls by kind), cache_hits/cache_misses (the path-resolution "
 	    "cache that mitigates R-1 amplification), retries (retried HTTP attempts across all kinds), auth_refresh "
 	    "(401s that triggered a token refresh attempt, at most one per call), token_request (token mint attempts, "
-	    "successful or not), and total "
-	    "(sum of the files_* kind counters), and path_cache_entries (a GAUGE: the live size of the "
+	    "successful or not), upload_chunks "
+	    "(PUTs to a resumable upload session -- streaming writes), upload_aborts (sessions cancelled, nothing "
+	    "published), upload_buffer_peak_bytes (a HIGH-WATER MARK: most bytes one write handle held), total "
+	    "(sum of the files_* and upload_* call counters), and path_cache_entries (a GAUGE: the live size of the "
 	    "path->id cache, bounded by gdrive_path_cache_entries). Process-wide, not reset between queries -- call it before and "
 	    "after an operation and diff the two snapshots to measure that operation's amplification.";
 	desc.parameter_names = {};

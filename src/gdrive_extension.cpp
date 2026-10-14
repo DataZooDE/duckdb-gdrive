@@ -155,6 +155,17 @@ static void LoadInternal(ExtensionLoader &loader) {
 	//
 	// 0 disables the cache and restores exact ranged reads (lower memory,
 	// far more requests).
+	// Streaming writes: a write handle holds at most one chunk in memory. A
+	// file up to this size is uploaded in one request on close; a larger one
+	// streams through a resumable upload session, chunk by chunk, as it is
+	// written. Drive needs every non-final chunk to be a 256-KiB multiple.
+	loader.GetDatabaseInstance().config.AddExtensionOption(
+	    "gdrive_upload_chunk_bytes",
+	    "Upload chunk size, and the most memory one file being written holds (default 16 MiB; rounded down "
+	    "to a multiple of 256 KiB, at most 1 GiB). Files up to this size upload in one request on close; "
+	    "larger ones stream through a resumable upload session as they are written.",
+	    LogicalType::UBIGINT, Value::UBIGINT(16ULL * 1024 * 1024));
+
 	loader.GetDatabaseInstance().config.AddExtensionOption(
 	    "gdrive_block_size_bytes",
 	    "Block size for cached reads (default 16 MiB, 0 to disable and read exact ranges). "

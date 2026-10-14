@@ -548,6 +548,8 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 		handle->is_write = true;
 		handle->write_parent_id = parent_id;
 		handle->write_name = name;
+		handle->upload = make_uniq<ChunkedUploadBuffer>(
+		    GetUBigIntSetting(opener, "gdrive_upload_chunk_bytes", 16ULL * 1024 * 1024));
 		return std::move(handle);
 	}
 
@@ -963,26 +965,41 @@ int64_t GDriveFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_byte
 void GDriveFileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) {
 	throw NotImplementedException(
 	    "gdrive: cannot write at a byte offset -- Google Drive has no positional write API. "
-	    "Write sequentially and close the file; the whole buffered content is uploaded in one request.");
+	    "Write sequentially and close the file; it is streamed in chunks and published on close.");
 }
 
 int64_t GDriveFileSystem::Write(FileHandle &handle, void *buffer, int64_t nr_bytes) {
 	auto &h = handle.Cast<GDriveFileHandleImpl>();
-	if (!h.is_write) {
+	if (!h.is_write || !h.upload) {
 		throw IOException("gdrive: handle for '%s' was not opened for writing", h.path);
 	}
 	if (h.write_failed) {
 		throw IOException("gdrive: a previous write to '%s' already failed; this handle can only be closed", h.path);
 	}
+	auto &buf = *h.upload;
+	const char *data = reinterpret_cast<const char *>(buffer);
+	idx_t left = static_cast<idx_t>(nr_bytes);
 	try {
-		h.write_buffer.append(reinterpret_cast<const char *>(buffer), static_cast<size_t>(nr_bytes));
+		while (left > 0) {
+			// A full chunk goes up only once MORE bytes arrive: until then it
+			// may be the whole file (one multipart request) or the final chunk
+			// (which must carry the total). So the buffer never exceeds one
+			// chunk, whatever size this Write() is.
+			if (buf.Full()) {
+				SendUploadChunk(h);
+			}
+			const auto took = buf.Fill(data, left);
+			data += took;
+			left -= took;
+		}
 	} catch (...) {
-		// Anything short of a full, contiguous append leaves the buffer in
-		// an unknown state; mark the write failed so Close() refuses to
-		// upload a possibly-truncated file (R-3).
+		// The stream is broken: mark the write failed so Close() refuses to
+		// publish a possibly-truncated file (R-3), and cancel the session.
 		h.write_failed = true;
+		AbortUpload(h);
 		throw;
 	}
+	RecordGlobalUploadBufferPeak(buf.Peak());
 	h.position += nr_bytes;
 	return nr_bytes;
 }
@@ -1422,8 +1439,9 @@ vector<OpenFileInfo> GDriveFileSystem::Glob(const string &path, FileOpener *open
 }
 
 void GDriveFileSystem::FileSync(FileHandle &handle) {
-	// Writes are buffered locally until Close() (HLD section 7); there is
-	// nothing Drive-side to flush before that, so this is a deliberate no-op
+	// Full chunks already went up as they filled; the partial one cannot (a
+	// non-final chunk must be a 256-KiB multiple, and Drive publishes the file
+	// only on the final chunk in Close()). So this is a deliberate no-op
 	// rather than a throw -- callers (e.g. a Parquet writer) that call
 	// FileSync mid-write should not fail on a filesystem that simply defers
 	// everything to Close().

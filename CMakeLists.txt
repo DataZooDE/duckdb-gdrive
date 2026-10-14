@@ -105,6 +105,7 @@ file(GLOB PURE_SOURCES CONFIGURE_DEPENDS
     src/gdrive_blockcache.cpp
     src/gdrive_identity.cpp
     src/gdrive_token_policy.cpp
+    src/gdrive_upload_plan.cpp
 )
 
 # ---------------------------------------------------------------------------

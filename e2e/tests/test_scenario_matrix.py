@@ -25,7 +25,10 @@ def test_round_trip_is_byte_exact(writer, scratch, sql, gdrive_secret_sql, size,
     local = tmp_path / "in.bin"
     local.write_bytes(data)
     uri = f"{_base(writer, scratch)}/blob_{size}.bin"
+    # Upload chunk = 256 KiB too (the same boundaries), so sizes above it
+    # stream through a resumable session in several chunks.
     out = sql(f"{gdrive_secret_sql} SET gdrive_block_size_bytes = {BLOCK};"
+              f" SET gdrive_upload_chunk_bytes = {BLOCK};"
               f" SELECT write_blob('{uri}', content) FROM read_blob('{local}');"
               f" SELECT file_size('{uri}'), md5(content) FROM read_blob('{uri}');")
     assert out.splitlines()[-1] == f"{size}|{hashlib.md5(data).hexdigest()}"
