@@ -72,7 +72,7 @@ The interface obligation is larger than the happy path suggests:
 | `OpenFile(path, flags)` | `files.get` (metadata) | Resolves path→fileId; caches size, `modifiedTime`, `headRevisionId`, `mimeType` on the handle |
 | `Read(h, buf, n, location)` | `files.get?alt=media` + `Range: bytes=…` | **The hot path.** Drive honours HTTP Range |
 | `Read(h, buf, n)` | as above | Sequential; handle tracks the pointer |
-| `Write(h, buf, n)` | buffered locally | Nothing reaches Drive until close |
+| `Write(h, buf, n)` | resumable-session chunk `PUT`s once the file outgrows one chunk | At most one chunk in memory; Drive publishes the file only on the final chunk (§7) |
 | `Write(h, buf, n, location)` | — | **`NotImplementedException`.** Drive cannot write at an offset; failing loudly beats corrupting silently |
 | `GetFileSize(h)` | cached from `OpenFile` | |
 | `GetLastModifiedTime(h)` | cached | `modifiedTime` |
@@ -326,9 +326,55 @@ files. This is a genuine behavioural fork and needs dedicated tests.
 Deliberately restricted:
 
 - sequential `Write` only; positional throws;
-- bytes accumulate in a local temp buffer;
-- on close, one resumable upload (`files.create` or `files.update`);
-- no concurrent multi-part upload in v1.
+- **streamed, in bounded memory** (2026-10-14). The handle holds at most one
+  chunk (`gdrive_upload_chunk_bytes`, 16 MiB, a multiple of 256 KiB), in the
+  pure `ChunkedUploadBuffer` (`gdrive_upload_plan.*`, Catch2-tested). A file
+  that never outgrows it is sent on close as one multipart request
+  (`files.create` with a reserved id, or `files.update`) -- the old path. The
+  first byte past one chunk initiates a **resumable session** (`POST`/`PATCH
+  /upload/drive/v3/files?uploadType=resumable`, counted as `files_create` /
+  `files_update`) and every full chunk is `PUT` to the session URI with
+  `Content-Range: bytes a-b/*` as it fills; close sends the last chunk with the
+  total. A full chunk is sent only once MORE bytes arrive, so the final chunk is
+  never empty and a file of exactly one chunk never opens a session;
+- the session URI is the credential: chunk `PUT`s carry no bearer token, so
+  once the session is open a long upload cannot fail on token expiry. (The
+  initiation itself uses the token captured at `OpenFile`; a producer slow
+  enough to outlive it before the first chunk overflows fails closed with a
+  401.) The URI is only followed over
+  https to `www.googleapis.com` (`DriveSessionPath`);
+- per-chunk retry (transport, 5xx, 429) with the shared backoff; before each
+  retry the session is asked what it holds (`PUT` with `bytes */*`, answered
+  `308` + `Range`) and the rest of the chunk is re-sent. A lost reply to the
+  FINAL chunk is recovered the same way: the status query answers `200` + the
+  file. Only bytes of the pending chunk are in memory, so a resume point
+  outside it is a hard error, as is a malformed `Range` or a non-final resume
+  point off a 256 KiB boundary. A partial `308` re-sends the rest; only 308s
+  that make NO progress count toward the bound (and back off). These decisions
+  are the pure `NextUploadStep` (Catch2-tested); `UploadChunk` is the I/O.
+  Chunks are sent from the pending buffer as (pointer, length) -- no copy.
+  Status queries count as `upload_status_queries`, data PUTs (every attempt)
+  as `upload_chunks`;
+- **atomic publish.** Nothing appears in the folder before the final chunk,
+  and an overwritten file keeps its old content until then. A write that fails
+  (a chunk, or the close), and a handle destroyed without a successful close
+  (a `COPY` whose query errored mid-stream), cancel the session (`DELETE` on
+  the URI with a 5 s timeout, Drive answers `499`) and publish nothing --
+  **unless the final chunk's outcome is ambiguous**: if its reply and every
+  status query after it are lost, Drive may have published the file. That
+  case fails with the same "may or may not have been applied, check the
+  destination" error as the single-request path. A failed close throws -- it
+  is never reported as success;
+- observable: `gdrive_stats()` `upload_chunks`, `upload_aborts`, and the
+  high-water mark `upload_buffer_peak_bytes`.
+
+Verified live 2026-10-14 (`test/sql/gdrive_streaming_write.test.template`,
+`e2e/tests/test_streaming_writes.py`): with `SET threads = 4`, a 373 MiB `COPY` peaks at
+~100 MiB RSS and a 124 MiB one at ~94 MiB -- memory does not grow with the
+file (the e2e test asserts exactly that) -- against 1.6 GiB with the old buffered write. Drive behaviours found on the way: a
+non-final chunk under 256 KiB is a 400 even with `/*`; `bytes a-b/*` is
+accepted on any chunk but the last; a `308` with no `Range` header means the
+session holds nothing yet.
 
 This suits engines that emit whole immutable files. It does not suit anything
 expecting random-access writes, and the error message says so explicitly.
@@ -405,7 +451,7 @@ acceptance of the community review process (§13).
 | M2a | Auth: Google provider on top of the library — endpoints, extra params, secret with three providers | Interactive browser flow yields a stored refresh token that survives restart |
 | M2b | Service-account JWT flow (RFC 7523) | Unattended auth with no browser |
 | M3 | Native-format export (Sheets/Docs) | A Sheet is queryable with no manual export |
-| M4 | Write path (sequential, buffered) | `COPY … TO 'gdrive://…'` round-trips |
+| M4 | Write path (sequential, streamed) | `COPY … TO 'gdrive://…'` round-trips |
 | M5 | CI matrix, docs, community-extension submission | Green on all target platforms |
 
 M1 is ≈1 week and is the only milestone the BRD recommends funding up front.

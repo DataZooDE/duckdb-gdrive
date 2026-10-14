@@ -70,8 +70,11 @@ int64_t DriveCallStats::Total() const {
 	// already reflects the true round-trip count Google would see, which is
 	// exactly what the R-1 amplification measurement needs). Likewise
 	// auth_refresh (the re-send is counted in its kind) and token_request
-	// (a token endpoint, not the Drive API).
-	return files_get + files_list + files_media + files_export + files_create + files_update + files_delete;
+	// (a token endpoint, not the Drive API). Resumable-session PUTs (chunks
+	// and status queries) and cancels are real round trips too; the buffer
+	// peak is a gauge and is not.
+	return files_get + files_list + files_media + files_export + files_create + files_update + files_delete +
+	       upload_chunks + upload_status_queries + upload_aborts;
 }
 
 // ---------------------------------------------------------------------------
@@ -334,6 +337,14 @@ void RecordGlobalAuthRefresh() {
 	box.stats.auth_refresh += 1;
 }
 } // namespace
+
+void RecordGlobalUploadBufferPeak(uint64_t bytes) {
+	auto &box = Box();
+	std::lock_guard<std::mutex> guard(box.mu);
+	if (static_cast<int64_t>(bytes) > box.stats.upload_buffer_peak_bytes) {
+		box.stats.upload_buffer_peak_bytes = static_cast<int64_t>(bytes);
+	}
+}
 
 DriveCallStats GetGlobalDriveCallStats() {
 	auto &box = Box();
@@ -721,6 +732,162 @@ public:
 		                        &DriveCallStats::files_update, {200});
 	}
 
+	DriveResponse StartResumableUpload(const std::string &file_id, const std::string &parent_id,
+	                                   const std::string &name, const std::string &content_type) override {
+		std::ostringstream metadata;
+		metadata << "{";
+		bool first = true;
+		if (!name.empty()) {
+			metadata << "\"name\":\"" << JsonEscape(name) << "\"";
+			first = false;
+		}
+		if (!parent_id.empty() && file_id.empty()) {
+			// Parents only on create, as in Upload().
+			metadata << (first ? "" : ",") << "\"parents\":[\"" << JsonEscape(parent_id) << "\"]";
+		}
+		metadata << "}";
+		const std::vector<std::pair<std::string, std::string>> headers = {
+		    {"X-Upload-Content-Type", content_type.empty() ? "application/octet-stream" : content_type}};
+		// `fields` rides along in the session URI, so the FINAL chunk's reply
+		// carries exactly the metadata ParseFileMeta wants.
+		std::ostringstream path;
+		if (file_id.empty()) {
+			path << "/upload/drive/v3/files?uploadType=resumable&fields=" << UrlEncode(FileFieldsMask()) << "&"
+			     << AllDrivesParams();
+		} else {
+			path << "/upload/drive/v3/files/" << UrlEncode(file_id) << "?uploadType=resumable&fields="
+			     << UrlEncode(FileFieldsMask()) << "&" << AllDrivesParams();
+		}
+		// Initiation creates no file (Drive publishes on the final chunk), so
+		// unlike a multipart create it is safe to retry: a lost reply only
+		// orphans a session, which expires on its own.
+		auto resp = ExecuteWithRetry(file_id.empty() ? HttpMethod::POST : HttpMethod::PATCH, path.str(), headers,
+		                             metadata.str(), "application/json; charset=UTF-8",
+		                             file_id.empty() ? &DriveCallStats::files_create : &DriveCallStats::files_update,
+		                             {200}, /*retry_non_idempotent=*/true);
+		std::string ignored;
+		if (resp.ok && !DriveSessionPath(resp.location, ignored)) {
+			resp.ok = false;
+			resp.error.kind = GDriveErrorKind::UNKNOWN;
+			resp.error.message = "Drive returned no usable resumable-session URI (expected an https Location on "
+			                     "www.googleapis.com)";
+		}
+		return resp;
+	}
+
+	DriveResponse UploadChunk(const std::string &session_uri, const ChunkedUploadBuffer &buf, bool final) override {
+		DriveResponse response;
+		std::string path;
+		if (!DriveSessionPath(session_uri, path)) {
+			response.error.kind = GDriveErrorKind::UNKNOWN;
+			response.error.message = "refusing to upload to a resumable-session URI that is not https on "
+			                         "www.googleapis.com";
+			return response;
+		}
+		const std::string &pending = buf.Pending();
+		const std::string total = final ? std::to_string(buf.Total()) : "*";
+		// The decisions -- resume point, stall/failure bounds, backoff,
+		// ambiguity -- are the pure NextUploadStep (Catch2-tested); this loop
+		// only does the I/O it asks for.
+		ChunkUploadState state;
+		UploadStep step; // first action: SEND from skip 0
+		for (;;) {
+			RawResult raw;
+			if (step.kind == UploadStepKind::SEND && state.skip < pending.size()) {
+				raw = SessionRequest(path, buf.ContentRange(final, state.skip), pending.data() + state.skip,
+				                     pending.size() - state.skip, static_cast<int64_t>(buf.Offset() + state.skip),
+				                     &DriveCallStats::upload_chunks);
+			} else {
+				// ASK_STATUS, or SEND of a final chunk Drive already holds whole:
+				// "bytes */*" (or "*/total") answers 308 + Range, or 200/201 +
+				// the file once a final chunk completed.
+				raw = SessionRequest(path, "bytes */" + total, nullptr, 0, -1, &DriveCallStats::upload_status_queries);
+			}
+			UploadReply reply;
+			reply.transport_ok = raw.transport_ok;
+			reply.status = raw.status;
+			reply.range = raw.range;
+			GDriveError err;
+			if (raw.transport_ok && raw.status != 308 && (raw.status < 200 || raw.status >= 300)) {
+				err = ClassifyDriveError(raw.status, raw.body, raw.retry_after);
+				reply.retryable = err.kind == GDriveErrorKind::TRANSIENT || err.kind == GDriveErrorKind::RATE_LIMIT;
+			}
+			step = NextUploadStep(buf, final, state, reply);
+			switch (step.kind) {
+			case UploadStepKind::DONE:
+				response.ok = true;
+				response.http_status = raw.status;
+				response.body = std::move(raw.body);
+				return response;
+			case UploadStepKind::ACCEPTED:
+				response.ok = true;
+				response.http_status = 308;
+				return response;
+			case UploadStepKind::SEND:
+			case UploadStepKind::ASK_STATUS:
+				if (step.backoff) {
+					stats_.retries += 1;
+					RecordGlobalRetry();
+					SleepBackoff(std::max(1, std::max(state.failures, state.stalls)),
+					             raw.transport_ok ? err.retry_after_seconds : 0);
+				}
+				continue;
+			case UploadStepKind::FAIL:
+				break;
+			}
+			response.ok = false;
+			response.http_status = raw.transport_ok ? raw.status : 0;
+			response.body = raw.body;
+			if (step.ambiguous) {
+				// The final chunk may have reached Drive and published the file;
+				// only its replies were lost. Same honesty as the multipart path.
+				response.error.kind = GDriveErrorKind::TRANSIENT;
+				response.error.message =
+				    "the final chunk of a resumable upload got no usable answer from Drive; the change may or "
+				    "may not have been applied. Check the destination before retrying.";
+			} else if (raw.transport_ok && raw.status != 308 && (raw.status < 200 || raw.status >= 300)) {
+				response.error = err;
+			} else {
+				response.error.kind = raw.transport_ok ? GDriveErrorKind::UNKNOWN : GDriveErrorKind::TRANSIENT;
+				response.error.message = step.error;
+			}
+			return response;
+		}
+	}
+
+	void CancelUpload(const std::string &session_uri) override {
+		std::string path;
+		if (!DriveSessionPath(session_uri, path)) {
+			return;
+		}
+		stats_.upload_aborts += 1;
+		RecordGlobalCall(&DriveCallStats::upload_aborts);
+		// Its own short-lived connection with SHORT timeouts, not the shared
+		// per-thread one: this runs from a destructor while a failed query
+		// unwinds, and a cancel that never arrives is harmless (the session
+		// never publishes and expires on its own). Drive answers 499.
+		const bool tracing = trace::Enabled();
+		const uint64_t t_start = tracing ? trace::NowMicros() : 0;
+		int status = 0;
+		{
+			duckdb_httplib_openssl::SSLClient client(kDriveHost, kDrivePort);
+			client.enable_server_certificate_verification(true);
+			client.set_connection_timeout(std::chrono::seconds(5));
+			client.set_read_timeout(std::chrono::seconds(5));
+			client.set_write_timeout(std::chrono::seconds(5));
+			auto res = client.Delete(path.c_str());
+			status = res ? res->status : 0;
+		}
+		if (tracing) {
+			trace::Span span;
+			span.kind = TraceKind(&DriveCallStats::upload_aborts);
+			span.start_us = t_start;
+			span.end_us = trace::NowMicros();
+			span.http_status = status;
+			trace::Emit(span);
+		}
+	}
+
 	DriveResponse Delete(const std::string &file_id, bool permanent) override {
 		std::string path = "/drive/v3/files/" + UrlEncode(file_id) + "?" + AllDrivesParams();
 		if (permanent) {
@@ -767,7 +934,7 @@ public:
 	}
 
 private:
-	enum class HttpMethod { GET, POST, PATCH, DELETE_ };
+	enum class HttpMethod { GET, POST, PATCH, DELETE_, PUT };
 
 	//! Is retrying this method after an AMBIGUOUS failure safe?
 	//!
@@ -787,6 +954,10 @@ private:
 		int status = 0;
 		std::string body;
 		std::string retry_after;
+		//! Resumable-session headers: the session URI on initiation, and what
+		//! the session holds on a 308.
+		std::string location;
+		std::string range;
 		//! True when this attempt was the first request on this thread, and so
 		//! paid DNS + TCP + TLS. Only meaningful under tracing; costs one bool.
 		bool fresh_conn = false;
@@ -818,12 +989,22 @@ private:
 		if (counter == &DriveCallStats::files_delete) {
 			return "files.delete";
 		}
+		if (counter == &DriveCallStats::upload_chunks) {
+			return "upload.chunk";
+		}
+		if (counter == &DriveCallStats::upload_aborts) {
+			return "upload.cancel";
+		}
+		if (counter == &DriveCallStats::upload_status_queries) {
+			return "upload.status";
+		}
 		return "unknown";
 	}
 
 	RawResult DoHttp(HttpMethod method, const std::string &access_token, const std::string &path_and_query,
 	                 const std::vector<std::pair<std::string, std::string>> &extra_headers, const std::string &body,
-	                 const std::string &content_type) {
+	                 const std::string &content_type, bool with_auth = true, const char *put_body = nullptr,
+	                 size_t put_body_len = 0) {
 		// ---------------------------------------------------------------
 		// One TLS connection PER THREAD, reused for every request that
 		// thread makes.
@@ -864,12 +1045,17 @@ private:
 		// REQ-NF-03: the bearer token lives ONLY in this header, built fresh
 		// per attempt, never copied into a string that could end up in a log
 		// or an error. Nothing in this file logs request headers.
-		headers.emplace("Authorization", "Bearer " + access_token);
+		// A resumable session URI is its own credential: chunk PUTs carry no
+		// token (with_auth false), so once the session is open a long
+		// streaming upload cannot fail on token expiry.
+		if (with_auth) {
+			headers.emplace("Authorization", "Bearer " + access_token);
+		}
 		// Drive rejects a user credential that names no quota project outright
 		// ("the drive.googleapis.com API requires a quota project"), so this is
 		// a correctness header, not a billing one. Empty for service accounts,
 		// which must NOT send it.
-		if (!quota_project_id_.empty()) {
+		if (with_auth && !quota_project_id_.empty()) {
 			headers.emplace("x-goog-user-project", quota_project_id_);
 		}
 		for (const auto &kv : extra_headers) {
@@ -890,6 +1076,12 @@ private:
 		case HttpMethod::DELETE_:
 			res = client.Delete(path_and_query.c_str(), headers);
 			break;
+		case HttpMethod::PUT:
+			// (pointer, length): an upload chunk is sent from the caller's
+			// buffer, never copied into a request body string.
+			res = client.Put(path_and_query.c_str(), headers, put_body ? put_body : body.data(),
+			                 put_body ? put_body_len : body.size(), content_type);
+			break;
 		}
 
 		RawResult out;
@@ -905,7 +1097,44 @@ private:
 		if (it != res->headers.end()) {
 			out.retry_after = it->second;
 		}
+		it = res->headers.find("Location");
+		if (it != res->headers.end()) {
+			out.location = it->second;
+		}
+		it = res->headers.find("Range");
+		if (it != res->headers.end()) {
+			out.range = it->second;
+		}
 		return out;
+	}
+
+	//! One PUT to a resumable session URI (path already validated by
+	//! DriveSessionPath), counted as `counter` (upload_chunks for data, or
+	//! upload_status_queries for an empty status query) and traced with the
+	//! byte range it carried. No bearer: the session URI is the credential.
+	RawResult SessionRequest(const std::string &path, const std::string &content_range, const char *data,
+	                         size_t len, int64_t range_off, int64_t DriveCallStats::*counter) {
+		stats_.*counter += 1;
+		RecordGlobalCall(counter);
+		const bool tracing = trace::Enabled();
+		const uint64_t t_start = tracing ? trace::NowMicros() : 0;
+		static const std::string kEmpty;
+		RawResult raw = DoHttp(HttpMethod::PUT, /*access_token=*/"", path, {{"Content-Range", content_range}}, kEmpty,
+		                       "application/octet-stream", /*with_auth=*/false, data ? data : "", len);
+		if (tracing) {
+			trace::Span span;
+			span.kind = TraceKind(counter);
+			span.start_us = t_start;
+			span.end_us = trace::NowMicros();
+			span.attempt = 1;
+			span.http_status = raw.transport_ok ? raw.status : 0;
+			span.bytes = raw.body.size();
+			span.fresh_conn = raw.fresh_conn;
+			span.range_off = len > 0 ? range_off : -1;
+			span.range_len = len > 0 ? static_cast<int64_t>(len) : -1;
+			trace::Emit(span);
+		}
+		return raw;
 	}
 
 	DriveResponse ExecuteWithRetry(HttpMethod method, const std::string &path_and_query,
@@ -1004,6 +1233,7 @@ private:
 				response.ok = true;
 				response.http_status = raw.status;
 				response.body = std::move(raw.body);
+				response.location = std::move(raw.location);
 				return response;
 			}
 

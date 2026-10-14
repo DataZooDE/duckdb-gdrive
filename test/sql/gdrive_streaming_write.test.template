@@ -1,0 +1,228 @@
+# name: test/sql/gdrive_streaming_write.test.template
+# description: Streaming writes against REAL Drive -- a write larger than one
+#              chunk streams through a resumable upload session in bounded
+#              memory, and is published only when the final chunk lands.
+# group: [live]
+#
+# Materialised by e2e/helpers/materialise.py. Run via `make test_live`. Its own
+# file because it asserts on call counters (see CLAUDE.md, "Cost assertions
+# belong in their own test file"); every write targets this run's scratch
+# folder.
+
+require gdrive
+
+require-env GDRIVE_CI_DRIVE_ID
+
+require-env GDRIVE_OAUTH_CLIENT_ID
+
+require-env GDRIVE_OAUTH_CLIENT_SECRET
+
+require-env GDRIVE_USER_REFRESH_TOKEN
+
+# Writes need the delegated user (a service account has no Drive storage
+# quota) -- same secret shape as gdrive_write.test.template.
+statement ok
+CREATE SECRET gdrive_test (
+    TYPE gdrive,
+    PROVIDER config,
+    CLIENT_ID '${OAUTH_CLIENT_ID}',
+    CLIENT_SECRET '${OAUTH_CLIENT_SECRET}',
+    REFRESH_TOKEN '${USER_REFRESH_TOKEN}',
+    ROOT_FOLDER_ID '${DRIVE_ID}',
+    DRIVE_SCOPE 'https://www.googleapis.com/auth/drive'
+);
+
+# Every chunk at Drive's 256-KiB minimum, so a ~3.9 MB COPY is ~15 chunks.
+statement ok
+SET gdrive_upload_chunk_bytes = 262144;
+
+# ---------------------------------------------------------------------------
+# A small file is still ONE request: no session, no chunk.
+# ---------------------------------------------------------------------------
+statement ok
+CALL gdrive_reset_stats();
+
+statement ok
+COPY (SELECT 1 AS a) TO 'gdrive://scratch/${SCRATCH}/stream/small.csv' (HEADER);
+
+query II
+SELECT (SELECT value FROM gdrive_stats() WHERE metric = 'upload_chunks'),
+       (SELECT value FROM gdrive_stats() WHERE metric = 'upload_aborts');
+----
+0	0
+
+# ---------------------------------------------------------------------------
+# A large COPY streams: ceil(size/chunk) chunk PUTs, nothing cancelled, and a
+# buffer high-water mark of exactly one chunk.
+# ---------------------------------------------------------------------------
+statement ok
+CALL gdrive_reset_stats();
+
+statement ok
+COPY (SELECT i, md5(i::VARCHAR) AS h FROM range(100000) t(i))
+     TO 'gdrive://scratch/${SCRATCH}/stream/s.csv' (HEADER);
+
+query II
+SELECT (SELECT value FROM gdrive_stats() WHERE metric = 'upload_aborts'),
+       (SELECT value FROM gdrive_stats() WHERE metric = 'upload_buffer_peak_bytes');
+----
+0	262144
+
+# upload_chunks counts every data PUT attempt: exact when nothing was
+# retried, otherwise at least one per chunk (a busy Drive must not turn this
+# gate red).
+query II
+SELECT file_size('gdrive://scratch/${SCRATCH}/stream/s.csv') > 3 * 262144,
+       CASE WHEN (SELECT value FROM gdrive_stats() WHERE metric = 'retries') = 0
+            THEN (SELECT value FROM gdrive_stats() WHERE metric = 'upload_chunks')
+                 = ceil(file_size('gdrive://scratch/${SCRATCH}/stream/s.csv') / 262144.0)
+            ELSE (SELECT value FROM gdrive_stats() WHERE metric = 'upload_chunks')
+                 >= ceil(file_size('gdrive://scratch/${SCRATCH}/stream/s.csv') / 262144.0) END;
+----
+true	true
+
+# Byte-exact: the same COPY to a local file has the same md5.
+statement ok
+COPY (SELECT i, md5(i::VARCHAR) AS h FROM range(100000) t(i)) TO '__TEST_DIR__/stream_ref.csv' (HEADER);
+
+query I
+SELECT (SELECT md5(content) FROM read_blob('gdrive://scratch/${SCRATCH}/stream/s.csv'))
+     = (SELECT md5(content) FROM read_blob('__TEST_DIR__/stream_ref.csv'));
+----
+true
+
+query II
+SELECT count(*), sum(i) FROM read_csv('gdrive://scratch/${SCRATCH}/stream/s.csv');
+----
+100000	4999950000
+
+# ONE Write() far larger than a chunk is still chunked, not buffered whole:
+# 900000 bytes = 3 full chunks as the buffer overflows + a 113568-byte final.
+statement ok
+CALL gdrive_reset_stats();
+
+statement ok
+SELECT write_blob('gdrive://scratch/${SCRATCH}/stream/blob.bin', repeat('x', 900000)::BLOB);
+
+query III
+SELECT (SELECT CASE WHEN (SELECT value FROM gdrive_stats() WHERE metric = 'retries') = 0
+                    THEN value = 4 ELSE value >= 4 END FROM gdrive_stats() WHERE metric = 'upload_chunks'),
+       (SELECT value FROM gdrive_stats() WHERE metric = 'upload_buffer_peak_bytes'),
+       (SELECT octet_length(content) FROM read_blob('gdrive://scratch/${SCRATCH}/stream/blob.bin'));
+----
+true	262144	900000
+
+# Overwrite in place, streamed: write_blob onto an EXISTING file goes through a
+# resumable files.update session (no tmp_ staging, no files.create), keeping
+# the file id (the id itself is compared in e2e).
+statement ok
+CALL gdrive_reset_stats();
+
+statement ok
+SELECT write_blob('gdrive://scratch/${SCRATCH}/stream/blob.bin', repeat('y', 700000)::BLOB);
+
+query III
+SELECT (SELECT value >= 3 FROM gdrive_stats() WHERE metric = 'upload_chunks'),
+       (SELECT value >= 1 FROM gdrive_stats() WHERE metric = 'files_update'),
+       (SELECT value FROM gdrive_stats() WHERE metric = 'files_create');
+----
+true	true	0
+
+query II
+SELECT octet_length(content), content[1:1] FROM read_blob('gdrive://scratch/${SCRATCH}/stream/blob.bin');
+----
+700000	y
+
+# ---------------------------------------------------------------------------
+# An error MID-STREAM (chunks already sent) publishes nothing: the failed
+# COPY drops its handle, which cancels the session, and Drive never shows a
+# file it did not receive the final chunk for. One thread, so the rows before
+# the error really are written (and chunked) before it is raised.
+# ---------------------------------------------------------------------------
+statement ok
+SET threads = 1;
+
+statement ok
+CALL gdrive_reset_stats();
+
+statement error
+COPY (SELECT i, CASE WHEN i < 90000 THEN md5(i::VARCHAR) ELSE error('boom mid-stream') END AS h
+      FROM range(100000) t(i))
+     TO 'gdrive://scratch/${SCRATCH}/stream/fail.csv' (HEADER);
+----
+boom mid-stream
+
+query II
+SELECT (SELECT value >= 3 FROM gdrive_stats() WHERE metric = 'upload_chunks'),
+       (SELECT value FROM gdrive_stats() WHERE metric = 'upload_aborts');
+----
+true	1
+
+query I
+SELECT count(*) FROM glob('gdrive://scratch/${SCRATCH}/stream/*fail*');
+----
+0
+
+# Overwriting an existing file and failing mid-stream leaves the OLD content:
+# COPY streams into its tmp_ staging file, which is never published.
+statement error
+COPY (SELECT i, CASE WHEN i < 90000 THEN md5(i::VARCHAR) ELSE error('boom again') END AS h
+      FROM range(100000) t(i))
+     TO 'gdrive://scratch/${SCRATCH}/stream/s.csv' (HEADER);
+----
+boom again
+
+statement ok
+RESET threads;
+
+query I
+SELECT count(*) FROM read_csv('gdrive://scratch/${SCRATCH}/stream/s.csv');
+----
+100000
+
+query I
+SELECT count(*) FROM glob('gdrive://scratch/${SCRATCH}/stream/*');
+----
+3
+
+# ---------------------------------------------------------------------------
+# Streaming + the token source: with tokens treated as stale 1 s after minting
+# (cap 61 s, 60 s margin), the session initiation asks the SOURCE for a valid
+# token, and the chunk PUTs carry none at all -- so a stream far longer than
+# a token's life needs no re-mint per chunk.
+# ---------------------------------------------------------------------------
+statement ok
+SET gdrive_debug_token_max_age_seconds = 61;
+
+statement ok
+CALL gdrive_reset_stats();
+
+statement ok
+COPY (SELECT i, md5(i::VARCHAR) AS h FROM range(100000) t(i))
+     TO 'gdrive://scratch/${SCRATCH}/stream/tok.csv' (HEADER);
+
+query II
+SELECT (SELECT value FROM gdrive_stats() WHERE metric = 'upload_chunks') > 10,
+       (SELECT value FROM gdrive_stats() WHERE metric = 'token_request')
+           < (SELECT value FROM gdrive_stats() WHERE metric = 'upload_chunks');
+----
+true	true
+
+statement ok
+RESET gdrive_debug_token_max_age_seconds;
+
+query I
+SELECT (SELECT md5(content) FROM read_blob('gdrive://scratch/${SCRATCH}/stream/tok.csv'))
+     = (SELECT md5(content) FROM read_blob('__TEST_DIR__/stream_ref.csv'));
+----
+true
+
+# Positional writes stay refused: a read-write ATTACH writes its database
+# header at a byte offset.
+statement error
+ATTACH 'gdrive://scratch/${SCRATCH}/stream/rw.duckdb' AS gd_rw;
+----
+byte offset
+
+statement ok
+RESET gdrive_upload_chunk_bytes;

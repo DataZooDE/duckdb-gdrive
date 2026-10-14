@@ -1,6 +1,7 @@
 #pragma once
 
 #include "gdrive_errors.hpp"
+#include "gdrive_upload_plan.hpp"
 
 #include <cstdint>
 #include <string>
@@ -66,6 +67,19 @@ struct DriveCallStats {
 	//! failure that never reached an endpoint counts too. A mint skipped
 	//! because the same credential failed moments ago does not.
 	int64_t token_request = 0;
+	//! Chunk PUTs carrying data to a resumable upload session (streaming
+	//! writes), every attempt. The session's initiation is counted as
+	//! files_create / files_update.
+	int64_t upload_chunks = 0;
+	//! Empty status-query PUTs ("bytes */*") a resumable upload sends before
+	//! resuming after an error, counted apart from data chunks.
+	int64_t upload_status_queries = 0;
+	//! Resumable sessions cancelled: an error mid-stream, or a write handle
+	//! destroyed without a successful Close(). Nothing was published.
+	int64_t upload_aborts = 0;
+	//! HIGH-WATER MARK, not a count: the most bytes one write handle held in
+	//! memory (bounded by gdrive_upload_chunk_bytes). Not in Total().
+	int64_t upload_buffer_peak_bytes = 0;
 
 	int64_t Total() const;
 };
@@ -78,6 +92,8 @@ struct DriveResponse {
 	std::string body;
 	//! Populated when !ok.
 	GDriveError error;
+	//! The Location header, when Drive sent one (a resumable session URI).
+	std::string location;
 };
 
 class GDriveClient {
@@ -120,6 +136,25 @@ public:
 	                             const std::string &name, const std::string &content_type,
 	                             const std::string &data,
 	                             const std::string &reserved_id = "") = 0;
+
+	//! STREAMING writes over a Drive resumable upload session.
+	//!
+	//! StartResumableUpload initiates a session (files.create when `file_id`
+	//! is empty, files.update otherwise) and returns its URI in `location`.
+	//! It creates NO file: Drive publishes the file only when the final chunk
+	//! lands, so initiation is safe to retry. UploadChunk PUTs the buffer's
+	//! pending chunk ("bytes a-b/*" unless `final`), retrying with backoff
+	//! and resuming from the session's own Range report; a final chunk
+	//! answers with the file's metadata in `body`. CancelUpload discards the
+	//! session (best effort, short timeout). Chunk PUTs carry no bearer token
+	//! -- the session URI is the credential -- so once the session is open, a
+	//! long upload cannot fail on token expiry. (Initiation itself uses the
+	//! token captured at OpenFile.)
+	virtual DriveResponse StartResumableUpload(const std::string &file_id, const std::string &parent_id,
+	                                           const std::string &name, const std::string &content_type) = 0;
+	virtual DriveResponse UploadChunk(const std::string &session_uri, const ChunkedUploadBuffer &buf,
+	                                  bool final) = 0;
+	virtual void CancelUpload(const std::string &session_uri) = 0;
 
 	//! Trash (default) or permanently delete -- see decision D-6.
 	virtual DriveResponse Delete(const std::string &file_id, bool permanent) = 0;

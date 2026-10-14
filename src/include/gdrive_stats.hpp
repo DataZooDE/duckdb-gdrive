@@ -52,6 +52,10 @@ uint64_t GetGlobalPathCacheEntries();
 
 //! For components that track Drive-related activity but are not themselves a
 //! GDriveClient (the path-resolution cache, notably).
+//! Raise the upload_buffer_peak_bytes high-water mark (a streaming write
+//! handle reports its buffer's peak). Reset by ResetGlobalDriveCallStats.
+void RecordGlobalUploadBufferPeak(uint64_t bytes);
+
 void IncrementGlobalCacheHit();
 void IncrementGlobalCacheMiss();
 //! One request to a token endpoint (any provider: refresh grant, RFC 7523,
