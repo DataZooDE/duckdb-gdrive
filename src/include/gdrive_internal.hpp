@@ -85,7 +85,22 @@ public:
 	    : GDriveFileHandle(fs, std::move(path), flags, std::move(meta)), auth_context(std::move(auth_context_p)) {
 	}
 
+	//! Cancels a resumable upload session left open -- a handle destroyed
+	//! without a successful Close() (e.g. a COPY whose query failed
+	//! mid-stream) publishes nothing. Best effort, never throws.
+	~GDriveFileHandleImpl() override;
+
 	GDriveAuthContext auth_context;
+
+	//! Write path (streaming): `upload` holds at most ONE chunk
+	//! (gdrive_upload_chunk_bytes, captured at OpenFile). A file that never
+	//! outgrows it goes up in one multipart request on Close(); the moment it
+	//! does, a resumable session is opened (`upload_session`, its URI) and
+	//! every full chunk is sent as it fills. Drive publishes the file only
+	//! when the final chunk lands in Close(), so an error mid-stream leaves
+	//! nothing behind.
+	unique_ptr<ChunkedUploadBuffer> upload;
+	std::string upload_session;
 
 	//! Block-cache parameters, captured at OpenFile because Read() has no
 	//! FileOpener and therefore cannot read settings. Also means they cannot
@@ -194,6 +209,15 @@ std::string FetchExport(GDriveClient &client, const DriveFileMeta &meta, const s
 // as GDriveFileSystem methods with real access to `cache`.
 // ---------------------------------------------------------------------------
 void UploadHandleContents(GDriveClient &client, GDriveFileHandleImpl &handle);
+
+//! Streaming write: send the handle's full pending chunk as a NON-final chunk
+//! of its resumable session, opening the session first if needed. Throws via
+//! ThrowGDriveError on failure (the caller marks the write failed).
+void SendUploadChunk(GDriveFileHandleImpl &handle);
+
+//! Cancel the handle's resumable session, if one is open. Never throws: it
+//! runs on error paths and from the destructor.
+void AbortUpload(GDriveFileHandleImpl &handle) noexcept;
 
 } // namespace gdrive
 } // namespace duckdb

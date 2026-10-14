@@ -19,26 +19,45 @@ GDriveFileHandle::~GDriveFileHandle() {
 	// called before destruction on every code path (e.g. an exception
 	// unwinding through a scan). We do NOT upload here -- doing I/O from a
 	// destructor during unwind is its own hazard, and Close() is the
-	// documented place the buffered write goes out. A handle destroyed
-	// without Close() simply loses its buffered write, which is the safe
-	// failure (no partial file in Drive), matching write_failed semantics.
+	// documented place the write is published. A handle destroyed without
+	// Close() publishes nothing, matching write_failed semantics; an open
+	// resumable session is cancelled by ~GDriveFileHandleImpl.
+}
+
+GDriveFileHandleImpl::~GDriveFileHandleImpl() {
+	// The one piece of I/O a destructor does: cancel a resumable session a
+	// failed or abandoned write left open. Never throws (AbortUpload).
+	AbortUpload(*this);
 }
 
 void GDriveFileHandle::Close() {
-	if (!is_write || write_failed) {
-		// Read handles, and writes that already failed, have nothing to do.
-		// Critically: write_failed means Close() must NOT upload whatever
-		// was buffered when the failure happened (R-3) -- publishing a
-		// truncated file to the user's Drive is worse than failing loudly.
+	if (!is_write) {
+		// Read handles have nothing to do.
 		return;
 	}
-
 	// OpenFile only ever constructs GDriveFileHandleImpl (see
 	// gdrive_filesystem.cpp), so this downcast is safe for every real handle
 	// that reaches here.
 	auto &impl = this->Cast<GDriveFileHandleImpl>();
-	auto client = CreateGDriveClient(impl.auth_context);
-	UploadHandleContents(*client, impl);
+	is_write = false; // a second Close() must not publish twice
+	if (write_failed) {
+		// write_failed means Close() must NOT publish whatever was written
+		// before the failure (R-3) -- a truncated file in the user's Drive is
+		// worse than failing loudly. Cancel the session instead.
+		AbortUpload(impl);
+		return;
+	}
+	try {
+		auto client = CreateGDriveClient(impl.auth_context);
+		UploadHandleContents(*client, impl);
+	} catch (...) {
+		// A failed close is a failed write: cancel (nothing is published) and
+		// let the error surface -- never report it as success.
+		write_failed = true;
+		AbortUpload(impl);
+		throw;
+	}
+	impl.upload.reset();
 }
 
 } // namespace gdrive

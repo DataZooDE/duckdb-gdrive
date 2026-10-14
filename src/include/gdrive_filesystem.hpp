@@ -193,11 +193,11 @@ public:
 	bool is_export = false;
 	std::string export_buffer;
 
-	//! Write path: bytes accumulate locally and nothing reaches Drive until
-	//! Close(). Drive has no append and no positional write, so a buffered
-	//! whole-file upload is the only honest mapping (HLD section 7).
+	//! Write path: Drive has no append and no positional write, so writes are
+	//! sequential only. Bytes STREAM through a one-chunk buffer into a
+	//! resumable upload session (GDriveFileHandleImpl::upload) and the file is
+	//! published on Close() -- see gdrive_internal.hpp.
 	bool is_write = false;
-	std::string write_buffer;
 	std::string write_parent_id;
 	std::string write_name;
 	//! Set when a write failed, so Close() does NOT upload a truncated file.
@@ -239,7 +239,7 @@ public:
 	void Read(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) override;
 	int64_t Read(FileHandle &handle, void *buffer, int64_t nr_bytes) override;
 
-	//! Sequential only -- buffers locally, uploads once on Close().
+	//! Sequential only -- streams full chunks into a resumable session, publishes on Close().
 	void Write(FileHandle &handle, void *buffer, int64_t nr_bytes, idx_t location) override;
 	int64_t Write(FileHandle &handle, void *buffer, int64_t nr_bytes) override;
 

@@ -356,10 +356,20 @@ SELECT * FROM read_csv('gdrive://Finance/Budget');   -- a real Sheet
 COPY (SELECT * FROM t) TO 'gdrive://reports/out.parquet' (FORMAT parquet);
 ```
 
-Writes are **sequential only**: bytes buffer locally and upload once on close.
-Drive cannot write at a byte offset, so a positional write raises an error
-rather than silently corrupting the file. This suits engines that emit whole
-immutable files, which is most of them.
+Writes are **sequential only** and **streamed**: a file being written holds
+at most one upload chunk in memory (`gdrive_upload_chunk_bytes`, 16 MiB). A
+file that never outgrows it is uploaded in one request on close; a larger one
+opens a Drive resumable upload session and sends each full chunk as it fills,
+so a multi-GB `COPY` needs ~one chunk of RAM, not the file's size (a 373 MiB
+`COPY` peaks at ~170 MiB RSS for the whole process; it was 1.6 GiB when writes
+were buffered). Drive publishes the file only when the final chunk lands on
+close: until then nothing appears in the folder and an overwritten file keeps
+its old content, and a write that fails mid-stream — or a query that errors
+part-way through a `COPY` — cancels the session and leaves nothing behind.
+Each chunk is retried with backoff and resumed from what the session reports
+it holds. Drive cannot write at a byte offset, so a positional write raises an
+error rather than silently corrupting the file. This suits engines that emit
+whole immutable files, which is most of them.
 
 `DELETE` moves to **trash**, not permanent deletion — `SET
 gdrive_permanent_delete=true` to opt in. Renames are **not atomic**; DuckDB's
@@ -399,10 +409,13 @@ blind retry can poison a path permanently — you would write once and read
 "ambiguous" forever.
 
 So transport failures are retried only for idempotent methods (`GET`,
-`DELETE`). A `COPY` that fails mid-flight returns an error saying the change
-may or may not have been applied, and does **not** retry. Check the path
-before re-running it. The real fix is Drive's resumable upload protocol, whose
-session URI makes a retry genuinely idempotent; that is not implemented yet.
+`DELETE`). A single-request write (a file no larger than
+`gdrive_upload_chunk_bytes`) that fails mid-flight returns an error saying the
+change may or may not have been applied, and does **not** retry. Check the
+path before re-running it. Files larger than one chunk go through Drive's
+resumable upload protocol, whose session URI makes a retry genuinely
+idempotent: every chunk — including the final one that publishes the file — is
+retried and resumed from what the session reports it holds.
 
 **`DRIVE_SCOPE` does not restrict a refresh token.** With `PROVIDER config`
 and a `REFRESH_TOKEN`, the scope was fixed when consent was granted; Google
@@ -547,6 +560,7 @@ and nothing registered that is not here.
 | `gdrive_block_cache_bytes` | 256 MiB | Total cap on the shared block cache, across all files and handles. Blocks are keyed by identity + file id + revision, so a file changing on Drive cannot be served stale. |
 | `gdrive_immutable_prefixes` | *(empty)* | Comma-separated `gdrive://` prefixes whose files are **never overwritten in place** — typically a DuckLake/Iceberg `DATA_PATH`. Skips the per-open metadata refresh (~270 ms per file per query) for them. Matching is on whole path segments, so `gdrive://lake` does not cover `gdrive://lakehouse`. **Declaring a prefix whose files change causes stale reads that nothing can detect.** The promise you are making is stronger than "not overwritten": files under it must not be modified, replaced, *or* deleted-and-recreated at the same path while the process runs — Drive keeps a file's id across an overwrite, returns no ETag, and ignores `If-Match`. Leave empty unless you know the files are immutable. |
 | `gdrive_debug_token_max_age_seconds` | 0 | **Testing only.** Treats access tokens as expiring after at most this many seconds, so a handle outliving its token can be exercised in a test instead of after an hour. `0` uses the token's real lifetime. |
+| `gdrive_upload_chunk_bytes` | 16 MiB | Upload chunk size — and the most memory one file being written holds. Files up to this size upload in one request on close; larger ones stream through a resumable upload session, one chunk at a time, as they are written. Rounded down to a multiple of 256 KiB (Drive's rule for every non-final chunk), at most 1 GiB. `gdrive_stats()` reports `upload_chunks`, `upload_aborts` and the high-water mark `upload_buffer_peak_bytes`. |
 | `gdrive_path_cache_entries` | 4096 | Cap on cached `path -> file id` mappings, LRU. `0` is unbounded. Drive has no path addressing, so each dropped mapping costs one `files.list` per segment to rebuild — cheap, which is why this cache may be evicted and the block cache is bounded separately. |
 
 ```sql

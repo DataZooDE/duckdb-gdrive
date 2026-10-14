@@ -554,6 +554,23 @@ open gives 0); (2) the cheapest real 401 is a pasted garbage `ACCESS_TOKEN`
 beside a valid refresh token -- Drive rejects it exactly as it rejects an
 expired one.
 
+**Streaming writes ride on Drive's resumable protocol (2026-10-14).** A write
+handle holds one chunk (`gdrive_upload_chunk_bytes`); past that it opens a
+resumable session and PUTs chunks as they fill (HLD section 7). Verified
+live: a non-final chunk may say `bytes a-b/*`, but must be a 256-KiB multiple
+(else 400 even with `/*`); `308` + `Range: bytes=0-N` acknowledges, and a
+`308` with NO `Range` means "nothing yet"; nothing is visible in the folder
+until the final chunk, and an overwritten file keeps its old content until
+then; `DELETE` on the session URI cancels it (`499`); a status query after a
+lost final reply answers `200` + the file. Chunk PUTs carry no bearer -- the
+session URI is the credential -- so do not "fix" that. Two DuckDB facts that
+shape the tests: a FileHandle destructor never calls `Close()` (so cancelling
+an open session in `~GDriveFileHandleImpl` is what makes a failed `COPY`
+publish nothing), and a failed `COPY` itself `TryRemoveFile`s every file it
+created -- with `USE_TMP_FILE false` that is the real target, so an
+overwrite that fails mid-stream deletes the old file exactly as on local
+disk; with the default tmp-file staging the old file survives.
+
 **Releasing:** follow `docs/RELEASE.md`. The community-extensions repo builds
 from a tagged commit and runs none of our live tests, so whatever is broken
 at tag time ships.
