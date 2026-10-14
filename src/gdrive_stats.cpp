@@ -58,6 +58,11 @@ unique_ptr<FunctionData> GDriveStatsBind(ClientContext &, TableFunctionBindInput
 	    {"cache_hits", stats.cache_hits},
 	    {"cache_misses", stats.cache_misses},
 	    {"retries", stats.retries},
+	    // 401s that triggered a refresh attempt (at most one per call, counted
+	    // whether or not a new token resulted), and token mint attempts
+	    // (successful or not). See DriveCallStats for the exact rules.
+	    {"auth_refresh", stats.auth_refresh},
+	    {"token_request", stats.token_request},
 	    // A GAUGE, not a counter: the live size of the path cache, which S-2.11
 	    // requires to be bounded. Asserting the bound needs a way to see it.
 	    {"path_cache_entries", static_cast<int64_t>(GetGlobalPathCacheEntries())},
@@ -155,7 +160,9 @@ void RegisterGDriveStats(ExtensionLoader &loader) {
 	desc.description =
 	    "Drive API call counters, one row per metric: files_get, files_list, files_media, files_export, "
 	    "files_create, files_update, files_delete (calls by kind), cache_hits/cache_misses (the path-resolution "
-	    "cache that mitigates R-1 amplification), retries (retried HTTP attempts across all kinds), and total "
+	    "cache that mitigates R-1 amplification), retries (retried HTTP attempts across all kinds), auth_refresh "
+	    "(401s that triggered a token refresh attempt, at most one per call), token_request (token mint attempts, "
+	    "successful or not), and total "
 	    "(sum of the files_* kind counters), and path_cache_entries (a GAUGE: the live size of the "
 	    "path->id cache, bounded by gdrive_path_cache_entries). Process-wide, not reset between queries -- call it before and "
 	    "after an operation and diff the two snapshots to measure that operation's amplification.";

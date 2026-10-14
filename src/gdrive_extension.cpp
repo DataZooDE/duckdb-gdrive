@@ -178,6 +178,16 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "costs one files.list per segment to rebuild.",
 	    LogicalType::UBIGINT, Value::UBIGINT(4096));
 
+	// Testing aid: cap how long a minted token is trusted, so a handle
+	// outliving its token (a long scan, an ATTACH) is exercisable in seconds
+	// instead of an hour. 0 = Google's own lifetime. Same knob as
+	// duckdb-sharepoint's sharepoint_debug_token_max_age_seconds.
+	loader.GetDatabaseInstance().config.AddExtensionOption(
+	    "gdrive_debug_token_max_age_seconds",
+	    "TESTING ONLY: treat access tokens as expiring after at most this many seconds (0 = their real "
+	    "lifetime).",
+	    LogicalType::BIGINT, Value::BIGINT(0));
+
 	gdrive::RegisterGDriveSecrets(loader);
 	gdrive::RegisterGDriveStats(loader);
 

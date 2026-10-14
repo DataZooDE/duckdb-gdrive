@@ -56,6 +56,16 @@ struct DriveCallStats {
 	int64_t cache_hits = 0;
 	int64_t cache_misses = 0;
 	int64_t retries = 0;
+	//! 401s that triggered a refresh attempt -- at most one per logical call.
+	//! Counted BEFORE knowing whether a new token can be had: a pasted
+	//! ACCESS_TOKEN alone has nothing to refresh with (its 401 stands, with no
+	//! re-send), and a refresh whose mint fails still counts.
+	int64_t auth_refresh = 0;
+	//! Token mint attempts, successful or not: each call into a provider's
+	//! mint (refresh grant, RFC 7523, STS + impersonation, browser flow). A
+	//! failure that never reached an endpoint counts too. A mint skipped
+	//! because the same credential failed moments ago does not.
+	int64_t token_request = 0;
 
 	int64_t Total() const;
 };

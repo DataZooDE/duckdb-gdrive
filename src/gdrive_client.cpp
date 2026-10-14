@@ -68,7 +68,9 @@ int64_t DriveCallStats::Total() const {
 	// belongs to -- see GDriveClientImpl::ExecuteWithRetry, which increments
 	// the kind counter on every attempt including retries, so Total() below
 	// already reflects the true round-trip count Google would see, which is
-	// exactly what the R-1 amplification measurement needs).
+	// exactly what the R-1 amplification measurement needs). Likewise
+	// auth_refresh (the re-send is counted in its kind) and token_request
+	// (a token endpoint, not the Drive API).
 	return files_get + files_list + files_media + files_export + files_create + files_update + files_delete;
 }
 
@@ -275,7 +277,9 @@ bool ParseFileList(const std::string &json_body, std::vector<DriveFileMeta> &out
 // ---------------------------------------------------------------------------
 #ifndef GDRIVE_CLIENT_PURE_ONLY
 
+#include "gdrive_auth.hpp"
 #include "gdrive_stats.hpp"
+#include "gdrive_token_policy.hpp"
 #include "gdrive_trace.hpp"
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
@@ -323,6 +327,12 @@ void RecordGlobalRetry() {
 	std::lock_guard<std::mutex> guard(box.mu);
 	box.stats.retries += 1;
 }
+
+void RecordGlobalAuthRefresh() {
+	auto &box = Box();
+	std::lock_guard<std::mutex> guard(box.mu);
+	box.stats.auth_refresh += 1;
+}
 } // namespace
 
 DriveCallStats GetGlobalDriveCallStats() {
@@ -366,6 +376,12 @@ void IncrementGlobalCacheMiss() {
 	box.stats.cache_misses += 1;
 }
 
+void IncrementGlobalTokenRequest() {
+	auto &box = Box();
+	std::lock_guard<std::mutex> guard(box.mu);
+	box.stats.token_request += 1;
+}
+
 // ---------------------------------------------------------------------------
 // GDriveClientImpl -- the concrete transport.
 // ---------------------------------------------------------------------------
@@ -377,7 +393,8 @@ constexpr int kDrivePort = 443;
 
 // Retry policy (requirement 6): bounded, jittered exponential backoff.
 //   - Up to kMaxAttempts total HTTP attempts per logical call (1 initial +
-//     up to kMaxAttempts-1 retries).
+//     up to kMaxAttempts-1 retries), plus at most ONE re-send after a 401
+//     with a refreshed token, which does not count against the budget.
 //   - Base delay kInitialBackoffMs, doubling each attempt, capped at
 //     kMaxBackoffMs.
 //   - +/-25% jitter, so concurrent callers hitting the same transient
@@ -488,8 +505,8 @@ std::string JsonEscape(const std::string &s) {
 
 class GDriveClientImpl : public GDriveClient {
 public:
-	GDriveClientImpl(std::string access_token, std::string drive_id, std::string quota_project_id = "")
-	    : access_token_(std::move(access_token)), drive_id_(std::move(drive_id)),
+	GDriveClientImpl(std::shared_ptr<GDriveTokenSource> tokens, std::string drive_id, std::string quota_project_id = "")
+	    : tokens_(std::move(tokens)), drive_id_(std::move(drive_id)),
 	      quota_project_id_(std::move(quota_project_id)) {
 	}
 
@@ -804,7 +821,7 @@ private:
 		return "unknown";
 	}
 
-	RawResult DoHttp(HttpMethod method, const std::string &path_and_query,
+	RawResult DoHttp(HttpMethod method, const std::string &access_token, const std::string &path_and_query,
 	                 const std::vector<std::pair<std::string, std::string>> &extra_headers, const std::string &body,
 	                 const std::string &content_type) {
 		// ---------------------------------------------------------------
@@ -847,7 +864,7 @@ private:
 		// REQ-NF-03: the bearer token lives ONLY in this header, built fresh
 		// per attempt, never copied into a string that could end up in a log
 		// or an error. Nothing in this file logs request headers.
-		headers.emplace("Authorization", "Bearer " + access_token_);
+		headers.emplace("Authorization", "Bearer " + access_token);
 		// Drive rejects a user credential that names no quota project outright
 		// ("the drive.googleapis.com API requires a quota project"), so this is
 		// a correctness header, not a billing one. Empty for service accounts,
@@ -898,6 +915,10 @@ private:
 	                               bool retry_non_idempotent = false, int64_t trace_range_off = -1,
 	                               int64_t trace_range_len = -1) {
 		int attempt = 0;
+		// Asked of the SOURCE, per logical call: a handle opened an hour ago
+		// gets a token that is valid now, not the one it was opened with.
+		std::string access_token = tokens_->Token();
+		bool refreshed = false;
 		for (;;) {
 			++attempt;
 			stats_.*counter += 1;
@@ -908,7 +929,7 @@ private:
 			const bool tracing = trace::Enabled();
 			const uint64_t t_start = tracing ? trace::NowMicros() : 0;
 
-			RawResult raw = DoHttp(method, path_and_query, extra_headers, body, content_type);
+			RawResult raw = DoHttp(method, access_token, path_and_query, extra_headers, body, content_type);
 
 			if (tracing) {
 				trace::Span span;
@@ -987,6 +1008,28 @@ private:
 			}
 
 			GDriveError err = ClassifyDriveError(raw.status, raw.body, raw.retry_after);
+			// A 401: the token expired early or was revoked. Ask the source for
+			// a fresh one ONCE and re-send. Safe for every method, POST
+			// included: a 401 is decided before Drive applies anything, so
+			// unlike a 5xx it is not ambiguous. A second 401 falls through and
+			// surfaces as an authentication error -- no loop. Under the
+			// source's mint lock, N threads rejected at once mint ONE token.
+			if (err.kind == GDriveErrorKind::UNAUTHENTICATED && !refreshed) {
+				RecordGlobalAuthRefresh();
+				std::string replacement = tokens_->Refresh(access_token);
+				const bool resend = ShouldResendAfter401(refreshed, access_token, replacement);
+				refreshed = true;
+				if (resend) {
+					access_token = std::move(replacement);
+					// The re-send is not a failed attempt: it does not use up a
+					// transient-retry slot, and kMaxAttempts stays the bound on
+					// retries. A call therefore makes at most kMaxAttempts + 1
+					// HTTP requests, the +1 being this one re-send (each still
+					// counted in its kind counter).
+					attempt--;
+					continue;
+				}
+			}
 			bool retryable = (err.kind == GDriveErrorKind::TRANSIENT || err.kind == GDriveErrorKind::RATE_LIMIT);
 			// The SAME idempotency gate as the transport branch above, which it
 			// was missing. A 5xx is exactly as ambiguous as a dropped
@@ -1015,7 +1058,8 @@ private:
 		}
 	}
 
-	std::string access_token_;
+	//! Never a captured token: see ExecuteWithRetry.
+	std::shared_ptr<GDriveTokenSource> tokens_;
 	std::string drive_id_;
 	//! Sent as x-goog-user-project when non-empty; see the header emission
 	//! in DoHttp for why Drive treats this as mandatory for user credentials.
@@ -1032,9 +1076,9 @@ private:
 namespace duckdb {
 namespace gdrive {
 
-std::unique_ptr<GDriveClient> CreateGDriveClient(const std::string &access_token, const std::string &drive_id,
-                                                 const std::string &quota_project_id) {
-	return std::make_unique<GDriveClientImpl>(access_token, drive_id, quota_project_id);
+std::unique_ptr<GDriveClient> CreateGDriveClient(std::shared_ptr<GDriveTokenSource> tokens,
+                                                 const std::string &drive_id, const std::string &quota_project_id) {
+	return std::make_unique<GDriveClientImpl>(std::move(tokens), drive_id, quota_project_id);
 }
 
 } // namespace gdrive

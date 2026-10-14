@@ -1,0 +1,277 @@
+# name: test/sql/gdrive_token_refresh.test.template
+# description: a 401 is answered by ONE fresh token and one re-send, so a
+#              handle survives its token; with nothing to refresh with, the
+#              401 is a clean authentication error, not a loop
+# group: [live]
+#
+# Handles hold a token SOURCE, not a token (see GDriveTokenSource in
+# src/include/gdrive_auth.hpp). The proof below uses a PASTED garbage
+# ACCESS_TOKEN: Drive answers it with a real 401 -- exactly what an expired or
+# revoked token gets -- so the refresh path runs against the live API without
+# waiting an hour for a token to expire.
+#
+# Its OWN file, like gdrive_stats.test: the token cache and the counters are
+# process-wide, and scripts/run_live_tests.sh gives each file a fresh process,
+# so the token_request counts below start cold.
+
+require gdrive
+
+require-env GDRIVE_CI_DRIVE_ID
+
+require-env GDRIVE_OAUTH_CLIENT_ID
+
+require-env GDRIVE_OAUTH_CLIENT_SECRET
+
+require-env GDRIVE_USER_REFRESH_TOKEN
+
+require-env GDRIVE_CI_SA_KEY_FILE
+
+require parquet
+
+# ---------------------------------------------------------------------------
+# 1. A pasted token Drive rejects, with a refresh token beside it. The pasted
+#    token is used first (it is what the user asked for); the 401 is answered
+#    by minting from the refresh token, ONCE, and the request re-sent.
+# ---------------------------------------------------------------------------
+statement ok
+CREATE SECRET gd_refreshable (
+    TYPE gdrive,
+    PROVIDER config,
+    ACCESS_TOKEN 'garbage-token-refreshable',
+    CLIENT_ID '${OAUTH_CLIENT_ID}',
+    CLIENT_SECRET '${OAUTH_CLIENT_SECRET}',
+    REFRESH_TOKEN '${USER_REFRESH_TOKEN}',
+    ROOT_FOLDER_ID '${DRIVE_ID}',
+    DRIVE_SCOPE 'https://www.googleapis.com/auth/drive'
+);
+
+statement ok
+CALL gdrive_reset_stats();
+
+query III
+SELECT id, name, amount FROM read_csv('gdrive://fixtures/small.csv') ORDER BY id
+----
+1	row-1	100
+2	row-2	200
+3	row-3	300
+4	row-4	400
+5	row-5	500
+
+# Exactly one 401 answered, and one token minted. Every later request -- the
+# rest of the path walk, the open, the read -- found the fresh token in the
+# shared cache rather than starting from the rejected one again.
+query II
+SELECT (SELECT value FROM gdrive_stats() WHERE metric = 'auth_refresh'),
+       (SELECT value FROM gdrive_stats() WHERE metric = 'token_request');
+----
+1	1
+
+# A second query costs neither.
+statement ok
+CALL gdrive_reset_stats();
+
+query I
+SELECT count(*) FROM read_csv('gdrive://fixtures/with space.csv')
+----
+5
+
+query II
+SELECT (SELECT value FROM gdrive_stats() WHERE metric = 'auth_refresh'),
+       (SELECT value FROM gdrive_stats() WHERE metric = 'token_request');
+----
+0	0
+
+statement ok
+DROP SECRET gd_refreshable;
+
+# ---------------------------------------------------------------------------
+# 2. Handles opened after a refresh reuse the cached token. A 150-file glob
+#    opens a handle per file across 16 threads; none of them starts from the
+#    rejected token again or mints its own.
+#
+#    What this does NOT prove: 16 threads rejected AT ONCE collapsing into one
+#    mint. DuckDB's glob lists the folder single-threaded first, so the 401
+#    and the refresh happen before any worker starts. That path (Refresh
+#    reusing a newer cached token under the mint lock) is covered by the pure
+#    DecideAfterRejection rule only.
+# ---------------------------------------------------------------------------
+statement ok
+CREATE SECRET gd_threads (
+    TYPE gdrive,
+    PROVIDER config,
+    ACCESS_TOKEN 'garbage-token-threads',
+    CLIENT_ID '${OAUTH_CLIENT_ID}',
+    CLIENT_SECRET '${OAUTH_CLIENT_SECRET}',
+    REFRESH_TOKEN '${USER_REFRESH_TOKEN}',
+    ROOT_FOLDER_ID '${DRIVE_ID}',
+    DRIVE_SCOPE 'https://www.googleapis.com/auth/drive'
+);
+
+statement ok
+SET threads = 16;
+
+statement ok
+CALL gdrive_reset_stats();
+
+query I
+SELECT count(*) FROM read_csv('gdrive://fixtures/many/*.csv')
+----
+150
+
+query II
+SELECT (SELECT value FROM gdrive_stats() WHERE metric = 'auth_refresh'),
+       (SELECT value FROM gdrive_stats() WHERE metric = 'token_request');
+----
+1	1
+
+statement ok
+RESET threads;
+
+statement ok
+DROP SECRET gd_threads;
+
+# ---------------------------------------------------------------------------
+# 3. A pasted token alone has nothing to refresh with. The 401 is counted,
+#    NOT re-sent, and surfaces as an authentication error -- no loop, no
+#    token request, and no token text in the message.
+# ---------------------------------------------------------------------------
+statement ok
+CREATE SECRET gd_bogus (
+    TYPE gdrive,
+    PROVIDER config,
+    ACCESS_TOKEN 'garbage-token-only',
+    ROOT_FOLDER_ID '${DRIVE_ID}'
+);
+
+statement ok
+CALL gdrive_reset_stats();
+
+statement error
+SELECT * FROM read_csv('gdrive://fixtures/small.csv');
+----
+authentication failed
+
+# Every Drive request made (path resolution: files.list) got exactly one 401
+# and was not re-sent: the refresh count equals the call count, however many
+# probes DuckDB issues.
+query II
+SELECT (SELECT value FROM gdrive_stats() WHERE metric = 'auth_refresh') =
+       (SELECT value FROM gdrive_stats() WHERE metric = 'files_list'),
+       (SELECT value FROM gdrive_stats() WHERE metric = 'token_request');
+----
+true	0
+
+query I
+SELECT value >= 1 FROM gdrive_stats() WHERE metric = 'auth_refresh';
+----
+true
+
+statement ok
+DROP SECRET gd_bogus;
+
+# ---------------------------------------------------------------------------
+# 4. A 401 whose refresh FAILS: a revoked refresh token. The pasted token is
+#    rejected, the refresh grant is refused (invalid_grant), and the error
+#    names the secret and the fix -- never the token, the refresh token or
+#    the client secret (REQ-NF-03). The failed mint is remembered briefly, so
+#    repeating the query does not hammer the token endpoint.
+# ---------------------------------------------------------------------------
+statement ok
+CREATE SECRET gd_revoked (
+    TYPE gdrive,
+    PROVIDER config,
+    ACCESS_TOKEN 'garbage-token-revoked',
+    CLIENT_ID '${OAUTH_CLIENT_ID}',
+    CLIENT_SECRET '${OAUTH_CLIENT_SECRET}',
+    REFRESH_TOKEN 'revoked-garbage-refresh-token',
+    ROOT_FOLDER_ID '${DRIVE_ID}',
+    DRIVE_SCOPE 'https://www.googleapis.com/auth/drive'
+);
+
+statement ok
+CALL gdrive_reset_stats();
+
+statement error
+SELECT * FROM read_csv('gdrive://fixtures/small.csv');
+----
+failed to refresh an access token
+
+query II
+SELECT (SELECT value FROM gdrive_stats() WHERE metric = 'auth_refresh'),
+       (SELECT value FROM gdrive_stats() WHERE metric = 'token_request');
+----
+1	1
+
+statement error
+SELECT * FROM read_csv('gdrive://fixtures/small.csv');
+----
+<!REGEX>:.*garbage.*
+
+statement error
+SELECT * FROM read_csv('gdrive://fixtures/small.csv');
+----
+<!REGEX>:.*${OAUTH_CLIENT_SECRET}.*
+
+# Three failing queries, ONE token request.
+query I
+SELECT value FROM gdrive_stats() WHERE metric = 'token_request';
+----
+1
+
+statement ok
+DROP SECRET gd_revoked;
+
+# ---------------------------------------------------------------------------
+# 5. The debug cap is validated: negative is an error, not "no cap".
+# ---------------------------------------------------------------------------
+statement ok
+CREATE SECRET gd_sa (
+    TYPE gdrive,
+    PROVIDER service_account,
+    KEY_FILE '${SA_KEY_FILE}',
+    ROOT_FOLDER_ID '${DRIVE_ID}',
+    DRIVE_SCOPE 'https://www.googleapis.com/auth/drive.readonly'
+);
+
+statement ok
+SET gdrive_debug_token_max_age_seconds = -1;
+
+statement error
+SELECT count(*) FROM read_parquet('gdrive://fixtures/parts/part-00.parquet');
+----
+gdrive_debug_token_max_age_seconds
+
+# ---------------------------------------------------------------------------
+# 6. service_account re-mints when its token goes stale. Cap 61 s (stale 1 s
+#    after minting, given the 60 s margin): read, wait, read again -- the
+#    second read mints a new RFC 7523 token from the key captured at
+#    resolution.
+# ---------------------------------------------------------------------------
+statement ok
+SET gdrive_debug_token_max_age_seconds = 61;
+
+query I
+SELECT count(*) FROM read_parquet('gdrive://fixtures/parts/part-00.parquet')
+----
+10
+
+statement ok
+CALL gdrive_reset_stats();
+
+sleep 3 seconds
+
+query I
+SELECT count(*) FROM read_parquet('gdrive://fixtures/parts/part-01.parquet')
+----
+10
+
+query I
+SELECT value >= 1 FROM gdrive_stats() WHERE metric = 'token_request';
+----
+true
+
+statement ok
+RESET gdrive_debug_token_max_age_seconds;
+
+statement ok
+DROP SECRET gd_sa;

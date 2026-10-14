@@ -512,6 +512,48 @@ sweep and any developer running the live suite. It went red in CI on
 2026-08-02 while a local drill happened to be writing scratch folders. Assert
 about the object the test itself created.
 
+**Handles hold a token SOURCE, never a token (2026-10-14).** A handle used
+to capture `access_token` at open, so a scan or an `ATTACH` living past the
+~1 h token lifetime failed mid-way with 401. `GDriveAuthContext::tokens` is now
+a `GDriveTokenSource` (ported from duckdb-sharepoint): every request asks it
+for a token, it re-mints a minute before expiry, and `ExecuteWithRetry`
+answers a 401 with ONE `Refresh(rejected)` and one re-send (safe for POST too:
+a 401 is decided before Drive applies anything; the re-send is outside the
+kMaxAttempts budget). Mints are serialised per cache key (`MintLockFor`), and
+`Refresh` reuses a newer cached token if another thread already replaced the
+rejected one -- designed so N threads rejected at once mint once, but that
+race is proven only by the pure `DecideAfterRejection` rule: no live test can
+force it, because DuckDB makes the first request of every query (bind, glob
+listing) single-threaded, so the refresh lands before any worker starts. A
+failed mint is remembered for 30 s and rethrown, so a revoked credential does
+not cost one token POST per Drive request. The rules are pure
+(`gdrive_token_policy.cpp`); `auth_refresh` and `token_request` in
+`gdrive_stats()` are the live proof. `gdrive_debug_token_max_age_seconds` is
+validated where it is read: negative is an error, and 1..60 is clamped to 61,
+because with a 60 s refresh margin any smaller cap makes every token stale on
+arrival -- one token request per Drive request.
+
+Credential material vs. cache identity: the token source must sign as the
+principal its identity was stamped from, because the path and block caches are
+keyed on that identity. So service_account parses `KEY_FILE` at RESOLUTION and
+the source keeps the parsed key, as credential_chain keeps its parsed ADC
+document. It used to re-read the file at mint time, which after an in-place
+key swap would mint the NEW principal's token under the OLD identity. The
+trade-off, accepted knowingly: the private key stays in process memory for as
+long as a handle holds the source (REQ-NF-03 forbids disk and error text, not
+memory -- the secret itself is in memory anyway), every resolution reads the
+key file once, and a live handle never picks up a rotated key or a re-run
+`gcloud auth application-default login` -- the next open does, under its new
+stamp.
+
+Two testing lessons: (1) a token aged out by
+`gdrive_debug_token_max_age_seconds` is still VALID at Google, so a
+captured-token regression passes any "the read succeeded" check -- assert
+`token_request >= 1` instead (verified: a handle that captures its token at
+open gives 0); (2) the cheapest real 401 is a pasted garbage `ACCESS_TOKEN`
+beside a valid refresh token -- Drive rejects it exactly as it rejects an
+expired one.
+
 **Releasing:** follow `docs/RELEASE.md`. The community-extensions repo builds
 from a tagged commit and runs none of our live tests, so whatever is broken
 at tag time ships.
