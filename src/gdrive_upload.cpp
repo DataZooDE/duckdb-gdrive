@@ -10,7 +10,8 @@
 // publishes the file. Until then nothing is visible in the folder, and an
 // overwritten file keeps its old content (verified live 2026-10-14), so a
 // failure anywhere mid-stream leaves nothing behind once AbortUpload cancels
-// the session.
+// the session -- except a final chunk whose every answer was lost, which
+// fails with the "may or may not have been applied" error instead.
 //
 // files.create when there was no existing file id, files.update (overwrite)
 // when OpenFile found one (S-3.9), never a second file sharing the name (which

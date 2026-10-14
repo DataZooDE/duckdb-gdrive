@@ -5,6 +5,7 @@
 // Directly, not via gdrive_trace.hpp: this TU names uint64_t itself, and musl
 // does not transitively provide it the way glibc happens to. See CLAUDE.md.
 #include <cstdint>
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
@@ -119,6 +120,12 @@ void Emit(const Span &s) {
 	        s.kind, (unsigned long long)s.start_us, (unsigned long long)s.end_us,
 	        (unsigned long long)(s.end_us - s.start_us), thread_id, s.attempt, s.http_status, s.bytes,
 	        s.fresh_conn ? "true" : "false", (long long)s.range_off, (long long)s.range_len);
+	// Upload spans are flushed as they happen: each follows a >= 256 KiB
+	// request, so the cost is noise, and it lets an observer follow a stream
+	// while it runs (the e2e harness waits on them to act mid-upload).
+	if (std::strncmp(s.kind, "upload.", 7) == 0) {
+		fflush(g_out);
+	}
 }
 
 } // namespace trace

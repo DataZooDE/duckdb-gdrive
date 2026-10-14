@@ -361,11 +361,15 @@ at most one upload chunk in memory (`gdrive_upload_chunk_bytes`, 16 MiB). A
 file that never outgrows it is uploaded in one request on close; a larger one
 opens a Drive resumable upload session and sends each full chunk as it fills,
 so a multi-GB `COPY` needs ~one chunk of RAM, not the file's size (a 373 MiB
-`COPY` peaks at ~170 MiB RSS for the whole process; it was 1.6 GiB when writes
+`COPY` peaks at ~100 MiB RSS for the whole process, 6 MiB more than a 124 MiB one; it was 1.6 GiB when writes
 were buffered). Drive publishes the file only when the final chunk lands on
 close: until then nothing appears in the folder and an overwritten file keeps
 its old content, and a write that fails mid-stream — or a query that errors
 part-way through a `COPY` — cancels the session and leaves nothing behind.
+(The one exception: if the final chunk is sent and every answer to it is
+lost, Drive may have published the file; the error then says the change may
+or may not have been applied.) Once the session is open, chunks carry no
+token, so a long upload cannot fail on token expiry.
 Each chunk is retried with backoff and resumed from what the session reports
 it holds. Drive cannot write at a byte offset, so a positional write raises an
 error rather than silently corrupting the file. This suits engines that emit
@@ -415,7 +419,8 @@ change may or may not have been applied, and does **not** retry. Check the
 path before re-running it. Files larger than one chunk go through Drive's
 resumable upload protocol, whose session URI makes a retry genuinely
 idempotent: every chunk — including the final one that publishes the file — is
-retried and resumed from what the session reports it holds.
+retried and resumed from what the session reports it holds. If the final
+chunk's outcome still cannot be learned, the error says so in the same words.
 
 **`DRIVE_SCOPE` does not restrict a refresh token.** With `PROVIDER config`
 and a `REFRESH_TOKEN`, the scope was fixed when consent was granted; Google

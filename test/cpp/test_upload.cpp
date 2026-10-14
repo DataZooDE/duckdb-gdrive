@@ -127,6 +127,199 @@ TEST_CASE("drive 308 Range header gives the next byte to send", "[upload]") {
 	REQUIRE_FALSE(ParseDriveRangeNext("bytes=5-", next));
 	REQUIRE_FALSE(ParseDriveRangeNext("garbage", next));
 	REQUIRE_FALSE(ParseDriveRangeNext("bytes=10-4", next));
+	// A session holds a PREFIX of the upload: a range not starting at 0 is
+	// not something Drive sends, and must not be half-trusted.
+	REQUIRE_FALSE(ParseDriveRangeNext("bytes=5-10", next));
+	// Overflow: last + 1 must not wrap to 0, and huge digit runs are refused.
+	REQUIRE_FALSE(ParseDriveRangeNext("bytes=0-18446744073709551615", next));
+	REQUIRE_FALSE(ParseDriveRangeNext("bytes=0-99999999999999999999999", next));
+}
+
+// ---------------------------------------------------------------------------
+// NextUploadStep: the per-chunk retry/resume state machine, pure. Each reply
+// (to a chunk PUT or a status query) is fed in; the step says what to do next.
+// Reply shapes are the ones observed live (308 + "Range: bytes=0-N", 200/201
+// on completion, 5xx/429 retryable, 404 once a session is gone).
+// ---------------------------------------------------------------------------
+namespace {
+
+ChunkedUploadBuffer BufferWithPending(std::uint64_t full_chunks_sent, std::size_t pending) {
+	const std::uint64_t C = kDriveUploadChunkMultiple;
+	ChunkedUploadBuffer buf(C);
+	std::string data(static_cast<std::size_t>(C), 'x');
+	for (std::uint64_t i = 0; i < full_chunks_sent; i++) {
+		buf.Fill(data.data(), data.size());
+		buf.MarkChunkSent();
+	}
+	std::string rest(pending, 'y');
+	buf.Fill(rest.data(), rest.size());
+	return buf;
+}
+
+UploadReply Reply(int status, std::string range = "", bool retryable = false) {
+	UploadReply r;
+	r.transport_ok = true;
+	r.status = status;
+	r.range = std::move(range);
+	r.retryable = retryable;
+	return r;
+}
+
+UploadReply TransportFailure() {
+	UploadReply r;
+	r.transport_ok = false;
+	return r;
+}
+
+} // namespace
+
+TEST_CASE("upload step: a non-final chunk acknowledged in full is accepted", "[upload][step]") {
+	auto buf = BufferWithPending(1, 262144); // offset 262144, one full chunk pending
+	ChunkUploadState st;
+	auto step = NextUploadStep(buf, false, st, Reply(308, "bytes=0-524287"));
+	REQUIRE(step.kind == UploadStepKind::ACCEPTED);
+}
+
+TEST_CASE("upload step: the final chunk completing is done", "[upload][step]") {
+	auto buf = BufferWithPending(1, 100);
+	ChunkUploadState st;
+	REQUIRE(NextUploadStep(buf, true, st, Reply(200)).kind == UploadStepKind::DONE);
+	REQUIRE(NextUploadStep(buf, true, st, Reply(201)).kind == UploadStepKind::DONE);
+}
+
+TEST_CASE("upload step: a partial 308 re-sends the rest and progress resets the stall count", "[upload][step]") {
+	const std::uint64_t C = kDriveUploadChunkMultiple;
+	ChunkedUploadBuffer big(4 * C);
+	std::string data(static_cast<std::size_t>(4 * C), 'x');
+	big.Fill(data.data(), data.size());
+	ChunkUploadState st;
+	// Drive took the first 256 KiB only: send the rest, no backoff.
+	auto step = NextUploadStep(big, false, st, Reply(308, "bytes=0-262143"));
+	REQUIRE(step.kind == UploadStepKind::SEND);
+	REQUIRE_FALSE(step.backoff);
+	REQUIRE(st.skip == C);
+	// No progress this time: send again, but back off first.
+	step = NextUploadStep(big, false, st, Reply(308, "bytes=0-262143"));
+	REQUIRE(step.kind == UploadStepKind::SEND);
+	REQUIRE(step.backoff);
+	REQUIRE(st.stalls == 1);
+	// Progress again: the stall count resets, so a slow-but-moving session
+	// is never aborted for "no progress".
+	step = NextUploadStep(big, false, st, Reply(308, "bytes=0-524287"));
+	REQUIRE(step.kind == UploadStepKind::SEND);
+	REQUIRE(st.stalls == 0);
+	REQUIRE(st.skip == 2 * C);
+}
+
+TEST_CASE("upload step: a session that never progresses fails after the bound", "[upload][step]") {
+	const std::uint64_t C = kDriveUploadChunkMultiple;
+	ChunkedUploadBuffer big(2 * C);
+	std::string data(static_cast<std::size_t>(2 * C), 'x');
+	big.Fill(data.data(), data.size());
+	ChunkUploadState st;
+	UploadStep step;
+	for (int i = 0; i < 20 && step.kind != UploadStepKind::FAIL; i++) {
+		step = NextUploadStep(big, false, st, Reply(308, ""));
+	}
+	REQUIRE(step.kind == UploadStepKind::FAIL);
+	REQUIRE(step.error.find("no progress") != std::string::npos);
+}
+
+TEST_CASE("upload step: an unaligned resume of a non-final chunk is a clear error", "[upload][step]") {
+	const std::uint64_t C = kDriveUploadChunkMultiple;
+	ChunkedUploadBuffer big(2 * C);
+	std::string data(static_cast<std::size_t>(2 * C), 'x');
+	big.Fill(data.data(), data.size());
+	ChunkUploadState st;
+	auto step = NextUploadStep(big, false, st, Reply(308, "bytes=0-999"));
+	REQUIRE(step.kind == UploadStepKind::FAIL);
+	REQUIRE(step.error.find("256 KiB") != std::string::npos);
+	// The FINAL chunk may resume anywhere: it carries the total.
+	ChunkUploadState st2;
+	step = NextUploadStep(big, true, st2, Reply(308, "bytes=0-999"));
+	REQUIRE(step.kind == UploadStepKind::SEND);
+	REQUIRE(st2.skip == 1000);
+}
+
+TEST_CASE("upload step: a malformed or out-of-chunk Range is a hard failure", "[upload][step]") {
+	auto buf = BufferWithPending(1, 100); // offset 262144
+	ChunkUploadState st;
+	REQUIRE(NextUploadStep(buf, false, st, Reply(308, "bytes=garbage")).kind == UploadStepKind::FAIL);
+	ChunkUploadState st2;
+	// Drive holds less than what was already dropped from memory.
+	REQUIRE(NextUploadStep(buf, false, st2, Reply(308, "bytes=0-99")).kind == UploadStepKind::FAIL);
+	ChunkUploadState st3;
+	// ...or more than was ever sent.
+	REQUIRE(NextUploadStep(buf, true, st3, Reply(308, "bytes=0-999999")).kind == UploadStepKind::FAIL);
+}
+
+TEST_CASE("upload step: a retryable error backs off, then asks the session", "[upload][step]") {
+	auto buf = BufferWithPending(1, 100);
+	ChunkUploadState st;
+	auto step = NextUploadStep(buf, false, st, Reply(503, "", /*retryable=*/true));
+	REQUIRE(step.kind == UploadStepKind::ASK_STATUS);
+	REQUIRE(step.backoff);
+	step = NextUploadStep(buf, false, st, TransportFailure());
+	REQUIRE(step.kind == UploadStepKind::ASK_STATUS);
+	// ...bounded.
+	for (int i = 0; i < 10 && step.kind == UploadStepKind::ASK_STATUS; i++) {
+		step = NextUploadStep(buf, false, st, TransportFailure());
+	}
+	REQUIRE(step.kind == UploadStepKind::FAIL);
+}
+
+TEST_CASE("upload step: a non-retryable error fails at once", "[upload][step]") {
+	auto buf = BufferWithPending(1, 100);
+	ChunkUploadState st;
+	auto step = NextUploadStep(buf, false, st, Reply(404));
+	REQUIRE(step.kind == UploadStepKind::FAIL);
+	REQUIRE_FALSE(step.ambiguous);
+}
+
+TEST_CASE("upload step: a final chunk whose fate is unknown fails as ambiguous", "[upload][step]") {
+	// The final PUT may have reached Drive and published the file even though
+	// its reply was lost; if every later attempt fails too, the error must say
+	// so rather than claim nothing happened.
+	auto buf = BufferWithPending(1, 100);
+	ChunkUploadState st;
+	UploadStep step = NextUploadStep(buf, true, st, TransportFailure());
+	REQUIRE(step.kind == UploadStepKind::ASK_STATUS);
+	for (int i = 0; i < 10 && step.kind == UploadStepKind::ASK_STATUS; i++) {
+		step = NextUploadStep(buf, true, st, TransportFailure());
+	}
+	REQUIRE(step.kind == UploadStepKind::FAIL);
+	REQUIRE(step.ambiguous);
+	// A lost final reply that the status query resolves is plain success.
+	ChunkUploadState st2;
+	REQUIRE(NextUploadStep(buf, true, st2, TransportFailure()).kind == UploadStepKind::ASK_STATUS);
+	REQUIRE(NextUploadStep(buf, true, st2, Reply(200)).kind == UploadStepKind::DONE);
+	// A definite refusal of a NON-final chunk is never ambiguous.
+	ChunkUploadState st3;
+	REQUIRE_FALSE(NextUploadStep(buf, false, st3, Reply(400)).ambiguous);
+}
+
+TEST_CASE("upload step: the whole final chunk held but not completed asks for completion", "[upload][step]") {
+	auto buf = BufferWithPending(1, 100); // total 262244
+	ChunkUploadState st;
+	auto step = NextUploadStep(buf, true, st, Reply(308, "bytes=0-262243"));
+	REQUIRE(step.kind == UploadStepKind::SEND);
+	REQUIRE(st.skip == 100); // caller sends the status query with the total
+}
+
+TEST_CASE("streaming upload: a small file does not allocate a whole chunk", "[upload][streaming]") {
+	ChunkedUploadBuffer buf(kDriveUploadChunkMax);
+	const char one = 'x';
+	REQUIRE(buf.Fill(&one, 1) == 1);
+	REQUIRE(buf.Pending().capacity() < 4096);
+	std::string some(100000, 'y');
+	REQUIRE(buf.Fill(some.data(), some.size()) == some.size());
+	REQUIRE(buf.Pending().capacity() < 4 * 100001);
+}
+
+TEST_CASE("streaming upload: content range of a resumed chunk", "[upload][streaming]") {
+	auto buf = BufferWithPending(1, 100);
+	REQUIRE(buf.ContentRange(false, 40) == "bytes 262184-262243/*");
+	REQUIRE(buf.ContentRange(true, 40) == "bytes 262184-262243/262244");
 }
 
 TEST_CASE("drive resumable session URIs are only followed to the Drive upload host", "[upload]") {

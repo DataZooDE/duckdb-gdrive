@@ -337,28 +337,41 @@ Deliberately restricted:
   `Content-Range: bytes a-b/*` as it fills; close sends the last chunk with the
   total. A full chunk is sent only once MORE bytes arrive, so the final chunk is
   never empty and a file of exactly one chunk never opens a session;
-- the session URI is the credential: chunk `PUT`s carry no bearer token, so a
-  long upload cannot fail on token expiry mid-stream. It is only followed over
+- the session URI is the credential: chunk `PUT`s carry no bearer token, so
+  once the session is open a long upload cannot fail on token expiry. (The
+  initiation itself uses the token captured at `OpenFile`; a producer slow
+  enough to outlive it before the first chunk overflows fails closed with a
+  401.) The URI is only followed over
   https to `www.googleapis.com` (`DriveSessionPath`);
 - per-chunk retry (transport, 5xx, 429) with the shared backoff; before each
   retry the session is asked what it holds (`PUT` with `bytes */*`, answered
   `308` + `Range`) and the rest of the chunk is re-sent. A lost reply to the
   FINAL chunk is recovered the same way: the status query answers `200` + the
   file. Only bytes of the pending chunk are in memory, so a resume point
-  outside it is a hard error;
+  outside it is a hard error, as is a malformed `Range` or a non-final resume
+  point off a 256 KiB boundary. A partial `308` re-sends the rest; only 308s
+  that make NO progress count toward the bound (and back off). These decisions
+  are the pure `NextUploadStep` (Catch2-tested); `UploadChunk` is the I/O.
+  Chunks are sent from the pending buffer as (pointer, length) -- no copy.
+  Status queries count as `upload_status_queries`, data PUTs (every attempt)
+  as `upload_chunks`;
 - **atomic publish.** Nothing appears in the folder before the final chunk,
   and an overwritten file keeps its old content until then. A write that fails
   (a chunk, or the close), and a handle destroyed without a successful close
   (a `COPY` whose query errored mid-stream), cancel the session (`DELETE` on
-  the URI, Drive answers `499`) and publish nothing. A failed close throws --
-  it is never reported as success;
+  the URI with a 5 s timeout, Drive answers `499`) and publish nothing --
+  **unless the final chunk's outcome is ambiguous**: if its reply and every
+  status query after it are lost, Drive may have published the file. That
+  case fails with the same "may or may not have been applied, check the
+  destination" error as the single-request path. A failed close throws -- it
+  is never reported as success;
 - observable: `gdrive_stats()` `upload_chunks`, `upload_aborts`, and the
   high-water mark `upload_buffer_peak_bytes`.
 
 Verified live 2026-10-14 (`test/sql/gdrive_streaming_write.test.template`,
-`e2e/tests/test_streaming_writes.py`): a 373 MiB `COPY` peaks at ~170 MiB RSS
-for the whole process (local-disk `COPY` of the same: ~105 MiB), against
-1.6 GiB with the old buffered write. Drive behaviours found on the way: a
+`e2e/tests/test_streaming_writes.py`): with `SET threads = 4`, a 373 MiB `COPY` peaks at
+~100 MiB RSS and a 124 MiB one at ~94 MiB -- memory does not grow with the
+file (the e2e test asserts exactly that) -- against 1.6 GiB with the old buffered write. Drive behaviours found on the way: a
 non-final chunk under 256 KiB is a 400 even with `/*`; `bytes a-b/*` is
 accepted on any chunk but the last; a `308` with no `Range` header means the
 session holds nothing yet.
