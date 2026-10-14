@@ -185,6 +185,38 @@ SELECT count(*) FROM glob('gdrive://scratch/${SCRATCH}/stream/*');
 ----
 3
 
+# ---------------------------------------------------------------------------
+# Streaming + the token source: with tokens treated as stale 1 s after minting
+# (cap 61 s, 60 s margin), the session initiation asks the SOURCE for a valid
+# token, and the chunk PUTs carry none at all -- so a stream far longer than
+# a token's life needs no re-mint per chunk.
+# ---------------------------------------------------------------------------
+statement ok
+SET gdrive_debug_token_max_age_seconds = 61;
+
+statement ok
+CALL gdrive_reset_stats();
+
+statement ok
+COPY (SELECT i, md5(i::VARCHAR) AS h FROM range(100000) t(i))
+     TO 'gdrive://scratch/${SCRATCH}/stream/tok.csv' (HEADER);
+
+query II
+SELECT (SELECT value FROM gdrive_stats() WHERE metric = 'upload_chunks') > 10,
+       (SELECT value FROM gdrive_stats() WHERE metric = 'token_request')
+           < (SELECT value FROM gdrive_stats() WHERE metric = 'upload_chunks');
+----
+true	true
+
+statement ok
+RESET gdrive_debug_token_max_age_seconds;
+
+query I
+SELECT (SELECT md5(content) FROM read_blob('gdrive://scratch/${SCRATCH}/stream/tok.csv'))
+     = (SELECT md5(content) FROM read_blob('__TEST_DIR__/stream_ref.csv'));
+----
+true
+
 # Positional writes stay refused: a read-write ATTACH writes its database
 # header at a byte offset.
 statement error
