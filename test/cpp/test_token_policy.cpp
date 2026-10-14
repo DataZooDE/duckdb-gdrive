@@ -14,6 +14,7 @@ using duckdb::gdrive::CachedTokenState;
 using duckdb::gdrive::DecideAfterRejection;
 using duckdb::gdrive::kTokenRefreshSlackSeconds;
 using duckdb::gdrive::kUnknownExpiry;
+using duckdb::gdrive::NormalizeMaxAgeSeconds;
 using duckdb::gdrive::RejectionAction;
 using duckdb::gdrive::ShouldResendAfter401;
 using duckdb::gdrive::TokenIsFresh;
@@ -53,6 +54,52 @@ TEST_CASE("token policy: the debug max-age cap ages a token out early", "[token]
 	// The cap applies to a pasted token too: otherwise the cap could never
 	// exercise a seeded source's switch to minting.
 	REQUIRE_FALSE(TokenIsFresh(Token("pasted", kUnknownExpiry, now - 2), now, 61));
+}
+
+TEST_CASE("token policy: the debug cap is validated -- negative rejected, too-small clamped", "[token]") {
+	int64_t effective = -7;
+	// 0 = no cap; a real cap above the slack passes through unchanged.
+	REQUIRE(NormalizeMaxAgeSeconds(0, effective));
+	REQUIRE(effective == 0);
+	REQUIRE(NormalizeMaxAgeSeconds(3600, effective));
+	REQUIRE(effective == 3600);
+	// Negative is a mistake, not "no cap".
+	REQUIRE_FALSE(NormalizeMaxAgeSeconds(-1, effective));
+	// 1..60 would make every token stale the moment it is minted -- one token
+	// request per Drive request. Clamped to the smallest cap that leaves a
+	// minted token usable at all.
+	for (int64_t cap : {int64_t(1), int64_t(30), kTokenRefreshSlackSeconds}) {
+		REQUIRE(NormalizeMaxAgeSeconds(cap, effective));
+		REQUIRE(effective == kTokenRefreshSlackSeconds + 1);
+	}
+	REQUIRE(NormalizeMaxAgeSeconds(kTokenRefreshSlackSeconds + 1, effective));
+	REQUIRE(effective == kTokenRefreshSlackSeconds + 1);
+}
+
+TEST_CASE("token policy: a clamped cap leaves a just-minted token usable", "[token]") {
+	const int64_t now = 1000000;
+	int64_t effective = 0;
+	REQUIRE(NormalizeMaxAgeSeconds(60, effective));
+	REQUIRE(TokenIsFresh(Token("a", now + 3600, /*minted_at=*/now), now, effective));
+}
+
+TEST_CASE("token policy: cap boundary -- minted_at + cap == now + slack is stale", "[token]") {
+	const int64_t now = 1000000;
+	const int64_t cap = 100;
+	const auto at_boundary = Token("a", now + 3600, /*minted_at=*/now + kTokenRefreshSlackSeconds - cap);
+	REQUIRE_FALSE(TokenIsFresh(at_boundary, now, cap));
+	const auto one_after = Token("a", now + 3600, /*minted_at=*/now + kTokenRefreshSlackSeconds - cap + 1);
+	REQUIRE(TokenIsFresh(one_after, now, cap));
+}
+
+TEST_CASE("token policy: huge caps and unknown expiry do not overflow", "[token]") {
+	const int64_t now = 1000000;
+	const int64_t max = std::numeric_limits<int64_t>::max();
+	// minted_at + INT64_MAX would be signed overflow; saturates to "no limit".
+	REQUIRE(TokenIsFresh(Token("a", now + 3600, now), now, max));
+	REQUIRE(TokenIsFresh(Token("pasted", kUnknownExpiry, now), now, max));
+	// ...and a clock near the end of time does not wrap the horizon either.
+	REQUIRE_FALSE(TokenIsFresh(Token("a", max - 1, now), max - 10, 0));
 }
 
 TEST_CASE("token policy: after a 401, a NEWER cached token is reused, not re-minted", "[token]") {

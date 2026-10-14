@@ -229,9 +229,11 @@ it.
 Every refreshable secret (all providers except a bare `ACCESS_TOKEN`) keeps
 working for as long as the process does. A scan or an `ATTACH`ed database that
 outlives its access token (about an hour) gets a fresh one, and a `401` is
-answered with one new token and one retry — one token per credential, however
-many threads are reading. `gdrive_stats()` counts both (`auth_refresh`,
-`token_request`).
+answered with one new token and one retry. Tokens are cached and minted under
+a per-credential lock, so handles and threads share one token rather than each
+minting their own. A refresh that fails (a revoked refresh token) reports the
+error and is not retried against Google's token endpoint for 30 seconds.
+`gdrive_stats()` counts both (`auth_refresh`, `token_request`).
 
 This is the right provider when consent happened on a *different* machine —
 do the browser flow on your laptop, then copy the refresh token to the server.
@@ -515,8 +517,8 @@ Drive enforces per-user API quotas. A query that looks unremarkable against S3
 can hit them, so the extension caches path resolution aggressively and reports
 a quota error explicitly rather than as a generic failure. `SELECT * FROM
 gdrive_stats()` shows the API calls and cache hits for the session, plus
-`auth_refresh` (401s answered by a fresh token) and `token_request` (requests
-to Google's token endpoint).
+`auth_refresh` (401s that triggered a token refresh attempt, at most one per
+call) and `token_request` (token mint attempts, successful or not).
 
 Storage-quota and rate-limit errors are deliberately **different messages**.
 Conflating them is the specific failure this guards against: a service account

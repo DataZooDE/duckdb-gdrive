@@ -38,7 +38,10 @@ public:
 	//! After Drive answered 401 to `rejected`: the newer token another thread
 	//! already obtained, else a freshly minted one -- or the EMPTY string when
 	//! there is nothing to refresh with (a pasted ACCESS_TOKEN alone), in which
-	//! case the 401 stands.
+	//! case the 401 stands. THROWS a DuckDB exception naming the secret when a
+	//! mint is attempted and fails (e.g. a revoked refresh token); that error
+	//! replaces the 401, since it says what to fix. A failed mint is
+	//! remembered for 30 s and rethrown without contacting the token endpoint.
 	virtual std::string Refresh(const std::string &rejected) = 0;
 };
 

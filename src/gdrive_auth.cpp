@@ -81,6 +81,7 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <exception>
 #include <fstream>
 #include <functional>
 #include <memory>
@@ -131,6 +132,21 @@ std::mutex &CacheMutex() {
 std::unordered_map<std::string, CachedTokenState> &TokenCache() {
 	static std::unordered_map<std::string, CachedTokenState> cache;
 	return cache;
+}
+
+//! How long a failed mint is remembered (and rethrown) before the token
+//! endpoint is tried again for that credential. See MintAndStore.
+constexpr int64_t kMintFailureBackoffSeconds = 30;
+
+struct MintFailure {
+	std::exception_ptr error;
+	int64_t until_unix = 0;
+};
+
+//! Guarded by CacheMutex(), like TokenCache().
+std::unordered_map<std::string, MintFailure> &MintFailures() {
+	static std::unordered_map<std::string, MintFailure> failures;
+	return failures;
 }
 
 //! One mint lock per cache key, shared by every source for that credential:
@@ -281,9 +297,8 @@ public:
 			case RejectionAction::GIVE_UP:
 				return std::string();
 			case RejectionAction::MINT:
-				if (has_cached) {
-					cache.erase(it);
-				}
+				// The rejected entry is NOT erased: a successful mint overwrites
+				// it, and a failed one must not turn into "nothing cached".
 				break;
 			}
 		}
@@ -302,9 +317,31 @@ private:
 	}
 
 	//! Caller holds mint_lock.
+	//!
+	//! A failed mint is remembered for kMintFailureBackoffSeconds and rethrown
+	//! to every caller in that window. Without it a revoked credential costs
+	//! one doomed token-endpoint POST per Drive request, on every handle and
+	//! thread -- the 401 path makes a mint attempt on each one.
 	std::string MintAndStore() {
+		{
+			std::lock_guard<std::mutex> guard(CacheMutex());
+			auto it = MintFailures().find(cache_key);
+			if (it != MintFailures().end()) {
+				if (it->second.until_unix > NowUnix()) {
+					std::rethrow_exception(it->second.error);
+				}
+				MintFailures().erase(it);
+			}
+		}
 		IncrementGlobalTokenRequest();
-		CachedTokenState minted = mint();
+		CachedTokenState minted;
+		try {
+			minted = mint();
+		} catch (...) {
+			std::lock_guard<std::mutex> guard(CacheMutex());
+			MintFailures()[cache_key] = MintFailure {std::current_exception(), NowUnix() + kMintFailureBackoffSeconds};
+			throw;
+		}
 		minted.minted_at_unix = NowUnix();
 		std::lock_guard<std::mutex> guard(CacheMutex());
 		TokenCache()[cache_key] = minted;
@@ -704,22 +741,30 @@ GDriveAuthContext BuildContextFromServiceAccount(const KeyValueSecret &kv, const
 	    FingerprintKey(secret_name, "service_account",
 	                   {KeyFileStamp(key_file), scope, GetOrEmpty(kv, "subject")});
 
-	// The key file is read only when a token is actually minted: a cached,
-	// not-about-to-expire token needs no file I/O, no signing, and no network
-	// call at all (REQ-NF-02).
-	MintFn mint = [key_file, scope, secret_name]() {
-		std::string key_json = ReadFileOrThrow(key_file, secret_name);
-		ServiceAccountKeyParse parsed = ParseServiceAccountKey(key_json);
-		key_json.clear(); // never keep the raw key text around longer than needed
+	// The key is read and parsed HERE, at resolution, and the source keeps the
+	// parsed key -- the same policy as credential_chain's captured ADC
+	// document. The cache key and the handle's identity (which keys the path
+	// and block caches) are stamped from this file now; a mint that re-read
+	// the file an hour later could sign as a DIFFERENT principal replaced on
+	// disk meanwhile and file its token, and its bytes, under the old
+	// identity. A rotated key is picked up by the next open, whose new stamp
+	// is a new identity. The cost: the key stays in memory for as long as a
+	// handle holds the source, and every resolution reads the file once (a
+	// local read; a cached token still needs no signing and no network call,
+	// REQ-NF-02).
+	std::string key_json = ReadFileOrThrow(key_file, secret_name);
+	ServiceAccountKeyParse parsed = ParseServiceAccountKey(key_json);
+	key_json.clear(); // the parsed key is what is kept; the raw text is not
 
-		if (!parsed.ok) {
-			// ParseServiceAccountKey guarantees parsed.error never quotes key
-			// material (see its own doc comment and S-1.8's Catch2 coverage).
-			throw InvalidInputException("gdrive secret '%s': invalid service-account key file '%s': %s",
-			                             secret_name.c_str(), key_file.c_str(), parsed.error.c_str());
-		}
+	if (!parsed.ok) {
+		// ParseServiceAccountKey guarantees parsed.error never quotes key
+		// material (see its own doc comment and S-1.8's Catch2 coverage).
+		throw InvalidInputException("gdrive secret '%s': invalid service-account key file '%s': %s",
+		                             secret_name.c_str(), key_file.c_str(), parsed.error.c_str());
+	}
 
-		MintedToken minted = MintServiceAccountToken(parsed.key, scope, /*subject=*/"", NowUnix());
+	MintFn mint = [key = std::move(parsed.key), scope, secret_name]() {
+		MintedToken minted = MintServiceAccountToken(key, scope, /*subject=*/"", NowUnix());
 		if (!minted.ok) {
 			throw IOException("gdrive secret '%s': failed to obtain an access token from Google: %s",
 			                   secret_name.c_str(), minted.error.c_str());
@@ -1050,10 +1095,19 @@ GDriveAuthContext BuildContextFromAuthorizationCode(ClientContext &context, cons
 		    tokens.refresh_token);
 	}
 
+	// Cache under the key the NEXT resolution will compute: it reads the
+	// refresh token just persisted into the secret, not the one (absent or
+	// revoked) this resolution started from. Keyed on the old one, the next
+	// open missed this token and minted again, and the two keys split one
+	// credential into two mint groups.
+	const std::string flow_key =
+	    tokens.refresh_token.empty()
+	        ? cache_key
+	        : FingerprintKey(secret_name, "authorization_code", {client_id, client_secret, scope, tokens.refresh_token});
 	const int64_t expires_at = NowUnix() + (tokens.expires_in > 0 ? tokens.expires_in : 3600);
 	{
 		std::lock_guard<std::mutex> lock(CacheMutex());
-		TokenCache()[cache_key] = CachedTokenState {tokens.access_token, expires_at, NowUnix()};
+		TokenCache()[flow_key] = CachedTokenState {tokens.access_token, expires_at, NowUnix()};
 	}
 	IncrementGlobalTokenRequest();
 
@@ -1063,7 +1117,7 @@ GDriveAuthContext BuildContextFromAuthorizationCode(ClientContext &context, cons
 	if (!tokens.refresh_token.empty()) {
 		mint = RefreshGrantMint(client_id, client_secret, tokens.refresh_token, secret_name);
 	}
-	return make_ctx(std::make_shared<CachedTokenSource>(cache_key, std::move(mint), max_age_seconds));
+	return make_ctx(std::make_shared<CachedTokenSource>(flow_key, std::move(mint), max_age_seconds));
 }
 
 GDriveAuthContext BuildContextFromConfig(const KeyValueSecret &kv, const std::string &secret_name,
@@ -1207,11 +1261,16 @@ GDriveAuthContext GetAuthContext(optional_ptr<FileOpener> opener, const std::str
 	    FingerprintKey(secret_name, base.GetProvider(), IdentityMaterial(base.GetProvider(), fields, identity_source));
 	// Testing aid (gdrive_debug_token_max_age_seconds): trust a token for at
 	// most this long, so expiry under a live handle is exercisable in seconds.
+	// Validated here, where it is used: below 0 is an error, 1..60 is clamped
+	// to 61 (any smaller cap makes every token stale on arrival -- one token
+	// request per Drive request). See NormalizeMaxAgeSeconds.
 	int64_t max_age_seconds = 0;
 	Value max_age;
 	if (FileOpener::TryGetCurrentSetting(opener, "gdrive_debug_token_max_age_seconds", max_age) &&
-	    !max_age.IsNull()) {
-		max_age_seconds = max_age.GetValue<int64_t>();
+	    !max_age.IsNull() && !NormalizeMaxAgeSeconds(max_age.GetValue<int64_t>(), max_age_seconds)) {
+		throw InvalidInputException("gdrive: gdrive_debug_token_max_age_seconds must be 0 (no cap) or positive, "
+		                             "got %lld",
+		                             static_cast<long long>(max_age.GetValue<int64_t>()));
 	}
 	auto with_identity = [&identity](GDriveAuthContext ctx) {
 		ctx.identity = identity;

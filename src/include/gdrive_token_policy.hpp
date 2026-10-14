@@ -40,6 +40,13 @@ struct CachedTokenState {
 //! test hook), by age as well. 0 means Google's own lifetime.
 bool TokenIsFresh(const CachedTokenState &token, int64_t now_unix, int64_t max_age_seconds);
 
+//! Validate the gdrive_debug_token_max_age_seconds setting. False for a
+//! negative value (the caller rejects it). 0 (no cap) and caps above the
+//! refresh slack pass through; 1..kTokenRefreshSlackSeconds are clamped to
+//! kTokenRefreshSlackSeconds + 1, because any smaller cap makes a token stale
+//! the moment it is minted -- one token request per Drive request.
+bool NormalizeMaxAgeSeconds(int64_t requested, int64_t &effective);
+
 enum class RejectionAction {
 	//! Another thread already replaced the rejected token; use that one.
 	REUSE_CACHED,

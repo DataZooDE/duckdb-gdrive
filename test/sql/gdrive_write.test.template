@@ -346,6 +346,12 @@ DETACH remote;
 # read again: the read asks for a token, a new one is minted, the read
 # succeeds. A handle that captured its token at open would mint nothing here
 # -- token_request would stay 0. Same scenario as duckdb-sharepoint's.
+#
+# Mutation check (re-run after a DuckDB bump, since it depends on how DuckDB
+# reads an ATTACHed file): wrap auth_context.tokens in GDriveFileHandleImpl's
+# constructor with a source that returns the token fetched at open, rebuild,
+# and this section must FAIL at the token_request assertion. Verified
+# 2026-10-14 on v1.5.6.
 statement ok
 SET GLOBAL gdrive_debug_token_max_age_seconds = 61;
 

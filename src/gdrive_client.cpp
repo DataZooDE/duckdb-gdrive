@@ -393,7 +393,8 @@ constexpr int kDrivePort = 443;
 
 // Retry policy (requirement 6): bounded, jittered exponential backoff.
 //   - Up to kMaxAttempts total HTTP attempts per logical call (1 initial +
-//     up to kMaxAttempts-1 retries).
+//     up to kMaxAttempts-1 retries), plus at most ONE re-send after a 401
+//     with a refreshed token, which does not count against the budget.
 //   - Base delay kInitialBackoffMs, doubling each attempt, capped at
 //     kMaxBackoffMs.
 //   - +/-25% jitter, so concurrent callers hitting the same transient
@@ -1020,6 +1021,12 @@ private:
 				refreshed = true;
 				if (resend) {
 					access_token = std::move(replacement);
+					// The re-send is not a failed attempt: it does not use up a
+					// transient-retry slot, and kMaxAttempts stays the bound on
+					// retries. A call therefore makes at most kMaxAttempts + 1
+					// HTTP requests, the +1 being this one re-send (each still
+					// counted in its kind counter).
+					attempt--;
 					continue;
 				}
 			}
