@@ -56,6 +56,13 @@ struct DriveCallStats {
 	int64_t cache_hits = 0;
 	int64_t cache_misses = 0;
 	int64_t retries = 0;
+	//! 401s answered by a fresh token and one re-send (at most one per
+	//! request). Counted whether or not a token could be had: a pasted
+	//! ACCESS_TOKEN alone has nothing to refresh with, and its 401 stands.
+	int64_t auth_refresh = 0;
+	//! Requests to a token endpoint. Proves one credential mints ONE token
+	//! however many handles and threads use it.
+	int64_t token_request = 0;
 
 	int64_t Total() const;
 };

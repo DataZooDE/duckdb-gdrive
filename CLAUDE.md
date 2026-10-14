@@ -512,6 +512,23 @@ sweep and any developer running the live suite. It went red in CI on
 2026-08-02 while a local drill happened to be writing scratch folders. Assert
 about the object the test itself created.
 
+**Handles hold a token SOURCE, never a token (2026-10-14).** A handle used
+to capture `access_token` at open, so a scan or an `ATTACH` living past the
+~1 h token lifetime failed mid-way with 401. `GDriveAuthContext::tokens` is now
+a `GDriveTokenSource` (ported from duckdb-sharepoint): every request asks it
+for a token, it re-mints a minute before expiry, and `ExecuteWithRetry`
+answers a 401 with ONE `Refresh(rejected)` and one re-send (safe for POST too:
+a 401 is decided before Drive applies anything). Mints are serialised per
+cache key (`MintLockFor`), and `Refresh` reuses a newer cached token if another
+thread already replaced the rejected one, so N threads mint once. The rules are
+pure (`gdrive_token_policy.cpp`); `auth_refresh` and `token_request` in
+`gdrive_stats()` prove it live. Two testing lessons: (1) a token aged out by
+`gdrive_debug_token_max_age_seconds` is still VALID at Google, so a
+captured-token regression passes any "the read succeeded" check -- assert
+`token_request >= 1` instead (verified: a captured-token handle gives 0); (2)
+the cheapest real 401 is a pasted garbage `ACCESS_TOKEN` beside a valid
+refresh token -- Drive rejects it exactly as it rejects an expired one.
+
 **Releasing:** follow `docs/RELEASE.md`. The community-extensions repo builds
 from a tagged commit and runs none of our live tests, so whatever is broken
 at tag time ships.

@@ -220,8 +220,18 @@ extension names it explicitly rather than failing obscurely.
 ### `config` — a token you already have
 
 For a token obtained elsewhere. `ACCESS_TOKEN` alone is used as-is and never
-refreshed; `REFRESH_TOKEN` with `CLIENT_ID` and `CLIENT_SECRET` is refreshed
-as needed.
+refreshed — once Drive rejects it, every query fails with an authentication
+error until the secret is recreated. `REFRESH_TOKEN` with `CLIENT_ID` and
+`CLIENT_SECRET` is refreshed as needed; given beside an `ACCESS_TOKEN`, the
+pasted token is used first and the refresh token takes over when Drive rejects
+it.
+
+Every refreshable secret (all providers except a bare `ACCESS_TOKEN`) keeps
+working for as long as the process does. A scan or an `ATTACH`ed database that
+outlives its access token (about an hour) gets a fresh one, and a `401` is
+answered with one new token and one retry — one token per credential, however
+many threads are reading. `gdrive_stats()` counts both (`auth_refresh`,
+`token_request`).
 
 This is the right provider when consent happened on a *different* machine —
 do the browser flow on your laptop, then copy the refresh token to the server.
@@ -504,7 +514,9 @@ than whole files.
 Drive enforces per-user API quotas. A query that looks unremarkable against S3
 can hit them, so the extension caches path resolution aggressively and reports
 a quota error explicitly rather than as a generic failure. `SELECT * FROM
-gdrive_stats()` shows the API calls and cache hits for the session.
+gdrive_stats()` shows the API calls and cache hits for the session, plus
+`auth_refresh` (401s answered by a fresh token) and `token_request` (requests
+to Google's token endpoint).
 
 Storage-quota and rate-limit errors are deliberately **different messages**.
 Conflating them is the specific failure this guards against: a service account
@@ -532,6 +544,7 @@ and nothing registered that is not here.
 | `gdrive_block_size_bytes` | 16 MiB | Read granularity. Drive charges ~1.3 s per ranged request regardless of size, so larger blocks mean fewer, faster requests — but a `count(*)` over a Parquet footer then pays for a whole block it does not need. 16 MiB is the compromise; see `docs/benchmark.md` for the sweep. |
 | `gdrive_block_cache_bytes` | 256 MiB | Total cap on the shared block cache, across all files and handles. Blocks are keyed by identity + file id + revision, so a file changing on Drive cannot be served stale. |
 | `gdrive_immutable_prefixes` | *(empty)* | Comma-separated `gdrive://` prefixes whose files are **never overwritten in place** — typically a DuckLake/Iceberg `DATA_PATH`. Skips the per-open metadata refresh (~270 ms per file per query) for them. Matching is on whole path segments, so `gdrive://lake` does not cover `gdrive://lakehouse`. **Declaring a prefix whose files change causes stale reads that nothing can detect.** The promise you are making is stronger than "not overwritten": files under it must not be modified, replaced, *or* deleted-and-recreated at the same path while the process runs — Drive keeps a file's id across an overwrite, returns no ETag, and ignores `If-Match`. Leave empty unless you know the files are immutable. |
+| `gdrive_debug_token_max_age_seconds` | 0 | **Testing only.** Treats access tokens as expiring after at most this many seconds, so a handle outliving its token can be exercised in a test instead of after an hour. `0` uses the token's real lifetime. |
 | `gdrive_path_cache_entries` | 4096 | Cap on cached `path -> file id` mappings, LRU. `0` is unbounded. Drive has no path addressing, so each dropped mapping costs one `files.list` per segment to rebuild — cheap, which is why this cache may be evicted and the block cache is bounded separately. |
 
 ```sql

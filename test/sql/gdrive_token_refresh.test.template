@@ -1,0 +1,151 @@
+# name: test/sql/gdrive_token_refresh.test.template
+# description: a 401 is answered by ONE fresh token and one re-send, so a
+#              handle survives its token; with nothing to refresh with, the
+#              401 is a clean authentication error, not a loop
+# group: [live]
+#
+# Handles hold a token SOURCE, not a token (see GDriveTokenSource in
+# src/include/gdrive_auth.hpp). The proof below uses a PASTED garbage
+# ACCESS_TOKEN: Drive answers it with a real 401 -- exactly what an expired or
+# revoked token gets -- so the refresh path runs against the live API without
+# waiting an hour for a token to expire.
+#
+# Its OWN file, like gdrive_stats.test: the token cache and the counters are
+# process-wide, and scripts/run_live_tests.sh gives each file a fresh process,
+# so the token_request counts below start cold.
+
+require gdrive
+
+require-env GDRIVE_CI_DRIVE_ID
+
+require-env GDRIVE_OAUTH_CLIENT_ID
+
+require-env GDRIVE_OAUTH_CLIENT_SECRET
+
+require-env GDRIVE_USER_REFRESH_TOKEN
+
+# ---------------------------------------------------------------------------
+# 1. A pasted token Drive rejects, with a refresh token beside it. The pasted
+#    token is used first (it is what the user asked for); the 401 is answered
+#    by minting from the refresh token, ONCE, and the request re-sent.
+# ---------------------------------------------------------------------------
+statement ok
+CREATE SECRET gd_refreshable (
+    TYPE gdrive,
+    PROVIDER config,
+    ACCESS_TOKEN 'garbage-token-refreshable',
+    CLIENT_ID '${OAUTH_CLIENT_ID}',
+    CLIENT_SECRET '${OAUTH_CLIENT_SECRET}',
+    REFRESH_TOKEN '${USER_REFRESH_TOKEN}',
+    ROOT_FOLDER_ID '${DRIVE_ID}',
+    DRIVE_SCOPE 'https://www.googleapis.com/auth/drive'
+);
+
+statement ok
+CALL gdrive_reset_stats();
+
+query III
+SELECT id, name, amount FROM read_csv('gdrive://fixtures/small.csv') ORDER BY id
+----
+1	row-1	100
+2	row-2	200
+3	row-3	300
+4	row-4	400
+5	row-5	500
+
+# Exactly one 401 answered, and one token minted. Every later request -- the
+# rest of the path walk, the open, the read -- found the fresh token in the
+# shared cache rather than starting from the rejected one again.
+query II
+SELECT (SELECT value FROM gdrive_stats() WHERE metric = 'auth_refresh'),
+       (SELECT value FROM gdrive_stats() WHERE metric = 'token_request');
+----
+1	1
+
+# A second query costs neither.
+statement ok
+CALL gdrive_reset_stats();
+
+query I
+SELECT count(*) FROM read_csv('gdrive://fixtures/with space.csv')
+----
+5
+
+query II
+SELECT (SELECT value FROM gdrive_stats() WHERE metric = 'auth_refresh'),
+       (SELECT value FROM gdrive_stats() WHERE metric = 'token_request');
+----
+0	0
+
+statement ok
+DROP SECRET gd_refreshable;
+
+# ---------------------------------------------------------------------------
+# 2. Sixteen threads, one credential: ONE token request. A 150-file glob opens
+#    a handle per file across 16 threads; none of them mints its own token.
+# ---------------------------------------------------------------------------
+statement ok
+CREATE SECRET gd_threads (
+    TYPE gdrive,
+    PROVIDER config,
+    ACCESS_TOKEN 'garbage-token-threads',
+    CLIENT_ID '${OAUTH_CLIENT_ID}',
+    CLIENT_SECRET '${OAUTH_CLIENT_SECRET}',
+    REFRESH_TOKEN '${USER_REFRESH_TOKEN}',
+    ROOT_FOLDER_ID '${DRIVE_ID}',
+    DRIVE_SCOPE 'https://www.googleapis.com/auth/drive'
+);
+
+statement ok
+SET threads = 16;
+
+statement ok
+CALL gdrive_reset_stats();
+
+query I
+SELECT count(*) FROM read_csv('gdrive://fixtures/many/*.csv')
+----
+150
+
+query II
+SELECT (SELECT value >= 1 FROM gdrive_stats() WHERE metric = 'auth_refresh'),
+       (SELECT value FROM gdrive_stats() WHERE metric = 'token_request');
+----
+true	1
+
+statement ok
+RESET threads;
+
+statement ok
+DROP SECRET gd_threads;
+
+# ---------------------------------------------------------------------------
+# 3. A pasted token alone has nothing to refresh with. The 401 is counted,
+#    NOT re-sent, and surfaces as an authentication error -- no loop, no
+#    token request, and no token text in the message.
+# ---------------------------------------------------------------------------
+statement ok
+CREATE SECRET gd_bogus (
+    TYPE gdrive,
+    PROVIDER config,
+    ACCESS_TOKEN 'garbage-token-only',
+    ROOT_FOLDER_ID '${DRIVE_ID}'
+);
+
+statement ok
+CALL gdrive_reset_stats();
+
+statement error
+SELECT * FROM read_csv('gdrive://fixtures/small.csv');
+----
+authentication failed
+
+query III
+SELECT (SELECT value FROM gdrive_stats() WHERE metric = 'auth_refresh'),
+       (SELECT value FROM gdrive_stats() WHERE metric = 'token_request'),
+       (SELECT value FROM gdrive_stats() WHERE metric = 'files_list');
+----
+1	0	1
+
+statement ok
+DROP SECRET gd_bogus;

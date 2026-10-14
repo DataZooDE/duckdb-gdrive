@@ -340,6 +340,61 @@ SELECT count(*), sum(i) FROM remote.t;
 statement ok
 DETACH remote;
 
+# A handle outlives its token. Handles hold a token SOURCE, not a token, and
+# the source re-mints before expiry. Cap the token lifetime at 61 s (stale
+# after 1 s, given the 60 s refresh margin), keep the ATTACH open past it, and
+# read again: the read asks for a token, a new one is minted, the read
+# succeeds. A handle that captured its token at open would mint nothing here
+# -- token_request would stay 0. Same scenario as duckdb-sharepoint's.
+statement ok
+SET GLOBAL gdrive_debug_token_max_age_seconds = 61;
+
+# A fresh copy, with the block cache off: the reads of db.duckdb above are
+# cached -- by our block cache and by DuckDB itself -- and would be served
+# without any request, so without ever needing a token. Session AND global:
+# the ATTACH opens with a database-level opener that sees only the global.
+statement ok
+SELECT write_blob('gdrive://scratch/${SCRATCH}/attach/db2.duckdb', content) FROM read_blob('__TEST_DIR__/gd_attach.duckdb');
+
+statement ok
+SET gdrive_block_size_bytes = 0;
+
+statement ok
+SET GLOBAL gdrive_block_size_bytes = 0;
+
+statement ok
+ATTACH 'gdrive://scratch/${SCRATCH}/attach/db2.duckdb' AS remote (READ_ONLY);
+
+statement ok
+CALL gdrive_reset_stats();
+
+# ATTACH read only the header and catalog; the column data is first read after
+# the token went stale.
+sleep 3 seconds
+
+query I
+SELECT sum(i) FROM remote.t;
+----
+4999950000
+
+query II
+SELECT (SELECT value >= 1 FROM gdrive_stats() WHERE metric = 'token_request'),
+       (SELECT value >= 1 FROM gdrive_stats() WHERE metric = 'files_media');
+----
+true	true
+
+statement ok
+DETACH remote;
+
+statement ok
+RESET GLOBAL gdrive_debug_token_max_age_seconds;
+
+statement ok
+RESET GLOBAL gdrive_block_size_bytes;
+
+statement ok
+RESET gdrive_block_size_bytes;
+
 # Cross-check against duckdb-sharepoint (same scenario script, both backends):
 # file_size of a FOLDER is an error, not 0, and {a,b} alternation whose
 # expansions are plain literal names finds them (it found nothing: a literal

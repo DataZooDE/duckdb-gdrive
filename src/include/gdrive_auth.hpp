@@ -1,6 +1,7 @@
 #pragma once
 
 #include "duckdb/common/optional_ptr.hpp"
+#include <memory>
 #include <string>
 
 namespace duckdb {
@@ -20,10 +21,32 @@ namespace gdrive {
 // the way out, where the refresh token is persisted -- is Wave 1's business.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Where a bearer token comes from. A file handle can outlive the token it was
+// opened with -- a long scan, an ATTACHed database kept open for hours -- so
+// handles hold a SOURCE, not a token: every request asks it for a token that
+// is valid now, and it re-mints shortly before expiry. The rules it follows
+// are pure and unit-tested (gdrive_token_policy.hpp).
+// ---------------------------------------------------------------------------
+class GDriveTokenSource {
+public:
+	virtual ~GDriveTokenSource() = default;
+	//! A token valid for at least the next minute, served from the process-wide
+	//! token cache and minted when absent or about to expire. May throw (a
+	//! DuckDB exception naming the secret) when minting fails.
+	virtual std::string Token() = 0;
+	//! After Drive answered 401 to `rejected`: the newer token another thread
+	//! already obtained, else a freshly minted one -- or the EMPTY string when
+	//! there is nothing to refresh with (a pasted ACCESS_TOKEN alone), in which
+	//! case the 401 stands.
+	virtual std::string Refresh(const std::string &rejected) = 0;
+};
+
 //! What the filesystem needs out of a resolved gdrive secret.
 struct GDriveAuthContext {
-	//! Bearer token, already refreshed if it had expired.
-	std::string access_token;
+	//! Supplies `Authorization: Bearer <token>` for each request. Shared by
+	//! every client built from this context, and by the handle that keeps it.
+	std::shared_ptr<GDriveTokenSource> tokens;
 	//! Optional Shared Drive binding. When set, paths resolve relative to
 	//! this drive rather than the account root, and every API call is scoped
 	//! to it (HLD section 4, mitigation 3).
@@ -59,8 +82,9 @@ struct GDriveAuthContext {
 	std::string quota_project_id;
 };
 
-//! Resolve a secret to a usable token, refreshing transparently when expired
-//! and writing new tokens back into the secret.
+//! Resolve a secret to a token source, obtaining a first token eagerly (so a
+//! bad credential fails here, naming the secret, rather than on a later read)
+//! and writing new tokens back into the secret where the provider does.
 //!
 //! `path` is the gdrive:// path being accessed; DuckDB's secret manager
 //! matches secrets by scope prefix, so the path selects among several
