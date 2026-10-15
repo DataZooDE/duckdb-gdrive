@@ -188,6 +188,33 @@ AdcParse ParseAdcJson(const std::string &json_text) {
 			return result;
 		}
 
+		// The file is sent as the subject token byte for byte, which is right
+		// only for format "text" (the default). With "json" the token sits in
+		// a field of an object, and sending the object would fail at STS as an
+		// opaque 400 -- so refuse it here, by name.
+		auto format = src.find("format");
+		if (format != src.end()) {
+			std::string format_type;
+			bool well_formed = format->second.is<picojson::object>();
+			if (well_formed) {
+				const auto &fmt = format->second.get<picojson::object>();
+				auto type_it = fmt.find("type");
+				if (type_it != fmt.end()) {
+					well_formed = type_it->second.is<std::string>();
+					if (well_formed) {
+						format_type = type_it->second.get<std::string>();
+					}
+				}
+			}
+			if (!well_formed || (!format_type.empty() && format_type != "text")) {
+				result.error = "this \"external_account\" document's \"credential_source\".\"format\" is "
+				               "not supported. Only \"type\": \"text\" (the default: the file holds the bare "
+				               "token) is; a \"json\" format, with the token in "
+				               "\"subject_token_field_name\", is not.";
+				return result;
+			}
+		}
+
 		// Every remaining field is needed to perform the exchange, so a
 		// missing one is named here rather than at token time -- the failure
 		// would otherwise surface as an opaque STS 400.

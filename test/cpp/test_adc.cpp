@@ -181,6 +181,62 @@ TEST_CASE("an executable-sourced external_account is refused, and the refusal sa
 	REQUIRE(parsed.error.find("executable") != std::string::npos);
 }
 
+TEST_CASE("a json-format subject token file is refused by name, up front", "[adc]") {
+	// With format.type "json" the file holds a JSON object and the token sits
+	// in subject_token_field_name. The exchange sends the file's bytes as the
+	// subject token, so accepting this config would post the whole object to
+	// STS and fail there as an opaque 400. Refuse it at parse time, naming the
+	// field, the way url- and executable-sourced tokens are refused.
+	const std::string json = R"({
+	  "type": "external_account",
+	  "audience": "//iam.googleapis.com/x",
+	  "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+	  "token_url": "https://sts.googleapis.com/v1/token",
+	  "credential_source": {
+	    "file": "/var/run/secrets/gcp/token.json",
+	    "format": { "type": "json", "subject_token_field_name": "id_token" }
+	  }
+	})";
+
+	auto parsed = ParseAdcJson(json);
+	REQUIRE_FALSE(parsed.ok);
+	REQUIRE(parsed.kind == AdcKind::EXTERNAL_ACCOUNT);
+	REQUIRE(parsed.error.find("format") != std::string::npos);
+	REQUIRE(parsed.error.find("json") != std::string::npos);
+	REQUIRE(parsed.error.find("text") != std::string::npos);
+}
+
+TEST_CASE("an unknown or malformed subject token format is refused", "[adc]") {
+	const std::string head = R"({
+	  "type": "external_account",
+	  "audience": "//iam.googleapis.com/x",
+	  "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+	  "token_url": "https://sts.googleapis.com/v1/token",
+	  "credential_source": { "file": "/t", "format": )";
+	for (const std::string format : {R"({ "type": "yaml" })", R"("text")", R"({ "type": 1 })"}) {
+		auto parsed = ParseAdcJson(head + format + " } }");
+		INFO(format);
+		REQUIRE_FALSE(parsed.ok);
+		REQUIRE(parsed.error.find("format") != std::string::npos);
+	}
+}
+
+TEST_CASE("a text-format or format-less subject token file parses", "[adc]") {
+	const std::string head = R"({
+	  "type": "external_account",
+	  "audience": "//iam.googleapis.com/x",
+	  "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+	  "token_url": "https://sts.googleapis.com/v1/token",
+	  "credential_source": { "file": "/t")";
+	for (const std::string tail : {std::string(" } }"), std::string(R"(, "format": { "type": "text" } } })"),
+	                               std::string(R"(, "format": {} } })")}) {
+		auto parsed = ParseAdcJson(head + tail);
+		INFO(tail);
+		REQUIRE(parsed.ok);
+		REQUIRE(parsed.external_account.subject_token_path == "/t");
+	}
+}
+
 TEST_CASE("an external_account without an impersonation url still parses", "[adc]") {
 	// The README says a missing service_account_impersonation_url fails at
 	// MINT time with its own message (ExchangeExternalAccountToken), not at
