@@ -177,14 +177,14 @@ AdcParse ParseAdcJson(const std::string &json_text) {
 		const auto &src = source->second.get<picojson::object>();
 		result.external_account.subject_token_path = FindString(src, "file");
 		if (result.external_account.subject_token_path.empty()) {
-			// `url`-sourced tokens (AWS/Azure/GCE metadata) are a different
-			// exchange with a different failure surface. Refusing by name
-			// beats accepting a config with an empty path, which would fail
-			// later as "cannot open \"\"".
+			// `url`-sourced tokens (AWS/Azure/GCE metadata) and `executable`
+			// sources are a different exchange with a different failure
+			// surface. Refusing by name beats accepting a config with an empty
+			// path, which would fail later as "cannot open \"\"".
 			result.error =
 			    "this \"external_account\" document has no \"credential_source\".\"file\". Only a "
 			    "file-sourced subject token is supported (a projected Kubernetes token, for "
-			    "example); url-sourced tokens are not.";
+			    "example); url-, AWS- and executable-sourced tokens are not.";
 			return result;
 		}
 

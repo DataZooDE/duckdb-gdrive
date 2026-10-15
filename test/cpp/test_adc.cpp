@@ -159,6 +159,45 @@ TEST_CASE("an external_account without a file credential_source is refused by na
 	REQUIRE(parsed.error.find("credential_source") != std::string::npos);
 }
 
+TEST_CASE("an executable-sourced external_account is refused, and the refusal says so", "[adc]") {
+	// The README lists exactly which credential_source kinds work. An
+	// `executable` source (a command that prints the subject token) carries no
+	// "file", so it lands in the same refusal as `url` -- and that refusal
+	// must not tell the reader only about url-sourced tokens when the thing
+	// they wrote was an executable.
+	const std::string json = R"({
+	  "type": "external_account",
+	  "audience": "//iam.googleapis.com/x",
+	  "subject_token_type": "urn:ietf:params:oauth:token-type:id_token",
+	  "token_url": "https://sts.googleapis.com/v1/token",
+	  "service_account_impersonation_url": "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/sa@p.iam.gserviceaccount.com:generateAccessToken",
+	  "credential_source": { "executable": { "command": "/usr/bin/print-token", "timeout_millis": 5000 } }
+	})";
+
+	auto parsed = ParseAdcJson(json);
+	REQUIRE_FALSE(parsed.ok);
+	REQUIRE(parsed.kind == AdcKind::EXTERNAL_ACCOUNT);
+	REQUIRE(parsed.error.find("credential_source") != std::string::npos);
+	REQUIRE(parsed.error.find("executable") != std::string::npos);
+}
+
+TEST_CASE("an external_account without an impersonation url still parses", "[adc]") {
+	// The README says a missing service_account_impersonation_url fails at
+	// MINT time with its own message (ExchangeExternalAccountToken), not at
+	// parse time. Pin that, so the two cannot drift apart.
+	const std::string json = R"({
+	  "type": "external_account",
+	  "audience": "//iam.googleapis.com/x",
+	  "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+	  "token_url": "https://sts.googleapis.com/v1/token",
+	  "credential_source": { "file": "/var/run/secrets/gcp/token" }
+	})";
+
+	auto parsed = ParseAdcJson(json);
+	REQUIRE(parsed.ok);
+	REQUIRE(parsed.external_account.service_account_impersonation_url.empty());
+}
+
 TEST_CASE("a non-JSON document is rejected without echoing its content", "[adc]") {
 	auto parsed = ParseAdcJson("this is not json, and here is a secret: hunter2");
 	REQUIRE_FALSE(parsed.ok);
