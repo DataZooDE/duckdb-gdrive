@@ -251,7 +251,8 @@ What is supported, exactly:
   projected Kubernetes service-account token. The file is re-read on every
   mint, so the platform's hourly rotation is picked up. It must hold the bare
   token (`format.type` `text`, the default); trailing newlines are trimmed.
-  A `format.type` of `json` is not supported — the file would be sent as-is.
+  A `format.type` of `json` (token in `subject_token_field_name`) is not
+  supported and is refused, naming `format`, before any request is made.
 - **`url`-sourced tokens (Azure, GCE/OIDC metadata), AWS-sourced tokens and
   `executable`-sourced tokens are not supported.** A configuration without
   `credential_source.file` is refused when the secret is first used, with a
