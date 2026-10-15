@@ -21,6 +21,39 @@
 namespace duckdb {
 namespace gdrive {
 
+namespace {
+
+//! The destination folder of `path`: everything before its last segment, or
+//! empty when the path has no folder part beyond the scheme.
+std::string ParentPathOf(const std::string &path) {
+	auto slash = path.find_last_of('/');
+	if (slash == std::string::npos || slash < std::string(GDRIVE_SCHEME).size()) {
+		return std::string();
+	}
+	return path.substr(0, slash);
+}
+
+//! Throw for a failed upload call. A 404 that names the PARENT folder id --
+//! which is what Drive answers when the destination folder is deleted while
+//! a streaming upload is in flight -- is reported as the folder going away,
+//! not as "no such file: <target>", which names the wrong thing. Matching on
+//! the id rather than on any 404 keeps an expired upload session (also a 404)
+//! reported as what it is. Same exception class as ThrowGDriveError.
+[[noreturn]] void ThrowUploadError(const GDriveError &error, const GDriveFileHandleImpl &handle) {
+	if (error.kind == GDriveErrorKind::NOT_FOUND && !handle.write_parent_id.empty() &&
+	    error.message.find(handle.write_parent_id) != std::string::npos) {
+		const std::string folder = ParentPathOf(handle.path);
+		const std::string folder_desc = folder.empty() ? std::string() : "'" + folder + "' ";
+		throw IOException("gdrive: cannot write '%s': the destination folder %sno longer exists (folder id %s; "
+		                  "it was deleted or moved during the upload). Nothing was written: the file was "
+		                  "never published.",
+		                  handle.path, folder_desc, handle.write_parent_id);
+	}
+	ThrowGDriveError(error, handle.path);
+}
+
+} // namespace
+
 void SendUploadChunk(GDriveFileHandleImpl &handle) {
 	auto client = CreateGDriveClient(handle.auth_context);
 	if (handle.upload_session.empty()) {
@@ -30,13 +63,13 @@ void SendUploadChunk(GDriveFileHandleImpl &handle) {
 		auto start = client->StartResumableUpload(handle.meta.id, handle.write_parent_id, handle.write_name,
 		                                          "application/octet-stream");
 		if (!start.ok) {
-			ThrowGDriveError(start.error, handle.path);
+			ThrowUploadError(start.error, handle);
 		}
 		handle.upload_session = start.location;
 	}
 	auto resp = client->UploadChunk(handle.upload_session, *handle.upload, /*final=*/false);
 	if (!resp.ok) {
-		ThrowGDriveError(resp.error, handle.path);
+		ThrowUploadError(resp.error, handle);
 	}
 	handle.upload->MarkChunkSent();
 }
@@ -70,7 +103,7 @@ void UploadHandleContents(GDriveClient &client, GDriveFileHandleImpl &handle) {
 		// UploadChunk by asking the session, which then answers 200 + file.
 		resp = client.UploadChunk(handle.upload_session, buf, /*final=*/true);
 		if (!resp.ok) {
-			ThrowGDriveError(resp.error, handle.path);
+			ThrowUploadError(resp.error, handle);
 		}
 		handle.upload_session.clear(); // consumed: nothing left to cancel
 	} else {
@@ -94,7 +127,7 @@ void UploadHandleContents(GDriveClient &client, GDriveFileHandleImpl &handle) {
 		resp = client.Upload(handle.meta.id, handle.write_parent_id, handle.write_name, "application/octet-stream",
 		                     buf.Pending(), reserved_id);
 		if (!resp.ok) {
-			ThrowGDriveError(resp.error, handle.path);
+			ThrowUploadError(resp.error, handle);
 		}
 	}
 
