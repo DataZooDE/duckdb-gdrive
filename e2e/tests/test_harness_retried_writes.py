@@ -105,3 +105,71 @@ def test_drive_refuses_a_reserved_id_for_a_native_conversion(writer, scratch):
                            params={"uploadType": "multipart"}, files=files)
     assert resp.status_code == 403, resp.text[:300]
     assert "generatedIdNotSupported" in resp.text
+
+
+#: Verbatim from the CI live job of 2026-10-16 (run 38860205538): Drive
+#: throttles with a 403 whose reason says so, not with a 429.
+_RATE_LIMITED_403 = b"""{
+  "error": {
+    "code": 403,
+    "message": "User rate limit exceeded.",
+    "errors": [
+      {
+        "message": "User rate limit exceeded.",
+        "domain": "usageLimits",
+        "reason": "userRateLimitExceeded"
+      }
+    ]
+  }
+}"""
+
+
+def test_a_rate_limited_create_is_retried(writer, scratch, monkeypatch):
+    """Drive's rate-limit 403 rejected the request, so a retry is safe.
+
+    The extension classifies it as RATE_LIMIT and backs off
+    (ClassifyFromReason in src/gdrive_errors.cpp); the harness must too.
+    """
+    real = requests.request
+    throttled: list[str] = []
+
+    def throttle_first_post(m, url, **kw):
+        if m.upper() == "POST" and not throttled:
+            throttled.append(url)  # never sent: Drive refused it
+            resp = requests.models.Response()
+            resp.status_code = 403
+            resp._content = _RATE_LIMITED_403
+            resp.headers["Content-Type"] = "application/json; charset=UTF-8"
+            resp.url = url
+            return resp
+        return real(m, url, **kw)
+
+    monkeypatch.setattr(drive_mod.requests, "request", throttle_first_post)
+    folder_id = writer.create_folder("throttled-folder", scratch)
+
+    assert throttled, "the throttle was never injected -- the test proves nothing"
+    monkeypatch.undo()
+    named = _named(writer, scratch, "throttled-folder")
+    assert [c["id"] for c in named] == [folder_id]
+
+
+def test_a_permission_403_is_not_retried(writer, scratch, monkeypatch):
+    """Only the rate-limit reasons are retried; any other 403 fails at once."""
+    real = requests.request
+    refused: list[str] = []
+
+    def refuse_posts(m, url, **kw):
+        if m.upper() == "POST":
+            refused.append(url)
+            resp = requests.models.Response()
+            resp.status_code = 403
+            resp._content = _RATE_LIMITED_403.replace(b"userRateLimitExceeded",
+                                                      b"insufficientFilePermissions")
+            resp.url = url
+            return resp
+        return real(m, url, **kw)
+
+    monkeypatch.setattr(drive_mod.requests, "request", refuse_posts)
+    with pytest.raises(RuntimeError, match="403"):
+        writer.create_folder("nope", scratch)
+    assert len(refused) == 1, f"a permission 403 was retried {len(refused) - 1} time(s)"

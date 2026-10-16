@@ -262,35 +262,68 @@ class Drive:
         #   * `replay_safe=True` -- a create carrying an id reserved with
         #     files.generateIds (see _create). A replay of one that landed gets
         #     409 instead of a duplicate, so it is retried like a GET.
+        #   * 403 with reason rateLimitExceeded / userRateLimitExceeded --
+        #     Drive's usual throttle, retried for ANY method like 429. The
+        #     extension classifies it the same way (ClassifyFromReason in
+        #     src/gdrive_errors.cpp); a CI run hit it on 2026-10-16.
         #
-        # The response carries `retried`: whether an earlier attempt was sent.
-        # Only then can a 409 mean "my own earlier attempt landed".
+        # The response carries `may_have_landed`: whether an earlier attempt
+        # ended ambiguously (transport error or 5xx) and so may have been
+        # applied. Only then can a 409 mean "my own earlier attempt landed";
+        # a throttled attempt was refused and created nothing.
         replay_safe = kw.pop("replay_safe", False)
         idempotent = replay_safe or method.upper() in ("GET", "DELETE", "HEAD")
-        attempts = 4
+        attempts = 6
         last_exc = None
+        may_have_landed = False
         for attempt in range(attempts):
             if attempt:
-                # 0.5s, 1s, 2s. Jitter is unnecessary here -- one client.
-                time.sleep(0.5 * (2 ** (attempt - 1)))
+                # 0.5s doubling to 8s (15.5s in all), or Retry-After when
+                # Drive sends one. Jitter is unnecessary here -- one client.
+                time.sleep(retry_after or 0.5 * (2 ** (attempt - 1)))
+            retry_after = 0
+            last = attempt == attempts - 1
             try:
                 resp = requests.request(method, url, headers=headers, params=params,
                                         timeout=timeout, **kw)
             except requests.exceptions.RequestException as e:
                 last_exc = e
-                if idempotent and attempt < attempts - 1:
+                if idempotent and not last:
+                    may_have_landed = True
                     self.calls[kind] = self.calls.get(kind, 0) + 1
                     continue
                 raise
-            if resp.status_code in (429, 503) and attempt < attempts - 1:
+            if (resp.status_code in (429, 503) or self._rate_limited(resp)) and not last:
+                retry_after = self._retry_after_seconds(resp)
                 self.calls[kind] = self.calls.get(kind, 0) + 1
                 continue
-            if resp.status_code >= 500 and idempotent and attempt < attempts - 1:
+            if resp.status_code >= 500 and idempotent and not last:
+                may_have_landed = True
                 self.calls[kind] = self.calls.get(kind, 0) + 1
                 continue
-            setattr(resp, "retried", attempt > 0)
+            setattr(resp, "may_have_landed", may_have_landed)
             return resp
         raise last_exc if last_exc else RuntimeError("unreachable")
+
+    @staticmethod
+    def _rate_limited(resp: requests.Response) -> bool:
+        """Drive's throttle: a 403 whose reason says rate limit."""
+        if resp.status_code != 403:
+            return False
+        try:
+            errors = resp.json().get("error", {}).get("errors", [])
+        except ValueError:
+            return False
+        return any(e.get("reason") in ("rateLimitExceeded", "userRateLimitExceeded")
+                   for e in errors if isinstance(e, dict))
+
+    @staticmethod
+    def _retry_after_seconds(resp: requests.Response) -> float:
+        """Retry-After in seconds, capped at 30; 0 when absent or not a number."""
+        try:
+            return min(30.0, max(0.0, float(resp.headers.get("Retry-After", 0))))
+        except ValueError:
+            return 0.0
 
     @staticmethod
     def _transfer_timeout(nbytes: int) -> int:
@@ -428,11 +461,12 @@ class Drive:
         that landed (only its response was lost) gets 409 "A file already
         exists with the provided ID" instead of a second same-named file --
         the extension's own remedy (src/gdrive_client.cpp). A 409 counts as
-        success only after an earlier attempt was sent; on a first attempt it
-        means the id belongs to someone else, and stays an error.
+        success only after an earlier attempt ended ambiguously (it may have
+        been applied); otherwise the id belongs to someone else, and the 409
+        stays an error.
         """
         resp = self._request("POST", url, kind, replay_safe=True, **kw)
-        if resp.status_code == 409 and getattr(resp, "retried", False):
+        if resp.status_code == 409 and getattr(resp, "may_have_landed", False):
             return self.get_metadata(file_id)["id"]
         return self._ok(resp, what)["id"]
 
