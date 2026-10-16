@@ -259,7 +259,14 @@ class Drive:
         #     only the response lost, so replaying a POST can create a second
         #     file. Drive lets two files share a name, which makes such a
         #     duplicate genuinely hard to clean up.
-        idempotent = method.upper() in ("GET", "DELETE", "HEAD")
+        #   * `replay_safe=True` -- a create carrying an id reserved with
+        #     files.generateIds (see _create). A replay of one that landed gets
+        #     409 instead of a duplicate, so it is retried like a GET.
+        #
+        # The response carries `retried`: whether an earlier attempt was sent.
+        # Only then can a 409 mean "my own earlier attempt landed".
+        replay_safe = kw.pop("replay_safe", False)
+        idempotent = replay_safe or method.upper() in ("GET", "DELETE", "HEAD")
         attempts = 4
         last_exc = None
         for attempt in range(attempts):
@@ -281,6 +288,7 @@ class Drive:
             if resp.status_code >= 500 and idempotent and attempt < attempts - 1:
                 self.calls[kind] = self.calls.get(kind, 0) + 1
                 continue
+            setattr(resp, "retried", attempt > 0)
             return resp
         raise last_exc if last_exc else RuntimeError("unreachable")
 
@@ -407,29 +415,50 @@ class Drive:
 
     # -- writes ------------------------------------------------------------
 
+    def reserve_id(self) -> str:
+        """A fresh file id from files.generateIds, for an idempotent create."""
+        resp = self._request("GET", f"{DRIVE_V3}/files/generateIds", "generateIds",
+                             params={"count": 1, "space": "drive"})
+        return self._ok(resp, "generateIds")["ids"][0]
+
+    def _create(self, url: str, kind: str, what: str, file_id: str, **kw) -> str:
+        """POST a create that carries the reserved `file_id`, retrying freely.
+
+        The reserved id is what makes the retry safe: a replay of an attempt
+        that landed (only its response was lost) gets 409 "A file already
+        exists with the provided ID" instead of a second same-named file --
+        the extension's own remedy (src/gdrive_client.cpp). A 409 counts as
+        success only after an earlier attempt was sent; on a first attempt it
+        means the id belongs to someone else, and stays an error.
+        """
+        resp = self._request("POST", url, kind, replay_safe=True, **kw)
+        if resp.status_code == 409 and getattr(resp, "retried", False):
+            return self.get_metadata(file_id)["id"]
+        return self._ok(resp, what)["id"]
+
     def create_folder(self, name: str, parent_id: str | None = None) -> str:
+        file_id = self.reserve_id()
         body = {
+            "id": file_id,
             "name": name,
             "mimeType": FOLDER_MIME,
             "parents": [parent_id or self.drive_id],
         }
-        return self._ok(
-            self._request("POST", f"{DRIVE_V3}/files", "files.create", json=body),
-            "create_folder",
-        )["id"]
+        return self._create(f"{DRIVE_V3}/files", "files.create", "create_folder", file_id, json=body)
 
-    def upload(self, name: str, content: bytes, parent_id: str, mime: str = "application/octet-stream") -> str:
-        meta = {"name": name, "parents": [parent_id]}
+    def upload(self, name: str, content: bytes, parent_id: str, mime: str = "application/octet-stream",
+               file_id: str | None = None) -> str:
+        file_id = file_id or self.reserve_id()
+        meta = {"id": file_id, "name": name, "parents": [parent_id]}
         files = {
             "metadata": ("metadata.json", json.dumps(meta), "application/json"),
             "file": (name, content, mime),
         }
-        resp = self._request(
-            "POST", f"{UPLOAD_V3}/files", "files.create.upload",
+        return self._create(
+            f"{UPLOAD_V3}/files", "files.create.upload", "upload", file_id,
             params={"uploadType": "multipart"}, files=files,
             timeout=self._transfer_timeout(len(content)),
         )
-        return self._ok(resp, "upload")["id"]
 
     def update_content(self, file_id: str, content: bytes,
                        mime: str = "application/octet-stream") -> str:
@@ -477,6 +506,10 @@ class Drive:
                 "add it to Drive._NATIVE_SOURCE_MIME rather than guessing -- "
                 "Drive will happily create the WRONG native type instead of failing"
             ) from None
+        # No reserved id here, so no replay on a lost response: Drive refuses
+        # one for a conversion -- 403 generatedIdNotSupported, "Generated IDs
+        # are not supported for Docs Editors formats" (verified 2026-10-16).
+        # Only fixture seeding converts, and a rerun of it is cheap.
         meta = {"name": name, "parents": [parent_id], "mimeType": target_mime}
         files = {
             "metadata": ("metadata.json", json.dumps(meta), "application/json"),
