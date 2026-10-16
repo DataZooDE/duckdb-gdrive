@@ -9,7 +9,7 @@ const char *GdriveVersionCString() {
 	// scripts/check_extension_stamp.sh, which fails the build if HEAD is on a
 	// tag and this string is not it -- it used to be possible for the two to
 	// drift silently, and nothing would have noticed.
-	return "2026.09.26";
+	return "2026.10.16";
 }
 
 std::string GdriveVersion() {
