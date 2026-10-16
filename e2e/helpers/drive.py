@@ -259,30 +259,71 @@ class Drive:
         #     only the response lost, so replaying a POST can create a second
         #     file. Drive lets two files share a name, which makes such a
         #     duplicate genuinely hard to clean up.
-        idempotent = method.upper() in ("GET", "DELETE", "HEAD")
-        attempts = 4
+        #   * `replay_safe=True` -- a create carrying an id reserved with
+        #     files.generateIds (see _create). A replay of one that landed gets
+        #     409 instead of a duplicate, so it is retried like a GET.
+        #   * 403 with reason rateLimitExceeded / userRateLimitExceeded --
+        #     Drive's usual throttle, retried for ANY method like 429. The
+        #     extension classifies it the same way (ClassifyFromReason in
+        #     src/gdrive_errors.cpp); a CI run hit it on 2026-10-16.
+        #
+        # The response carries `may_have_landed`: whether an earlier attempt
+        # ended ambiguously (transport error or 5xx) and so may have been
+        # applied. Only then can a 409 mean "my own earlier attempt landed";
+        # a throttled attempt was refused and created nothing.
+        replay_safe = kw.pop("replay_safe", False)
+        idempotent = replay_safe or method.upper() in ("GET", "DELETE", "HEAD")
+        attempts = 6
         last_exc = None
+        may_have_landed = False
         for attempt in range(attempts):
             if attempt:
-                # 0.5s, 1s, 2s. Jitter is unnecessary here -- one client.
-                time.sleep(0.5 * (2 ** (attempt - 1)))
+                # 0.5s doubling to 8s (15.5s in all), or Retry-After when
+                # Drive sends one. Jitter is unnecessary here -- one client.
+                time.sleep(retry_after or 0.5 * (2 ** (attempt - 1)))
+            retry_after = 0
+            last = attempt == attempts - 1
             try:
                 resp = requests.request(method, url, headers=headers, params=params,
                                         timeout=timeout, **kw)
             except requests.exceptions.RequestException as e:
                 last_exc = e
-                if idempotent and attempt < attempts - 1:
+                if idempotent and not last:
+                    may_have_landed = True
                     self.calls[kind] = self.calls.get(kind, 0) + 1
                     continue
                 raise
-            if resp.status_code in (429, 503) and attempt < attempts - 1:
+            if (resp.status_code in (429, 503) or self._rate_limited(resp)) and not last:
+                retry_after = self._retry_after_seconds(resp)
                 self.calls[kind] = self.calls.get(kind, 0) + 1
                 continue
-            if resp.status_code >= 500 and idempotent and attempt < attempts - 1:
+            if resp.status_code >= 500 and idempotent and not last:
+                may_have_landed = True
                 self.calls[kind] = self.calls.get(kind, 0) + 1
                 continue
+            setattr(resp, "may_have_landed", may_have_landed)
             return resp
         raise last_exc if last_exc else RuntimeError("unreachable")
+
+    @staticmethod
+    def _rate_limited(resp: requests.Response) -> bool:
+        """Drive's throttle: a 403 whose reason says rate limit."""
+        if resp.status_code != 403:
+            return False
+        try:
+            errors = resp.json().get("error", {}).get("errors", [])
+        except ValueError:
+            return False
+        return any(e.get("reason") in ("rateLimitExceeded", "userRateLimitExceeded")
+                   for e in errors if isinstance(e, dict))
+
+    @staticmethod
+    def _retry_after_seconds(resp: requests.Response) -> float:
+        """Retry-After in seconds, capped at 30; 0 when absent or not a number."""
+        try:
+            return min(30.0, max(0.0, float(resp.headers.get("Retry-After", 0))))
+        except ValueError:
+            return 0.0
 
     @staticmethod
     def _transfer_timeout(nbytes: int) -> int:
@@ -407,29 +448,51 @@ class Drive:
 
     # -- writes ------------------------------------------------------------
 
+    def reserve_id(self) -> str:
+        """A fresh file id from files.generateIds, for an idempotent create."""
+        resp = self._request("GET", f"{DRIVE_V3}/files/generateIds", "generateIds",
+                             params={"count": 1, "space": "drive"})
+        return self._ok(resp, "generateIds")["ids"][0]
+
+    def _create(self, url: str, kind: str, what: str, file_id: str, **kw) -> str:
+        """POST a create that carries the reserved `file_id`, retrying freely.
+
+        The reserved id is what makes the retry safe: a replay of an attempt
+        that landed (only its response was lost) gets 409 "A file already
+        exists with the provided ID" instead of a second same-named file --
+        the extension's own remedy (src/gdrive_client.cpp). A 409 counts as
+        success only after an earlier attempt ended ambiguously (it may have
+        been applied); otherwise the id belongs to someone else, and the 409
+        stays an error.
+        """
+        resp = self._request("POST", url, kind, replay_safe=True, **kw)
+        if resp.status_code == 409 and getattr(resp, "may_have_landed", False):
+            return self.get_metadata(file_id)["id"]
+        return self._ok(resp, what)["id"]
+
     def create_folder(self, name: str, parent_id: str | None = None) -> str:
+        file_id = self.reserve_id()
         body = {
+            "id": file_id,
             "name": name,
             "mimeType": FOLDER_MIME,
             "parents": [parent_id or self.drive_id],
         }
-        return self._ok(
-            self._request("POST", f"{DRIVE_V3}/files", "files.create", json=body),
-            "create_folder",
-        )["id"]
+        return self._create(f"{DRIVE_V3}/files", "files.create", "create_folder", file_id, json=body)
 
-    def upload(self, name: str, content: bytes, parent_id: str, mime: str = "application/octet-stream") -> str:
-        meta = {"name": name, "parents": [parent_id]}
+    def upload(self, name: str, content: bytes, parent_id: str, mime: str = "application/octet-stream",
+               file_id: str | None = None) -> str:
+        file_id = file_id or self.reserve_id()
+        meta = {"id": file_id, "name": name, "parents": [parent_id]}
         files = {
             "metadata": ("metadata.json", json.dumps(meta), "application/json"),
             "file": (name, content, mime),
         }
-        resp = self._request(
-            "POST", f"{UPLOAD_V3}/files", "files.create.upload",
+        return self._create(
+            f"{UPLOAD_V3}/files", "files.create.upload", "upload", file_id,
             params={"uploadType": "multipart"}, files=files,
             timeout=self._transfer_timeout(len(content)),
         )
-        return self._ok(resp, "upload")["id"]
 
     def update_content(self, file_id: str, content: bytes,
                        mime: str = "application/octet-stream") -> str:
@@ -477,6 +540,10 @@ class Drive:
                 "add it to Drive._NATIVE_SOURCE_MIME rather than guessing -- "
                 "Drive will happily create the WRONG native type instead of failing"
             ) from None
+        # No reserved id here, so no replay on a lost response: Drive refuses
+        # one for a conversion -- 403 generatedIdNotSupported, "Generated IDs
+        # are not supported for Docs Editors formats" (verified 2026-10-16).
+        # Only fixture seeding converts, and a rerun of it is cheap.
         meta = {"name": name, "parents": [parent_id], "mimeType": target_mime}
         files = {
             "metadata": ("metadata.json", json.dumps(meta), "application/json"),
