@@ -135,9 +135,13 @@ SELECT octet_length(content), content[1:1] FROM read_blob('gdrive://scratch/${SC
 
 # ---------------------------------------------------------------------------
 # An error MID-STREAM (chunks already sent) publishes nothing: the failed
-# COPY drops its handle, which cancels the session, and Drive never shows a
-# file it did not receive the final chunk for. One thread, so the rows before
-# the error really are written (and chunked) before it is raised.
+# COPY cancels the session, and Drive never shows a file it did not receive
+# the final chunk for. One thread, so the rows before the error really are
+# written (and chunked) before it is raised. ~16 MB before the error: DuckDB
+# 2.0 writes COPY output through an AsyncFileWriter that buffers several MB,
+# so fewer rows would fail before the first chunk and prove nothing. On 2.0
+# the cancel arrives through FileSystem::AbortFileWrite, whose default is
+# Close() -- i.e. PUBLISH -- unless the filesystem overrides it.
 # ---------------------------------------------------------------------------
 statement ok
 SET threads = 1;
@@ -146,8 +150,8 @@ statement ok
 CALL gdrive_reset_stats();
 
 statement error
-COPY (SELECT i, CASE WHEN i < 90000 THEN md5(i::VARCHAR) ELSE error('boom mid-stream') END AS h
-      FROM range(100000) t(i))
+COPY (SELECT i, CASE WHEN i < 400000 THEN md5(i::VARCHAR) ELSE error('boom mid-stream') END AS h
+      FROM range(410000) t(i))
      TO 'gdrive://scratch/${SCRATCH}/stream/fail.csv' (HEADER);
 ----
 boom mid-stream
@@ -163,14 +167,26 @@ SELECT count(*) FROM glob('gdrive://scratch/${SCRATCH}/stream/*fail*');
 ----
 0
 
-# Overwriting an existing file and failing mid-stream leaves the OLD content:
-# COPY streams into its tmp_ staging file, which is never published.
+# Overwriting an existing file and failing mid-stream leaves the OLD content.
+# DuckDB 1.x streams into a tmp_ staging file that is never published; 2.0
+# writes remote targets in place (no staging file) and, as the target already
+# existed, its cleanup PRESERVES whatever is there -- so only a cancel that
+# never publishes keeps the original. A truncated overwrite is data loss.
+statement ok
+CALL gdrive_reset_stats();
+
 statement error
-COPY (SELECT i, CASE WHEN i < 90000 THEN md5(i::VARCHAR) ELSE error('boom again') END AS h
-      FROM range(100000) t(i))
+COPY (SELECT i, CASE WHEN i < 400000 THEN md5(i::VARCHAR) ELSE error('boom again') END AS h
+      FROM range(410000) t(i))
      TO 'gdrive://scratch/${SCRATCH}/stream/s.csv' (HEADER);
 ----
 boom again
+
+query II
+SELECT (SELECT value >= 3 FROM gdrive_stats() WHERE metric = 'upload_chunks'),
+       (SELECT value FROM gdrive_stats() WHERE metric = 'upload_aborts');
+----
+true	1
 
 statement ok
 RESET threads;

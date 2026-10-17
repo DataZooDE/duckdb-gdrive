@@ -57,6 +57,14 @@ if(NOT EMSCRIPTEN)
 endif()
 
 # ---------------------------------------------------------------------------
+# duckdb-compat: one source tree for DuckDB 1.4 LTS, 1.5 and 2.0. Header-only
+# API-shape shims (DataZooDE/duckdb-compat); no `#if` on DuckDB versions at
+# call sites. Before datazoo-oauth2, which links the duckdb_compat target.
+# ---------------------------------------------------------------------------
+add_subdirectory(duckdb-compat)
+include_directories(duckdb-compat/include)
+
+# ---------------------------------------------------------------------------
 # datazoo-oauth2 (D-11, REQ-A-01/A-02; design in docs/hld.md section 5.4).
 #
 # The shared OAuth2 stack: authorization-code + PKCE, the loopback redirect
@@ -147,6 +155,15 @@ if(NOT EMSCRIPTEN)
 else()
     target_link_libraries(${EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto jwt-cpp::jwt-cpp)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} OpenSSL::SSL OpenSSL::Crypto jwt-cpp::jwt-cpp)
+endif()
+
+# DuckDB 2.0's bundled httplib reads the macOS keychain whenever it is built
+# with OpenSSL (CPPHTTPLIB_USE_CERTS_FROM_MACOSX_KEYCHAIN is automatic there),
+# so the link needs these frameworks; harmless on 1.x. See duckdb-compat README.
+if(APPLE)
+  foreach(t ${EXTENSION_NAME} ${LOADABLE_EXTENSION_NAME})
+    target_link_libraries(${t} "-framework CoreFoundation" "-framework Security")
+  endforeach()
 endif()
 
 install(

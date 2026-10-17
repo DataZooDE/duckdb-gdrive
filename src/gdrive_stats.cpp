@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <utility>
 #include <vector>
+#include "duckdb_compat.hpp"
 
 namespace duckdb {
 namespace gdrive {
@@ -40,7 +41,7 @@ struct GDriveStatsGlobalState : public GlobalTableFunctionState {
 };
 
 unique_ptr<FunctionData> GDriveStatsBind(ClientContext &, TableFunctionBindInput &, vector<LogicalType> &return_types,
-                                         vector<string> &names) {
+                                         duckdb_compat::BindNames &names) {
 	return_types = {LogicalType::VARCHAR, LogicalType::BIGINT};
 	names = {"metric", "value"};
 
@@ -111,7 +112,7 @@ void GDriveStatsScan(ClientContext &, TableFunctionInput &input, DataChunk &outp
 struct GDriveResetStatsBindData : public TableFunctionData {};
 
 unique_ptr<FunctionData> GDriveResetStatsBind(ClientContext &, TableFunctionBindInput &,
-                                              vector<LogicalType> &return_types, vector<string> &names) {
+                                              vector<LogicalType> &return_types, duckdb_compat::BindNames &names) {
 	return_types.emplace_back(LogicalType::BOOLEAN);
 	names.emplace_back("success");
 	return make_uniq<GDriveResetStatsBindData>();

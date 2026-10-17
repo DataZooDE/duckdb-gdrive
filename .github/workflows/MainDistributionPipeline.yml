@@ -51,6 +51,22 @@ jobs:
       extension_name: gdrive
       exclude_archs: 'windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'
 
+  # DuckDB 2.0 (pre-release): the line community-extensions now builds
+  # `repo.ref` against (DUCKDB_LATEST_STABLE in its build.yml, with
+  # extension-ci-tools v2.0-cyanoptera). Build + test on every platform so a
+  # 2.0-only break shows up here before it shows up in their CI. No smoke test
+  # (there is no stock 2.0 CLI to load into) and no deploy (an alpha binary
+  # loads only into that exact alpha build). When community-extensions moves
+  # its 2.0 commit, move this one with it.
+  duckdb-next-build:
+    name: Build extension binaries (v2.0 pre-release)
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v2.0-cyanoptera
+    with:
+      duckdb_version: b15358c371daf10dad799a43b6167f6ccdce84d8
+      ci_tools_version: v2.0-cyanoptera
+      extension_name: gdrive
+      exclude_archs: 'windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'
+
   duckdb-lts-build:
     name: Build extension binaries (v1.4.5 LTS)
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.4-andium
