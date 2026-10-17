@@ -119,7 +119,7 @@ Before tagging, update **both**:
 
 **The first submission is a one-off; every release after it is a BUMP PR.**
 `extensions/gdrive/description.yml` already exists upstream, so a new release
-means one line changed on a branch cut from `upstream/main`, titled
+means `ref`, `variegata` and `version` changed on a branch cut from `upstream/main`, titled
 `Bump gdrive to vYYYY.MM.DD` — the same shape the other DataZoo extensions
 use. Do not push to the original submission branch after it merges: that
 commit lands on a merged PR and changes nothing.
@@ -137,6 +137,11 @@ commit lands on a merged PR and changes nothing.
    clone, which has no such tag. The command failed, the variable was empty,
    the placeholder was duly replaced with nothing, and `ref:` parsed as valid
    YAML with a null value. Require 40 hex characters.
+   Set `repo.variegata` to the same SHA and check `extension.version` matches
+   the tag. `ref` builds against DuckDB 2.0 (the community default since
+   2026-10-15), `variegata` against v1.5.6 and `andium` against v1.4.5; a
+   missing key falls back to `ref`. One commit builds on all three
+   (duckdb-compat).
 3. Open the PR.
 
 **0.1.0 was submitted 2026-07-30 as duckdb/community-extensions#2407**, ref
