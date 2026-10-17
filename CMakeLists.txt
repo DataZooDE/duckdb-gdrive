@@ -57,6 +57,14 @@ if(NOT EMSCRIPTEN)
 endif()
 
 # ---------------------------------------------------------------------------
+# duckdb-compat: one source tree for DuckDB 1.4 LTS, 1.5 and 2.0. Header-only
+# API-shape shims (DataZooDE/duckdb-compat); no `#if` on DuckDB versions at
+# call sites. Before datazoo-oauth2, which links the duckdb_compat target.
+# ---------------------------------------------------------------------------
+add_subdirectory(duckdb-compat)
+include_directories(duckdb-compat/include)
+
+# ---------------------------------------------------------------------------
 # datazoo-oauth2 (D-11, REQ-A-01/A-02; design in docs/hld.md section 5.4).
 #
 # The shared OAuth2 stack: authorization-code + PKCE, the loopback redirect

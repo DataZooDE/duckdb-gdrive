@@ -12,6 +12,7 @@
 // not, and musl is in the 1.4 LTS build matrix.
 #include <cstdint>
 #include <utility>
+#include "duckdb_compat.hpp"
 
 namespace duckdb {
 namespace gdrive {
@@ -126,8 +127,8 @@ void WriteBlobScalar(DataChunk &args, ExpressionState &state, Vector &result) {
 // Size WITHOUT transferring the body -- one metadata call, not a full download.
 void FileSizeScalar(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &fs = FileSystem::GetFileSystem(state.GetContext());
-	UnaryExecutor::ExecuteWithNulls<string_t, int64_t>(
-	    args.data[0], result, args.size(), [&](string_t path, ValidityMask &mask, idx_t idx) -> int64_t {
+	duckdb_compat::ExecuteUnaryNullable<string_t, int64_t>(
+	    args.data[0], result, args.size(), [&](string_t path, bool &is_null) -> int64_t {
 		    auto p = path.GetString();
 		    // Open first: a handle answers "exists, and this big" in one
 		    // remote call, and NULL_IF_NOT_EXISTS is the strict absence test
@@ -150,7 +151,7 @@ void FileSizeScalar(DataChunk &args, ExpressionState &state, Vector &result) {
 		    if (fs.DirectoryExists(p)) {
 			    throw IOException("'%s' is a directory, not a file; it has no byte size", p);
 		    }
-		    mask.SetInvalid(idx);
+		    is_null = true;
 		    return 0;
 	    });
 }
@@ -170,7 +171,10 @@ void RegisterVfsFunctions(ExtensionLoader &loader) {
 		ScalarFunction fn("remove_file", {LogicalType::VARCHAR}, LogicalType::BOOLEAN, RemoveFileScalar);
 		// A delete is not a pure function of its argument: the same call twice
 		// returns true then false. VOLATILE keeps the optimiser from folding it.
-		fn.stability = FunctionStability::VOLATILE;
+		duckdb_compat::SetStability(fn, FunctionStability::VOLATILE);
+		// Every one of these can throw (I/O, a missing secret, bad input); DuckDB
+		// 2.0 turns an error from a non-fallible function into an INTERNAL error.
+		duckdb_compat::SetFallible(fn);
 		CreateScalarFunctionInfo info(fn);
 		FunctionDescription desc;
 		desc.description =
@@ -192,7 +196,10 @@ void RegisterVfsFunctions(ExtensionLoader &loader) {
 	{
 		ScalarFunction fn("move_file", {LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalType::BOOLEAN,
 		                  MoveFileScalar);
-		fn.stability = FunctionStability::VOLATILE;
+		duckdb_compat::SetStability(fn, FunctionStability::VOLATILE);
+		// Every one of these can throw (I/O, a missing secret, bad input); DuckDB
+		// 2.0 turns an error from a non-fallible function into an INTERNAL error.
+		duckdb_compat::SetFallible(fn);
 		CreateScalarFunctionInfo info(fn);
 		FunctionDescription desc;
 		desc.description =
@@ -211,7 +218,10 @@ void RegisterVfsFunctions(ExtensionLoader &loader) {
 	{
 		ScalarFunction write_fn("write_blob", {LogicalType::VARCHAR, LogicalType::BLOB}, LogicalType::BIGINT,
 		                        WriteBlobScalar);
-		write_fn.stability = FunctionStability::VOLATILE;
+		duckdb_compat::SetStability(write_fn, FunctionStability::VOLATILE);
+		// Every one of these can throw (I/O, a missing secret, bad input); DuckDB
+		// 2.0 turns an error from a non-fallible function into an INTERNAL error.
+		duckdb_compat::SetFallible(write_fn);
 		CreateScalarFunctionInfo write_info(write_fn);
 		FunctionDescription write_desc;
 		write_desc.description =
@@ -230,7 +240,10 @@ void RegisterVfsFunctions(ExtensionLoader &loader) {
 
 	{
 		ScalarFunction size_fn("file_size", {LogicalType::VARCHAR}, LogicalType::BIGINT, FileSizeScalar);
-		size_fn.stability = FunctionStability::VOLATILE;
+		duckdb_compat::SetStability(size_fn, FunctionStability::VOLATILE);
+		// Every one of these can throw (I/O, a missing secret, bad input); DuckDB
+		// 2.0 turns an error from a non-fallible function into an INTERNAL error.
+		duckdb_compat::SetFallible(size_fn);
 		CreateScalarFunctionInfo size_info(size_fn);
 		FunctionDescription size_desc;
 		size_desc.description =

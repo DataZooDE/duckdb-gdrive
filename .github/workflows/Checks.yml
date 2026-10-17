@@ -47,10 +47,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          repository: DataZooDE/duckdb-sharepoint
-          path: sibling
+      # A change to the shared file lands in BOTH repos on a same-named
+      # branch; compare against the sibling's branch of that name when it
+      # exists, so the pair can go green together, else its default branch.
+      - name: Check out the sibling (same branch if it exists)
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+        run: |
+          git clone -q https://github.com/DataZooDE/duckdb-sharepoint.git sibling
+          if git -C sibling ls-remote --exit-code --heads origin "$BRANCH" >/dev/null; then
+            git -C sibling checkout -q "$BRANCH"
+          fi
+          echo "sibling at $(git -C sibling rev-parse --abbrev-ref HEAD)"
       - run: ./scripts/check_vfs_parity.sh sibling
 
   # A submodule that has drifted off the shipped tag makes every local green

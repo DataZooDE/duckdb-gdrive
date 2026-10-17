@@ -90,6 +90,7 @@
 #include <sys/stat.h>
 #include <unordered_map>
 #include <vector>
+#include "duckdb_compat.hpp"
 
 namespace duckdb {
 namespace gdrive {
@@ -1237,13 +1238,12 @@ GDriveAuthContext GetAuthContext(optional_ptr<FileOpener> opener, const std::str
 		throw InvalidInputException("gdrive secret '%s' is not a key-value secret", base.GetName().c_str());
 	}
 
-	// BaseSecret::GetName() returns `const string &` on v1.5.3 and v1.4.4 --
-	// the versions this extension actually ships against. It became
-	// `const Identifier &` (with .GetIdentifierName()) only on DuckDB main,
-	// well after both. Calling the newer API compiled fine locally, because
-	// the duckdb submodule had drifted ~9600 commits past its pinned tag, and
-	// broke every release build. Keep this on the released API.
-	const std::string secret_name = base.GetName();
+	// BaseSecret::GetName() returns `const string &` on 1.4/1.5 and
+	// `const Identifier &` on 2.0; duckdb_compat::Str reads either. (Calling
+	// the 2.0 API directly once compiled locally only because the submodule
+	// had drifted past its pin, and broke every release build -- hence the
+	// shim, which CI builds against every line.)
+	const std::string secret_name = duckdb_compat::Str(base.GetName());
 
 	// Cache identity: the secret's fields plus the credential actually used
 	// (see gdrive_identity.hpp for the rules, which are unit-tested).
@@ -1258,7 +1258,7 @@ GDriveAuthContext GetAuthContext(optional_ptr<FileOpener> opener, const std::str
 		identity_source = KeyFileStamp(ResolveChainAdcPath(opener));
 	}
 	const std::string identity =
-	    FingerprintKey(secret_name, base.GetProvider(), IdentityMaterial(base.GetProvider(), fields, identity_source));
+	    FingerprintKey(secret_name, duckdb_compat::Str(base.GetProvider()), IdentityMaterial(duckdb_compat::Str(base.GetProvider()), fields, identity_source));
 	// Testing aid (gdrive_debug_token_max_age_seconds): trust a token for at
 	// most this long, so expiry under a live handle is exercisable in seconds.
 	// Validated here, where it is used: below 0 is an error, 1..60 is clamped

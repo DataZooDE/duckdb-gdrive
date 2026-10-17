@@ -30,6 +30,19 @@ GDriveFileHandleImpl::~GDriveFileHandleImpl() {
 	AbortUpload(*this);
 }
 
+void GDriveFileHandle::CancelWrite() noexcept {
+	if (!is_write) {
+		return;
+	}
+	// Same outcome as a failed Close(): nothing is published, ever. Mark the
+	// handle so a Close() that still follows cannot publish what was written.
+	is_write = false;
+	write_failed = true;
+	auto &impl = this->Cast<GDriveFileHandleImpl>();
+	AbortUpload(impl);
+	impl.upload.reset();
+}
+
 void GDriveFileHandle::Close() {
 	if (!is_write) {
 		// Read handles have nothing to do.

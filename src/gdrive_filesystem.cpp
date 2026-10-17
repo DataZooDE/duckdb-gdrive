@@ -16,6 +16,7 @@
 #include <limits>
 #include <utility>
 #include "gdrive_banner.hpp"
+#include "duckdb_compat.hpp"
 
 namespace duckdb {
 namespace gdrive {
@@ -64,7 +65,7 @@ bool GetBoolSetting(optional_ptr<FileOpener> opener, const std::string &name, bo
 		return default_value;
 	}
 	Value value;
-	if (FileOpener::TryGetCurrentSetting(opener, name, value)) {
+	if (duckdb_compat::TryGetSetting(opener, name, value)) {
 		return value.GetValue<bool>();
 	}
 	return default_value;
@@ -75,7 +76,7 @@ uint64_t GetUBigIntSetting(optional_ptr<FileOpener> opener, const std::string &n
 		return default_value;
 	}
 	Value value;
-	if (FileOpener::TryGetCurrentSetting(opener, name, value)) {
+	if (duckdb_compat::TryGetSetting(opener, name, value)) {
 		return value.GetValue<uint64_t>();
 	}
 	return default_value;
@@ -87,7 +88,7 @@ std::string GetStringSetting(optional_ptr<FileOpener> opener, const std::string 
 		return default_value;
 	}
 	Value value;
-	if (FileOpener::TryGetCurrentSetting(opener, name, value)) {
+	if (duckdb_compat::TryGetSetting(opener, name, value)) {
 		return value.ToString();
 	}
 	return default_value;
@@ -1436,6 +1437,10 @@ vector<OpenFileInfo> GDriveFileSystem::Glob(const string &path, FileOpener *open
 	}
 	return result;
 	});
+}
+
+void GDriveFileSystem::AbortFileWrite(FileHandle &handle) {
+	handle.Cast<GDriveFileHandle>().CancelWrite();
 }
 
 void GDriveFileSystem::FileSync(FileHandle &handle) {
