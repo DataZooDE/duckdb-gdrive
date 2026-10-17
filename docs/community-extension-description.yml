@@ -18,6 +18,7 @@
 
 extension:
   name: gdrive
+  version: 2026.10.17
   description: Query files in Google Drive directly with a gdrive:// filesystem
   language: C++
   build: cmake
@@ -35,6 +36,11 @@ extension:
 repo:
   github: DataZooDE/duckdb-gdrive
   ref: PLACEHOLDER_SET_AT_RELEASE
+  # ref builds against DuckDB 2.0, variegata against v1.5.6 and andium against
+  # v1.4.5 (community-extensions scripts/build.py); a missing key falls back to
+  # ref. One commit serves all three lines (duckdb-compat), so at release all
+  # are the same tagged SHA.
+  variegata: PLACEHOLDER_SET_AT_RELEASE
 
 docs:
   hello_world: |
