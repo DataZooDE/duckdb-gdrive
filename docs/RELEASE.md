@@ -94,11 +94,10 @@ separate version number to keep in step with anything.
 
 Two consequences worth knowing:
 
-* `docs/community-extension-description.yml` carries **no `version:` field**,
-  which is also what the sibling descriptors do. That is not an omission.
-  `2026.08.01` is not valid semver -- leading zeros are forbidden in numeric
-  identifiers -- so a descriptor that declared it could fail validation. The
-  tagged `ref` is the version.
+* The descriptor carries `version: YYYY.MM.DD` under `extension:`. The
+  submission of 0.1.0 left it out for fear that `2026.08.01` (a leading zero)
+  fails semver validation; upstream has since accepted `version: 2026.09.26`
+  on this very descriptor.
 * `src/gdrive_version.cpp` holds the string that `SELECT gdrive_version()`
   returns, and it is hardcoded. Nothing compared it with the tag until
   2026-08-01, so the two could drift and the only symptom would be the
@@ -114,6 +113,27 @@ Before tagging, update **both**:
 
 * `src/gdrive_version.cpp`
 * the expected value in `test/sql/gdrive_load.test`
+
+### Verify what actually shipped
+
+The tag push deploys versioned binaries. Check the stamp of **every** platform
+against S3 directly -- get.erpl.io is a CloudFront cache and can serve a stale
+copy for a long time after a re-upload:
+
+```bash
+T=vYYYY.MM.DD; N=gdrive; B=https://s3.eu-west-1.amazonaws.com/get.erpl.io
+for v in v1.5.6 v1.4.5; do for a in linux_amd64 linux_amd64_musl linux_arm64 osx_amd64 osx_arm64 windows_amd64; do
+  echo "$v $a: $(curl -sf $B/$N/$T/$v/$a/$N.duckdb_extension.gz | gunzip 2>/dev/null | tail -c 512 | strings -n 4 | grep -m1 -E '^v20')"
+done; done
+```
+
+Every present binary must print the tag (v1.5.6 has no musl build, v1.4.5 no
+Windows build). On 2026-10-17 a `main` push of the release commit, built before
+the tag existed, deployed after the tag run and overwrote gdrive v1.5.6 in the
+`vYYYY.MM.DD` path with a binary stamped `v2026.10.16-5-gfccfa44`. Versioned
+paths now come only from tag runs; if a stamp is still wrong, re-run the tag
+run's `Deploy (<arch>)` jobs (one at a time) and ask for a CloudFront
+invalidation of `/<name>/vYYYY.MM.DD/*`.
 
 ## Submitting
 
