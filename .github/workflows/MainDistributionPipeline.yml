@@ -141,7 +141,11 @@ jobs:
       ci_tools_version: v1.5-variegata
       exclude_archs: 'windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'
       deploy_latest: ${{ startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' }}
-      deploy_versioned: ${{ startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' }}
+      # Versioned paths (<name>/vYYYY.MM.DD/...) come ONLY from the tag run. A main
+      # push of the same commit builds before the tag exists (stamp vX-N-gSHA), and
+      # its deploy resolves the tag at upload time: when it ran after the tag run it
+      # overwrote the release with that pre-tag build (v2026.10.17, gdrive v1.5.6).
+      deploy_versioned: ${{ startsWith(github.ref, 'refs/tags/v') }}
 
   duckdb-lts-smoke-test:
     name: Smoke test (v1.4.5)
@@ -172,4 +176,8 @@ jobs:
       # Same exclusions as the LTS build and smoke test.
       exclude_archs: 'windows_amd64;windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'
       deploy_latest: ${{ startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' }}
-      deploy_versioned: ${{ startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' }}
+      # Versioned paths (<name>/vYYYY.MM.DD/...) come ONLY from the tag run. A main
+      # push of the same commit builds before the tag exists (stamp vX-N-gSHA), and
+      # its deploy resolves the tag at upload time: when it ran after the tag run it
+      # overwrote the release with that pre-tag build (v2026.10.17, gdrive v1.5.6).
+      deploy_versioned: ${{ startsWith(github.ref, 'refs/tags/v') }}
