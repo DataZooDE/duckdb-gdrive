@@ -1,0 +1,35 @@
+# name: test/sql/gdrive_stats_nulls.test
+# description: IS NULL over gdrive_stats() sees no NULLs (DuckDB 2.0: vectors carry their own size)
+# group: [gdrive]
+#
+# On DuckDB 2.0 a table function that ends its chunk with the deprecated
+# DataChunk::SetCardinality leaves its vectors unsized; IS NULL loops over
+# Vector::size() and reads uninitialised memory, so these counts came back as
+# 10, 7, ... instead of 0. Repeated because the failure is nondeterministic.
+
+require gdrive
+
+query III
+SELECT count(*) > 0, count(*) FILTER (WHERE metric IS NULL OR value IS NULL), bool_and(value IS NOT NULL) FROM gdrive_stats()
+----
+true	0	true
+
+query III
+SELECT count(*) > 0, count(*) FILTER (WHERE metric IS NULL OR value IS NULL), bool_and(value IS NOT NULL) FROM gdrive_stats()
+----
+true	0	true
+
+query III
+SELECT count(*) > 0, count(*) FILTER (WHERE metric IS NULL OR value IS NULL), bool_and(value IS NOT NULL) FROM gdrive_stats()
+----
+true	0	true
+
+query III
+SELECT count(*) > 0, count(*) FILTER (WHERE metric IS NULL OR value IS NULL), bool_and(value IS NOT NULL) FROM gdrive_stats()
+----
+true	0	true
+
+query III
+SELECT count(*) > 0, count(*) FILTER (WHERE metric IS NULL OR value IS NULL), bool_and(value IS NOT NULL) FROM gdrive_stats()
+----
+true	0	true
