@@ -93,7 +93,7 @@ void GDriveStatsScan(ClientContext &, TableFunctionInput &input, DataChunk &outp
 		state.cursor++;
 		out_row++;
 	}
-	output.SetCardinality(out_row);
+	duckdb_compat::SetChildCardinality(output, out_row);
 }
 
 // ---------------------------------------------------------------------------
@@ -129,12 +129,12 @@ unique_ptr<GlobalTableFunctionState> GDriveResetStatsInit(ClientContext &, Table
 void GDriveResetStatsScan(ClientContext &, TableFunctionInput &input, DataChunk &output) {
 	auto &state = input.global_state->Cast<GDriveResetStatsGlobalState>();
 	if (state.done) {
-		output.SetCardinality(0);
+		duckdb_compat::SetChildCardinality(output, 0);
 		return;
 	}
 	ResetGlobalDriveCallStats();
 	state.done = true;
-	output.SetCardinality(1);
+	duckdb_compat::SetChildCardinality(output, 1);
 	output.SetValue(0, 0, Value::BOOLEAN(true));
 }
 
