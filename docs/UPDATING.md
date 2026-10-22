@@ -5,8 +5,9 @@ repository must be rebuilt for every DuckDB release. REQ-NF-06 records this as
 a standing cost for the life of the project, not a one-off — it is written
 down here so it is a routine rather than a rediscovery.
 
-Current targets: **stable v1.5.6** and the **1.4 LTS** line (source v1.4.5).
-Local development builds against stable only; CI builds both.
+Current targets: **stable v1.5.6** and the **DuckDB 2.0** line. DuckDB 1.4.x
+LTS is no longer supported. Local development builds against stable only; CI
+builds both.
 
 ## The routine
 
@@ -59,15 +60,14 @@ Local development builds against stable only; CI builds both.
 5. **Update the CI matrix** in `.github/workflows/MainDistributionPipeline.yml`
    — `duckdb_version`, `ci_tools_version`, and the workflow `@ref`.
 
-6. **Re-check the two build workarounds** in `extension_config.cmake` (the
-   project-wide C++17 `FORCE`, and the `_HAS_STD_BYTE=0` guard scoped to
-   1.4.x). Both exist for specific upstream problems and may become
-   unnecessary — or newly necessary elsewhere. Do not delete either without
-   confirming a clean build on **Linux and Windows**; each one covers a
-   failure that appears on only one platform.
+6. **Re-check the build workaround** in `extension_config.cmake` (the
+   project-wide C++17 `FORCE`). It exists for specific upstream problems and
+   may become unnecessary. Do not delete it without confirming a clean build
+   on **Linux and Windows**; it covers failures that appear on only one
+   platform each.
 
 7. **Tag and release.** The distribution pipeline publishes per-version paths,
-   so stable and LTS never collide.
+   so different DuckDB lines never collide.
 
 ## Things that have bitten before
 

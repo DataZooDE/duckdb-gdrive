@@ -4,7 +4,7 @@
 # Why this exists. The submodule had drifted ~9,600 commits past its pinned
 # tag onto DuckDB main. Everything was green locally and every release build
 # was red, because `BaseSecret::GetName()` returns `const string &` on every
-# released 1.4/1.5 version and `const Identifier &` on main. Code written
+# released 1.x version and `const Identifier &` on main. Code written
 # against main compiles for the developer and cannot compile for a single
 # shipping platform.
 #
@@ -12,9 +12,9 @@
 # convincing as a real one. The only fix is to make the drift itself loud.
 #
 # Local development builds against the LATEST STABLE. CI additionally builds
-# the 1.4 LTS line (see .github/workflows/MainDistributionPipeline.yml) --
+# the DuckDB 2.0 line (see .github/workflows/MainDistributionPipeline.yml) --
 # the API differs between the lines, so stable-only local coverage is not
-# proof the LTS job will pass.
+# proof the 2.0 job will pass.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

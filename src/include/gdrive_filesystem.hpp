@@ -217,16 +217,13 @@ public:
 
 	//! Cheap prefix test; DuckDB calls this on every path for every filesystem.
 	bool CanHandleFile(const string &fpath) override;
-#ifndef GDRIVE_DUCKDB_LTS
 	//! gdrive:// paths are already canonical. The base implementation
 	//! collapses "//" for any scheme missing from DuckDB's hard-coded list of
 	//! remote prefixes, which turned `ATTACH 'gdrive://a/db.duckdb'` into
-	//! "gdrive:/a/db.duckdb" and "database does not exist". (DuckDB 1.5+;
-	//! 1.4 does not canonicalize ATTACH paths.)
+	//! "gdrive:/a/db.duckdb" and "database does not exist". (DuckDB 1.5+.)
 	string CanonicalizePath(const string &path, optional_ptr<FileOpener> opener = nullptr) override {
 		return path;
 	}
-#endif
 	std::string GetName() const override {
 		return "GDriveFileSystem";
 	}
