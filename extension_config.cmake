@@ -28,26 +28,6 @@
 set(CMAKE_CXX_STANDARD 17 CACHE STRING "C++ standard to enforce" FORCE)
 set(CMAKE_CXX_STANDARD_REQUIRED ON CACHE BOOL "" FORCE)
 
-# The 1.4 LTS build compiles DuckDB's `sqlite3_api_wrapper.cpp` (the stable
-# v1.5.3 build does not), which pulls in the Win-SDK headers. At C++17 on
-# MSVC, `std::byte` then clashes with the SDK's global `byte`
-# (`error C2872: 'byte': ambiguous symbol` in rpcndr.h/wtypes.h). Disable
-# std::byte for the LTS line -- DuckDB 1.4.x built fine before C++17 existed
-# and we don't use std::byte. Scoped to v1.4.x so the stable build is untouched.
-set(_gdrive_ddb_ver "$ENV{DUCKDB_GIT_VERSION}")
-if(NOT _gdrive_ddb_ver)
-  execute_process(
-    COMMAND git -C "${CMAKE_CURRENT_LIST_DIR}/duckdb" describe --tags
-    OUTPUT_VARIABLE _gdrive_ddb_ver OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-endif()
-if(_gdrive_ddb_ver MATCHES "^v?1\\.4\\.")
-  add_compile_definitions(_HAS_STD_BYTE=0)
-  # FileSystem API that differs between the lines is guarded on this (e.g.
-  # CanonicalizePath, virtual only from 1.5).
-  add_compile_definitions(GDRIVE_DUCKDB_LTS=1)
-  message(STATUS "gdrive: DuckDB ${_gdrive_ddb_ver} (1.4 LTS) -- defining _HAS_STD_BYTE=0, GDRIVE_DUCKDB_LTS")
-endif()
-
 # ---------------------------------------------------------------------------
 # Extension version, computed here rather than left to DuckDB.
 #

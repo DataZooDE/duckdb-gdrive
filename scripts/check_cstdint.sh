@@ -5,7 +5,7 @@
 # transitively, so on an ordinary Linux/macOS/Windows build a missing include
 # is invisible -- the code compiles everywhere the developer looks. musl's
 # headers do not, so the SAME code fails to compile on linux_amd64_musl, which
-# is a target in the 1.4 LTS distribution matrix.
+# is a DuckDB distribution target (opt-in on the 1.5/2.0 matrices).
 #
 # That is exactly how it went: `int8_t was not declared in this scope` in
 # gdrive_glob.cpp, on musl only, after everything else in the matrix was
@@ -44,8 +44,8 @@ done < <(git ls-files)
 if [[ $fail -ne 0 ]]; then
     cat >&2 <<'MSG'
 
-This builds fine against glibc and FAILS on musl, which is a platform in the
-1.4 LTS distribution matrix. Add `#include <cstdint>` to each file above.
+This builds fine against glibc and FAILS on musl, which is a DuckDB
+distribution target (linux_amd64_musl). Add `#include <cstdint>` to each file above.
 MSG
     exit 1
 fi

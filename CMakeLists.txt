@@ -57,7 +57,7 @@ if(NOT EMSCRIPTEN)
 endif()
 
 # ---------------------------------------------------------------------------
-# duckdb-compat: one source tree for DuckDB 1.4 LTS, 1.5 and 2.0. Header-only
+# duckdb-compat: one source tree for DuckDB 1.5 and 2.0. Header-only
 # API-shape shims (DataZooDE/duckdb-compat); no `#if` on DuckDB versions at
 # call sites. Before datazoo-oauth2, which links the duckdb_compat target.
 # ---------------------------------------------------------------------------
@@ -181,8 +181,8 @@ install(
 # --shared-memory requires. The extension itself is a shared library and links
 # fine. (Lesson inherited from ../quack-oauth.)
 #
-# Skipped on MSVC by default for a related reason. On the LTS Windows job's
-# `x64-windows-static-md-*-vs2019comp` triplet, vcpkg builds Catch2 against
+# Skipped on MSVC by default for a related reason. On the (former 1.4 LTS)
+# Windows job's `x64-windows-static-md-*-vs2019comp` triplet, vcpkg builds Catch2 against
 # the DYNAMIC CRT while DuckDB compiles our sources against the STATIC one:
 #
 #   Catch2.lib(catch_stringref.cpp.obj): error LNK2038: mismatch detected for
@@ -228,8 +228,8 @@ if(Catch2_FOUND AND NOT EMSCRIPTEN AND GDRIVE_BUILD_UNIT_TESTS)
     )
     # Match the static CRT (/MT) of the vcpkg deps, which ship from a
     # *-static-* triplet. DuckDB's stable build sets MSVC_RUNTIME_LIBRARY
-    # globally and this naked add_executable inherits it; the 1.4 LTS build
-    # does not, so the target would default to /MD and fail with
+    # globally and this naked add_executable inherits it; the (since dropped)
+    # 1.4 LTS build did not, so the target would default to /MD and fail with
     # `LNK2038: RuntimeLibrary mismatch`. Same naked-target gotcha as the
     # cxx_std_17 feature above.
     if(MSVC)

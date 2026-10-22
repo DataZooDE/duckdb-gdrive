@@ -9,7 +9,7 @@
 #include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 
 // int64_t is used below. libstdc++ leaks it transitively, musl's libc++ does
-// not, and musl is in the 1.4 LTS build matrix.
+// not, and linux_amd64_musl is a DuckDB distribution target.
 #include <cstdint>
 #include <utility>
 #include "duckdb_compat.hpp"

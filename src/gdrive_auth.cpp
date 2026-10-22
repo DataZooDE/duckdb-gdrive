@@ -36,8 +36,8 @@
 // effect at all, silently, on Windows only.
 //
 // That is not hypothetical. Adding the datazoo-oauth2 includes ABOVE this
-// block broke the Windows v1.4.5 LTS build while every other job in the
-// matrix passed, and while the same library built cleanly on Windows inside
+// block broke the Windows build of the (since dropped) v1.4.5 LTS line
+// while every other job in the matrix passed, and while the same library built cleanly on Windows inside
 // erpl-web -- whose sources do not define NOMINMAX after including it.
 //
 // Same class of ordering trap as PICOJSON_USE_INT64 (see CMakeLists.txt): a
@@ -1238,7 +1238,7 @@ GDriveAuthContext GetAuthContext(optional_ptr<FileOpener> opener, const std::str
 		throw InvalidInputException("gdrive secret '%s' is not a key-value secret", base.GetName().c_str());
 	}
 
-	// BaseSecret::GetName() returns `const string &` on 1.4/1.5 and
+	// BaseSecret::GetName() returns `const string &` on 1.5 and
 	// `const Identifier &` on 2.0; duckdb_compat::Str reads either. (Calling
 	// the 2.0 API directly once compiled locally only because the submodule
 	// had drifted past its pin, and broke every release build -- hence the

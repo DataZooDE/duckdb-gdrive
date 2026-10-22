@@ -64,8 +64,9 @@ gh run list --repo DataZooDE/duckdb-gdrive --limit 4
 
 `Checks` covers hygiene, musl, the artifact, and the live suite.
 `Main Extension Distribution Pipeline` is the one that matters for
-publishing: it builds v1.5.6 and v1.4.5 LTS across Linux amd64/arm64, musl,
-Windows and both macOS architectures.
+publishing: it builds v1.5.6 (smoke-tested and deployed) and the DuckDB 2.0
+line (build and test only) across Linux amd64/arm64, Windows and both macOS
+architectures.
 
 ## Tagging
 
@@ -122,13 +123,13 @@ copy for a long time after a re-upload:
 
 ```bash
 T=vYYYY.MM.DD; N=gdrive; B=https://s3.eu-west-1.amazonaws.com/get.erpl.io
-for v in v1.5.6 v1.4.5; do for a in linux_amd64 linux_amd64_musl linux_arm64 osx_amd64 osx_arm64 windows_amd64; do
+for v in v1.5.6; do for a in linux_amd64 linux_arm64 osx_amd64 osx_arm64 windows_amd64; do
   echo "$v $a: $(curl -sf $B/$N/$T/$v/$a/$N.duckdb_extension.gz | gunzip 2>/dev/null | tail -c 512 | strings -n 4 | grep -m1 -E '^v20')"
 done; done
 ```
 
-Every present binary must print the tag (v1.5.6 has no musl build, v1.4.5 no
-Windows build). On 2026-10-17 a `main` push of the release commit, built before
+Every binary must print the tag (only v1.5.6 is deployed; it has no musl
+build). On 2026-10-17 a `main` push of the release commit, built before
 the tag existed, deployed after the tag run and overwrote gdrive v1.5.6 in the
 `vYYYY.MM.DD` path with a binary stamped `v2026.10.16-5-gfccfa44`. Versioned
 paths now come only from tag runs; if a stamp is still wrong, re-run the tag
@@ -159,9 +160,9 @@ commit lands on a merged PR and changes nothing.
    YAML with a null value. Require 40 hex characters.
    Set `repo.variegata` to the same SHA and check `extension.version` matches
    the tag. `ref` builds against DuckDB 2.0 (the community default since
-   2026-10-15), `variegata` against v1.5.6 and `andium` against v1.4.5; a
-   missing key falls back to `ref`. One commit builds on all three
-   (duckdb-compat).
+   2026-10-15) and `variegata` against v1.5.6; a missing key falls back to
+   `ref`. One commit builds on both (duckdb-compat). There is no `andium`
+   key: DuckDB 1.4.x is not supported.
 3. Open the PR.
 
 **0.1.0 was submitted 2026-07-30 as duckdb/community-extensions#2407**, ref

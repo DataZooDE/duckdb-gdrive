@@ -51,37 +51,6 @@ working pattern for something fiddly — capture it here. A paragraph under the
 right section is enough. The bar: *would past-me have saved an hour if this
 had been written down?*
 
-## Windows on the 1.4 LTS line is NOT built (2026-09-01)
-
-`windows_amd64` is excluded from the LTS build, smoke test and deploy. A
-Windows user still on DuckDB 1.4 therefore gets a 404 at INSTALL. Windows is
-still built and shipped for the current stable line.
-
-Cause, which is not ours: `v1.4-andium` defaults to vcpkg `ce613c4137`
-(2025-04-09), whose tree pins `msys2-runtime-3.5.4-2`. msys2 has since removed
-that version from every mirror, so any port whose portfile calls
-`vcpkg_acquire_msys` 404s before a line of our code compiles. Catch2 was one
-such port (now `"platform": "!windows"` in vcpkg.json, which it should have
-been anyway); OpenSSL's pkgconfig fixup is another and cannot be dropped.
-
-**Pinning the LTS job forward to v1.5-variegata's vcpkg (`84bab45d`) was tried
-and does not work.** It fixes the msys2 404, but the v1.4 toolchain does not
-take that tree: `linux_arm64` then fails inside the Docker build step and
-fail-fast cancels the rest of the matrix. The result is worse than the problem.
-
-Two things worth knowing if you pick this up:
-
-* The pipeline only runs on push/PR, and had last run green on 2026-08-09.
-  Three weeks of mirror rot were invisible because nothing exercised it. A red
-  Windows job on your PR is very likely not your PR.
-* All three LTS stages (build, smoke test, deploy) must carry the SAME
-  `exclude_archs`. The smoke test downloads an artifact per arch, so excluding
-  an arch from the build alone makes it fail on a missing download instead.
-
-Remove the exclusion when `v1.4-andium` moves its vcpkg default forward, or
-when a revision is found that satisfies both the msys2 fix and the v1.4
-toolchain on all four platforms.
-
 ## JSON parsing: picojson, and why not duckdb's yyjson
 
 Asked and answered (2026-09-01): reuse the parser already in the duckdb source
@@ -123,9 +92,10 @@ GEN=ninja make debug          # debug (ASAN, lldb)
 off the shipped tag. This is not bookkeeping: the submodule once sat ~9,600
 commits past its tag on DuckDB main, every local build was green, and every
 release build was red -- `BaseSecret::GetName()` returns `const string &` on
-all released 1.4/1.5 versions and `const Identifier &` on main. Local builds
-target **latest stable**; CI additionally builds the **1.4 LTS** line, so a
-local green is necessary but not sufficient.
+all released 1.x versions and `const Identifier &` on main. Local builds
+target **latest stable** (v1.5.6); CI additionally builds the **DuckDB 2.0**
+line, so a local green is necessary but not sufficient. DuckDB 1.4.x LTS is
+no longer supported.
 
 Artifacts:
 
@@ -370,10 +340,10 @@ internal ordering.
 **A drifted `duckdb` submodule makes every local green meaningless.** It once
 sat ~9,600 commits past its tag on DuckDB main; every local build passed and
 every release build failed, because `BaseSecret::GetName()` returns
-`const string &` on all released 1.4/1.5 versions and `const Identifier &` on
+`const string &` on all released 1.x versions and `const Identifier &` on
 main. `make check_pin` now enforces the tag. Local builds cover **stable
-only** — CI also builds the 1.4 LTS line, so a local pass is necessary but not
-sufficient.
+only** — CI also builds the DuckDB 2.0 line, so a local pass is necessary but
+not sufficient.
 
 **Drive picks the native type from the SOURCE content type, not the target.**
 `files.create` with `mimeType: application/vnd.google-apps.document` and a
@@ -431,8 +401,8 @@ the distribution pipeline checks DuckDB out properly.
 
 **A new .cpp must include `<cstdint>` itself, even if its header does.** The
 musl gate caught `gdrive_trace.cpp` in 3 seconds of CI: the TU named `uint64_t`
-and glibc supplied it transitively where musl does not, and musl is in the 1.4
-LTS matrix. `make check_cstdint` exists for exactly this and is worth running
+and glibc supplied it transitively where musl does not, and linux_amd64_musl
+is a DuckDB distribution target (opt-in on 1.5/2.0). `make check_cstdint` exists for exactly this and is worth running
 before pushing a new source file.
 
 **`fopen(path, "we")` is glibc-only.** The `e` (O_CLOEXEC) mode extension is
