@@ -42,7 +42,8 @@ jobs:
   # AND duckdb-sharepoint with IGNORE_ON_CONFLICT; whichever loads first wins,
   # so the two copies must stay identical. Compares against the sibling's main.
   vfs-parity:
-    timeout-minutes: 15
+    # 25: a push to main may poll the sibling for up to 15 min (below).
+    timeout-minutes: 25
     name: Shared VFS functions identical to duckdb-sharepoint
     runs-on: ubuntu-latest
     steps:
@@ -59,7 +60,26 @@ jobs:
             git -C sibling checkout -q "$BRANCH"
           fi
           echo "sibling at $(git -C sibling rev-parse --abbrev-ref HEAD)"
-      - run: ./scripts/check_vfs_parity.sh sibling
+      # Offline self-test of the parity script, the --wait polling included.
+      - name: Test the parity check script
+        run: ./scripts/test_vfs_parity.sh
+      # Merge-order race: when the first PR of a pair merges, its push-to-main
+      # run compares against the sibling's main, which has not merged its half
+      # yet. So a push to the default branch polls the sibling for up to
+      # 15 min; real drift still fails then. PRs and the nightly compare at
+      # once. Args are computed in bash: `cond && '' || x` in a GitHub
+      # expression always yields x.
+      - name: Compare the shared VFS functions
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          DEFAULT_REF: refs/heads/${{ github.event.repository.default_branch }}
+        run: |
+          args=()
+          if [[ "$EVENT" == "push" && "$REF" == "$DEFAULT_REF" ]]; then
+            args=(--wait 900)
+          fi
+          ./scripts/check_vfs_parity.sh "${args[@]}" sibling
 
   # A submodule that has drifted off the shipped tag makes every local green
   # meaningless: DuckDB's C++ API differs between versions, so code can
