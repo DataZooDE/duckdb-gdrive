@@ -74,10 +74,15 @@ inline std::string PathArgument(const Value &value, const char *function) {
 		throw InvalidInputException("%s: the path must not be NULL", function);
 	}
 	auto arg = StringValue::Get(value);
-	if (arg.rfind("gdrive://", 0) != 0) {
-		arg = "gdrive://" + arg;
+	if (arg.rfind("gdrive://", 0) == 0) {
+		return arg;
 	}
-	return arg;
+	// Another scheme (s3://, a mis-cased GDrive://) is not a Drive path; taking
+	// it as a relative name made "gdrive://s3://bucket/x".
+	if (arg.find("://") != std::string::npos) {
+		throw InvalidInputException("%s: '%s' is not a gdrive:// path", function, arg);
+	}
+	return "gdrive://" + arg;
 }
 
 //! A nextPageToken chain longer than this is a server bug, not a listing.

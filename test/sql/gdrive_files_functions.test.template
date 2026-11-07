@@ -59,11 +59,11 @@ FROM read_gdrive_files('gdrive://fixtures')
 ----
 4	0
 
-# A native Sheet reports no checksum and no revision id.
-query II
-SELECT md5 IS NULL, version IS NULL FROM read_gdrive_files('gdrive://fixtures/Budget')
+# A native Sheet reports no checksum, no revision id and no size.
+query III
+SELECT md5 IS NULL, version IS NULL, size IS NULL FROM read_gdrive_files('gdrive://fixtures/Budget')
 ----
-true	true
+true	true	true
 
 # ---------------------------------------------------------------------------
 # A glob: the rows come from the listings glob() makes anyway -- no files.get
@@ -112,6 +112,41 @@ statement error
 SELECT * FROM read_gdrive_files(NULL)
 ----
 the path must not be NULL
+
+# A brace expansion of literal names is resolved without a listing; its rows
+# must still be complete (they came back blank -- found in review). An
+# overlapping expansion lists each file once, with its row.
+query IIII
+SELECT count(*), count(*) FILTER (WHERE name IS NOT NULL AND id IS NOT NULL AND mime_type = 'text/csv'),
+       count(DISTINCT path), bool_and(size IS NOT NULL)
+FROM read_gdrive_files('gdrive://fixtures/{small,empty}.csv')
+----
+2	2	2	true
+
+query II
+SELECT count(*), count(*) FILTER (WHERE name = 'small.csv' AND id = '${ID:small.csv}')
+FROM read_gdrive_files('gdrive://fixtures/{small.csv,small*.csv}')
+----
+1	1
+
+# A literal path that names nothing is an error, not zero rows: a typo must
+# not read as "no files". (A glob that matches nothing is zero rows, above.)
+statement error
+SELECT * FROM read_gdrive_files('gdrive://fixtures/no-such.csv')
+----
+no such file or folder
+
+# Another scheme is not taken as a relative Drive name.
+statement error
+SELECT * FROM read_gdrive_files('s3://bucket/x.csv')
+----
+is not a gdrive:// path
+
+# Native Docs/Sheets have no size of their own: Drive's 1024 is not one.
+query I
+SELECT size IS NULL FROM read_gdrive_files('gdrive://fixtures/Notes')
+----
+true
 
 # ---------------------------------------------------------------------------
 # search_gdrive: Drive's full-text search. A hit's id: path reads back.

@@ -45,9 +45,12 @@ vector<Value> FileValues(const std::string &path, const FileRow &r) {
 		values.emplace_back(kv.second);
 	}
 	const DrivePerson owner = r.owners.empty() ? DrivePerson() : r.owners[0];
+	// Drive reports a size for native Docs/Sheets (1024, whatever the
+	// content); it is not their size. Their bytes exist only as an export.
+	const bool native = r.mime_type.rfind("application/vnd.google-apps.", 0) == 0;
 	return {Value(path),
 	        Value(r.name),
-	        SizeOrNull(r.size),
+	        native ? Value(LogicalType::BIGINT) : SizeOrNull(r.size),
 	        TimestampOrNull(r.created),
 	        TimestampOrNull(r.modified),
 	        TextOrNull(r.modified_by.name),
@@ -81,6 +84,9 @@ unique_ptr<FunctionData> FilesBind(ClientContext &context, TableFunctionBindInpu
 		for (auto &item : fs.ResolveItems(path, opener, /*rich=*/true, /*folder_as_item=*/false)) {
 			if (item.meta.IsFolder()) {
 				continue;
+			}
+			if (!item.has_row) {
+				throw InternalException("gdrive: read_gdrive_files got no metadata for '%s'", item.path);
 			}
 			data->rows.push_back(FileValues(item.path, item.row));
 		}
@@ -262,10 +268,11 @@ void RegisterFileFunctions(ExtensionLoader &loader) {
 		duckdb_compat::AddNamedParameter(fn, "max_results", LogicalType::BIGINT);
 		duckdb_compat::AddNamedParameter(fn, "mime_type", LogicalType::VARCHAR);
 		Register(loader, fn,
-		         "Drive's full-text search over names and contents, as rows with read_gdrive_files' columns. path is "
-		         "a gdrive://id: path, so a hit reads straight back. Searches what the secret's identity can see (its "
-		         "Shared Drive when it binds DRIVE_ID); max_results (default 500) caps the rows, mime_type filters "
-		         "exactly.",
+		         "Drive's full-text search over names and contents, as rows with read_gdrive_files' columns (folders "
+		         "included). path is a gdrive://id: path, so a hit reads straight back. Searches EVERYTHING the "
+		         "secret's identity can see -- its Shared Drive when the secret binds DRIVE_ID, but not limited by "
+		         "ROOT_FOLDER_ID. max_results (default 500) caps the rows; mime_type filters exactly, e.g. "
+		         "'application/vnd.google-apps.spreadsheet' (Sheets), '...document' (Docs), '...folder', 'text/csv'.",
 		         {"SELECT name, path, modified FROM search_gdrive('quarterly forecast')",
 		          "SELECT name FROM search_gdrive('', mime_type := 'application/vnd.google-apps.spreadsheet')"});
 	}

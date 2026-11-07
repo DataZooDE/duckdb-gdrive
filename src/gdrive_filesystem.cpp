@@ -1563,6 +1563,25 @@ vector<OpenFileInfo> GDriveFileSystem::GlobImpl(const string &path, optional_ptr
 	}
 }
 
+namespace {
+//! files.get with the FileRow fields: a literal match's row, or one Glob
+//! resolved without a listing (a brace-literal, the literal fallback).
+FileRow FetchFileRow(GDriveClient &client, const std::string &file_id, const std::string &path) {
+	auto resp = client.ApiGet("/drive/v3/files/" + QueryEncode(file_id) + "?fields=" + QueryEncode(FileRowFields()) +
+	                              "&" + AllDrivesQuery(),
+	                          &DriveCallStats::files_get);
+	if (!resp.ok) {
+		ThrowGDriveError(resp.error, path);
+	}
+	FileRow row;
+	std::string error;
+	if (!ParseFileRow(resp.body, row, error)) {
+		throw IOException("gdrive: malformed metadata response for '%s': %s", path, error);
+	}
+	return row;
+}
+} // namespace
+
 std::vector<GDriveItem> GDriveFileSystem::ResolveItems(const string &path, optional_ptr<FileOpener> opener, bool rich,
                                                        bool folder_as_item) {
 	auto parsed = ParseGDriveUri(path);
@@ -1573,12 +1592,33 @@ std::vector<GDriveItem> GDriveFileSystem::ResolveItems(const string &path, optio
 	const bool literal = parsed.uri.kind == GDriveUriKind::FILE_ID || !HasGlobMetacharacters(path);
 	if (!literal) {
 		GlobImpl(path, opener, rich ? FileRowFields() : "", &items);
-		// Overlapping {a,b} expansions: Glob dedupes its paths, and so must this.
-		std::unordered_set<std::string> seen;
+		// Overlapping {a,b} expansions: Glob dedupes its paths, and so must
+		// this -- keeping a match that came with its row over one without.
+		std::unordered_map<std::string, size_t> at;
 		std::vector<GDriveItem> unique;
 		for (auto &item : items) {
-			if (seen.insert(item.path).second) {
+			auto hit = at.find(item.path);
+			if (hit == at.end()) {
+				at.emplace(item.path, unique.size());
 				unique.push_back(std::move(item));
+			} else if (!unique[hit->second].has_row && item.has_row) {
+				unique[hit->second] = std::move(item);
+			}
+		}
+		// A brace-literal ("{a,b}.csv") or the literal fallback is resolved
+		// directly, with no listing to carry the row: fetch it, one files.get
+		// each. Without this those rows came back blank (found in review).
+		if (rich) {
+			std::unique_ptr<GDriveClient> client;
+			for (auto &item : unique) {
+				if (item.has_row) {
+					continue;
+				}
+				if (!client) {
+					client = CreateGDriveClient(GetAuthContext(RequireOpener(opener, path), path));
+				}
+				item.row = FetchFileRow(*client, item.meta.id, item.path);
+				item.has_row = true;
 			}
 		}
 		return unique;
@@ -1600,7 +1640,10 @@ std::vector<GDriveItem> GDriveFileSystem::ResolveItems(const string &path, optio
 	auto client = CreateGDriveClient(auth);
 	DriveFileMeta meta;
 	if (!TryResolvePath(cache, *client, auth, parsed.uri, meta)) {
-		return items;
+		// A literal path that names nothing is an error, as in the sibling
+		// extension: returning no rows made a typo read as "nothing is shared"
+		// in a permissions audit. Only a glob may match nothing.
+		throw IOException("gdrive: no such file or folder: '%s'", path);
 	}
 
 	if (meta.IsFolder() && !folder_as_item) {
@@ -1635,16 +1678,7 @@ std::vector<GDriveItem> GDriveFileSystem::ResolveItems(const string &path, optio
 	item.path = path;
 	item.meta = meta;
 	if (rich) {
-		auto resp = client->ApiGet("/drive/v3/files/" + QueryEncode(meta.id) + "?fields=" +
-		                               QueryEncode(FileRowFields()) + "&" + AllDrivesQuery(),
-		                           &DriveCallStats::files_get);
-		if (!resp.ok) {
-			ThrowGDriveError(resp.error, path);
-		}
-		std::string error;
-		if (!ParseFileRow(resp.body, item.row, error)) {
-			throw IOException("gdrive: malformed metadata response for '%s': %s", path, error);
-		}
+		item.row = FetchFileRow(*client, meta.id, path);
 		item.has_row = true;
 	}
 	items.push_back(std::move(item));
