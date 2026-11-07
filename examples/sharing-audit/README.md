@@ -6,7 +6,7 @@ reports back to Drive:
 
 | report | what it lists |
 |---|---|
-| `exposed.csv` | files anyone with the link (`anonymous`) or the whole domain (`organization`) can open, and whether search finds them |
+| `exposed.csv` | files and folders anyone with the link (`anonymous`) or the whole domain (`organization`) can open, and whether search finds them |
 | `external.csv` | people and groups outside your domain with direct access |
 | `stale.csv` | shared files nobody has modified for a year |
 
@@ -27,5 +27,7 @@ reports back to Drive:
 
 `gdrive_permissions` lists what the signed-in identity may see of the
 sharing: someone with view access to a file may get a `403` for its
-permissions. Run the audit as the folders' owner, or a Workspace user with
-access to their sharing settings.
+permissions, which stops the audit with an error naming the file. Run it as
+the folders' owner, or a Workspace user with access to their sharing
+settings. It makes one Drive call per file and folder: a tree of thousands
+takes minutes.

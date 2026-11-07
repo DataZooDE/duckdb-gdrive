@@ -10,4 +10,6 @@ result back to Drive, where people already look.
 
 Each needs a `gdrive` secret (see the main README's
 [Authentication](../README.md#authentication)). Both were run against a live
-Drive with the community builds for DuckDB v1.5.6.
+Drive with a build of `main` for DuckDB v1.5.6 (`anofox_forecast` from the
+community repository). `sharing-audit` needs the release after v2026.10.18:
+`gdrive_permissions` and `read_gdrive_files` are not in v2026.10.18.

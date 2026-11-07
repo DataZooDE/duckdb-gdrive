@@ -611,6 +611,37 @@ so anything asserting on changes SINCE a token polls, in
 `e2e/tests/test_changes.py`, never in SQLLogicTest. An unknown token answers
 `400 Invalid Value` on `pageToken`.
 
+**Crew review + exploratory testing, 2026-11-07 -- what they found that the
+suites did not.** Every live suite was green; independent reviewers and three
+testers acting as users found seven data-loss or wrong-answer bugs. The
+lessons:
+
+- *A path alias is a deletion hazard.* COPY stages at `dir/tmp_<name>` and, on
+  failure, `TryRemoveFile`s what it "created" (v1.5.6: the global state's
+  destructor; 2.0: `copy_output_lifecycle.cpp`). A browser address's tmp path
+  maps to the SAME file id, so the cleanup trashed the user's file.
+  `GDriveFileSystem::TryRemoveFile` is a no-op for addresses. Test the FAILURE
+  path of every write form, not just success.
+- *Drive's `name='...'` query is case-insensitive*, Drive's names are not:
+  writing `report.csv` replaced `Report.csv`. Name matches are filtered to the
+  exact name client-side.
+- *Drive accepts writes that destroy*: `files.update` with bytes onto a folder
+  (discarded) or a native Sheet (content gone), a move onto a Sheet (trashed).
+  `RefuseReplacing` gates every write and move.
+- *Translating a URL must keep everything that changes its meaning*: dropping
+  `?version=` turned `remove_file(<address>?version=...)` into removing the
+  current file.
+- *The changes feed reports a folder, not its children*, when the folder is
+  renamed or moved; and it is per drive, so "outside the folder" is every
+  other change the identity can see. `gdrive_changes` expands folder events
+  and makes out-of-folder deletes opt-in (`outside := true`).
+- *Empty is not "nothing"*: a literal path that names nothing must error, or a
+  permissions audit with a typo reports "nothing shared".
+- Native Docs/Sheets report `size: 1024` whatever their content.
+
+`.crew/` holds the crew runs (git-ignored). `helpers.drop_scratch` only
+accepts `run-*` names -- exploratory testers need their own cleanup.
+
 **Releasing:** follow `docs/RELEASE.md`. The community-extensions repo builds
 from a tagged commit and runs none of our live tests, so whatever is broken
 at tag time ships.

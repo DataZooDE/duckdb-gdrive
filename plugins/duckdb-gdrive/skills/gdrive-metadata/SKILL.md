@@ -17,8 +17,10 @@ user-invocable: false
 
 # gdrive extension — Drive's metadata as tables
 
-Every function takes a `gdrive://` path (the scheme may be left out), an `id:` path or a
-browser address. Table functions take no subqueries: pass a value through
+New after v2026.10.18 (in `main` and the next release). Every function takes a
+`gdrive://` path (the scheme may be left out), an `id:` path or a browser address -- of a
+file, not a `?version=`; a literal path that names nothing is an error, a glob may match
+nothing. Table functions take no subqueries: pass a value through
 `SET VARIABLE x = (...)` and `getvariable('x')`.
 
 ## Files with their metadata
@@ -29,6 +31,7 @@ FROM read_gdrive_files('gdrive://Finance/**/*.csv');      -- a glob, a file, or 
 Columns: `path, name, size, created, modified, modified_by(_email), owner(_email), mime_type,
 id, web_url, version, md5, description, starred, shared, parent_id, properties`
 (MAP of Drive's custom properties). A glob costs the listings `glob()` makes, no call per file.
+Native Docs/Sheets: `size`, `md5`, `version` are NULL.
 
 ## Search
 ```sql
@@ -38,7 +41,7 @@ SET VARIABLE p = (SELECT path FROM search_gdrive('plan 2026') LIMIT 1);
 SELECT * FROM read_csv(getvariable('p'));
 ```
 Full text over names and contents, everything the identity can see (its Shared Drive when
-the secret binds `DRIVE_ID`). `path` is `gdrive://id:<id>`; same columns as read_gdrive_files.
+the secret binds `DRIVE_ID`; `ROOT_FOLDER_ID` does NOT narrow it). Folders are hits too. `path` is `gdrive://id:<id>`; same columns as read_gdrive_files.
 
 ## Shared Drives
 `SELECT name, id FROM gdrive_drives()` (or `gdrive_drives(search := 'Fin')`) -- `id` is what
@@ -58,14 +61,21 @@ tmp-file-and-move makes a new file, with no history.
 ```sql
 SELECT token FROM gdrive_changes('gdrive://Finance', token := 'latest');     -- just a token
 SELECT * FROM gdrive_changes('gdrive://Finance', token := getvariable('t'));
+SELECT * FROM gdrive_changes('gdrive://Finance', token := getvariable('t'), outside := true);  -- for a mirror
 ```
 Rows: `_change` = `upsert` | `delete` | `checkpoint` (exactly one, last; its `token` is for
 next time), with `id, path, name, is_folder, mime_type, size, modified, modified_by(_email)`.
-No token = everything under the folder once. A file trashed, deleted, or moved OUT of the
-folder is a `delete` by `id` (path NULL when Drive no longer shows it under the folder).
-Drive's feed lags writes by seconds. An unknown or expired token is an error: start over.
-Mirror pattern: store the token FIRST, then the listing; each run delete the changed ids,
-insert the upserts, store the new token (README "Keeping a mirror").
+No token = everything under the folder once. A folder renamed or moved in brings its
+subtree (new paths). Trashed or deleted = `delete` by `id` (a permanent delete has no path
+and is always reported). Moved OUT looks like "never in": only `outside := true` reports
+it (as path-less deletes, a folder with its subtree), and with it every change elsewhere
+in the drive -- a mirror needs it, a "what's new here" query does not. Names shared by
+siblings or containing '/' get `gdrive://id:` paths. One row per id. The feed lags writes
+by seconds to minutes; a very old token replays everything since. An unknown or expired
+token is an error: start over.
+Mirror pattern: store the token FIRST, then the listing; each run (with `outside := true`)
+delete the changed ids, insert the non-folder upserts, store the new token (README
+"Keeping a mirror").
 
 ## Who can reach it
 ```sql
@@ -75,5 +85,6 @@ FROM gdrive_permissions('gdrive://Shared/**') WHERE granted_by = 'link';
 One row per permission: `role` (owner, organizer, fileOrganizer, writer, commenter, reader),
 `granted_by` = `direct` | `inherited` | `link`; `link_scope` = `anonymous` (anyone with the
 link) | `organization` (a domain), `discoverable` (findable in search), `link_url`,
-`inherited_from` (Shared Drives), `expires`. A file or folder, or the files of a glob. A grant
+`inherited_from` (Shared Drives), `expires`. A file or folder, or the files and folders of a
+glob (not the glob's root: add it separately); one call per item. A grant
 no higher than an inherited one is not recorded by Drive and reads as inherited.

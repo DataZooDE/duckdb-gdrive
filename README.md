@@ -204,11 +204,21 @@ COPY t TO 'https://drive.google.com/file/d/1a2b3c4d5e/view' (FORMAT csv);   -- o
 ```
 
 These are handled by this extension even when `httpfs` is loaded, which would
-otherwise fetch them without credentials. `drive.google.com/file/d/…`,
-`open?id=…`, `uc?id=…`, `docs.google.com/{spreadsheets,document,presentation}/d/…`
-and `drive.google.com/drive/folders/…` all work. Writing to a docs.google.com
-editor address -- a native Sheet or Doc -- is refused: it has no bytes to
-replace. `web_url` from `read_gdrive_files` is such an address and reads back.
+otherwise fetch them without credentials -- so an address in a shared SQL
+script reads, writes and removes with the credentials of whoever runs it.
+`drive.google.com/file/d/…`, `open?id=…`, `uc?id=…`,
+`docs.google.com/{spreadsheets,document,presentation}/d/…` all work for
+reading, and a `version=<revision id>` in the address's query reads that
+version. A folder address (`drive.google.com/drive/folders/<id>`) works in the
+metadata functions (`read_gdrive_files`, `gdrive_permissions`,
+`gdrive_changes`), not in `read_csv` or `glob`; nothing may follow its id.
+`web_url` from `read_gdrive_files` is such an address and reads back.
+
+Writes need the file's own address, `drive.google.com/file/d/<id>/view` (or
+`gdrive://id:<id>`): `COPY` stages its output under the address's last
+segment, which only in that form is not the id. A docs.google.com editor
+address -- a native Sheet or Doc -- is refused, as is writing over any folder
+or native Google file: none has bytes to replace.
 
 `write_blob`, `remove_file`, `move_file` and `file_size` don't depend on the
 scheme, so they work for any filesystem DuckDB can reach (`s3://`, `gs://`,
@@ -259,6 +269,11 @@ is open, chunks carry no token, so a long upload cannot fail on token expiry.
 Drive cannot write at a byte offset, so a positional write raises an error
 rather than silently corrupting the file.
 
+Names are **case-sensitive**, as Drive stores them: `report.csv` and
+`Report.csv` are two files, and writing one never replaces the other. A write
+never replaces a folder or a native Doc/Sheet (it would destroy its content),
+and a file in the trash is gone -- by path and by `id:`.
+
 `DELETE` moves to **trash**, not permanent deletion -- `SET
 gdrive_permanent_delete=true` to opt in. Renames are **not atomic**; DuckDB's
 storage manager assumes they are, so do not put a writable DuckDB database
@@ -305,10 +320,14 @@ never rewritten in place, which is what `gdrive_immutable_prefixes` is for.
 
 ## Drive's metadata as tables
 
+> New after v2026.10.18: these functions are on `main` and in the next
+> release, not in the community build of v2026.10.18.
+
 Every function takes a `gdrive://` path (the scheme may be left out), an `id:`
-path, or a browser address. Table functions take no subqueries, so a value
-from one query goes to the next through a variable: `SET VARIABLE p = (...)`,
-then `getvariable('p')`.
+path, or a browser address -- naming a file, not one of its versions. A
+literal path that names nothing is an error; only a glob may match nothing.
+Table functions take no subqueries, so a value from one query goes to the
+next through a variable: `SET VARIABLE p = (...)`, then `getvariable('p')`.
 
 ### What's in a folder: `read_gdrive_files`
 
@@ -322,7 +341,8 @@ directly in it): `path`, `name`, `size`, `created`, `modified`, `modified_by`
 and `owner` (and their `_email`), `mime_type`, `id`, `web_url`, `version` (the
 revision id), `md5`, `description`, `starred`, `shared`, `parent_id`, and the
 file's custom `properties` as a MAP. A glob costs exactly the listings `glob()`
-makes, with no call per file.
+makes, with no call per file. Native Docs and Sheets have no `size`, `md5` or
+`version` of their own (NULL): their bytes exist only as an export.
 
 ### Search: `search_gdrive`
 
@@ -333,11 +353,13 @@ SET VARIABLE plan = (SELECT path FROM search_gdrive('plan 2026') LIMIT 1);
 SELECT * FROM read_csv(getvariable('plan'));
 ```
 
-Drive's full-text search over names and contents, across everything the
-secret's identity can see (its Shared Drive, when the secret binds
-`DRIVE_ID`). A hit's `path` is `gdrive://id:<id>`, so it reads straight back;
-the columns are `read_gdrive_files`'. `max_results` (default 500) caps the
-rows. Drive indexes new content with a delay.
+Drive's full-text search over names and contents, across **everything the
+secret's identity can see** -- its Shared Drive when the secret binds
+`DRIVE_ID`, but `ROOT_FOLDER_ID` does not narrow it. Folders are hits too. A
+hit's `path` is `gdrive://id:<id>`, so it reads straight back; the columns are
+`read_gdrive_files`'. `max_results` (default 500) caps the rows; `mime_type`
+filters exactly (`application/vnd.google-apps.spreadsheet`, `…document`,
+`…folder`, `text/csv`, …). Drive indexes new content with a delay.
 
 ### Shared Drives: `gdrive_drives`
 
@@ -369,9 +391,10 @@ staging replaces the file with a new one, which starts a new history.
 ### What changed since last time: `gdrive_changes`
 
 `gdrive_changes` reads Drive's changes feed for a folder: one row per file or
-folder created or changed (`_change = 'upsert'`) or deleted, trashed or moved
-out (`'delete'`, by `id`), then one `'checkpoint'` row whose `token` is what to
-pass next time. The token is yours to keep, e.g. in a table:
+folder created or changed under it (`_change = 'upsert'`; a folder renamed or
+moved in brings its whole subtree) or trashed or deleted (`'delete'`, by
+`id`), then one `'checkpoint'` row whose `token` is what to pass next time.
+The token is yours to keep, e.g. in a table:
 
 ```sql
 CREATE TABLE sync AS SELECT token FROM gdrive_changes('gdrive://Finance', token := 'latest');
@@ -381,17 +404,25 @@ SELECT _change, path, modified_by FROM gdrive_changes('gdrive://Finance', token 
 ```
 
 Without a token it lists everything under the folder once. Drive's feed is per
-drive, not per folder, so each change is placed by walking its parents; a file
-moved out of the folder is reported as a `delete` by id, without a path, so a
-mirror drops it. An expired token says so; start over without one. The feed
-trails a write by a few seconds.
+drive, not per folder: it reports every change the identity can see, and each
+is placed by walking its parents (one `files.get` per folder not seen yet). A
+file or folder moved **out** looks exactly like one that was never in, so by
+default neither is reported; `outside := true` reports both as path-less
+`delete`s (a folder with its subtree) -- what a mirror needs, at the cost of a
+row and a walk for every change elsewhere in the drive. A permanent deletion
+cannot be placed at all and is always reported. A path that would not read
+back (a name shared by siblings, a `/` in a name) is a `gdrive://id:` path.
+An expired token says so; start over without one. A very old token replays
+everything since, which on a busy drive is a long, sequential walk. The feed
+trails a write by seconds to minutes.
 
 **Keeping a mirror.** A table of a folder's files, kept current from the
 change feed, with the token stored beside it. Here in DuckLake, so earlier
 states stay queryable:
 
 ```sql
--- Once:
+-- Once (the mirror holds files; folders only shape their paths):
+INSTALL ducklake; LOAD ducklake;
 ATTACH 'ducklake:mirror.ducklake' AS lake (DATA_PATH 'mirror/');
 -- The token first, then the listing: a change in between shows up twice, not never.
 CREATE TABLE lake.sync AS
@@ -400,8 +431,12 @@ CREATE TABLE lake.files AS
     SELECT id, path, name, size, modified, modified_by FROM read_gdrive_files('gdrive://Finance/**');
 
 -- Each run (e.g. from cron):
+LOAD ducklake;
+ATTACH 'ducklake:mirror.ducklake' AS lake (DATA_PATH 'mirror/');
 SET VARIABLE t = (SELECT token FROM lake.sync);
-CREATE TEMP TABLE c AS SELECT * FROM gdrive_changes('gdrive://Finance', token := getvariable('t'));
+-- outside := true: a file or folder moved out of Finance must leave the mirror.
+CREATE TEMP TABLE c AS
+    SELECT * FROM gdrive_changes('gdrive://Finance', token := getvariable('t'), outside := true);
 DELETE FROM lake.files WHERE id IN (SELECT id FROM c WHERE _change <> 'checkpoint');
 INSERT INTO lake.files
     SELECT id, path, name, size, modified, modified_by FROM c WHERE _change = 'upsert' AND NOT is_folder;
@@ -410,12 +445,14 @@ UPDATE lake.sync SET token = (SELECT token FROM c WHERE _change = 'checkpoint');
 
 Running it again is harmless: each run applies what changed since the last.
 The harness checks exactly this -- a mirror that follows the feed ends up equal
-to a fresh listing (`e2e/tests/test_changes.py`).
+to a fresh listing, across deletes, new files, updates, a folder renamed and a
+folder moved out (`e2e/tests/test_changes.py`).
 
 ### Who can see it: `gdrive_permissions`
 
-`gdrive_permissions` lists, for a file or folder or the files a glob matches,
-one row per permission: the `role`, how it was granted (`direct`, `inherited`,
+`gdrive_permissions` lists, for a file or folder or the files **and folders** a
+glob matches, one row per permission -- one `permissions.list` call per item,
+so a tree of thousands takes minutes: the `role`, how it was granted (`direct`, `inherited`,
 or general access by `link`), the user, group or domain, and for general
 access its `link_scope` (`anonymous` = anyone with the link, `organization` = a
 domain) and whether search can find it (`discoverable`). For audits such as

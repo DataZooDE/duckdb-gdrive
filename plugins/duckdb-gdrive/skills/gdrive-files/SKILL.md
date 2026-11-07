@@ -43,8 +43,11 @@ SELECT * FROM read_csv('https://docs.google.com/spreadsheets/d/1x2y3z.../edit#gi
 SELECT * FROM read_gdrive_files('https://drive.google.com/drive/folders/1f2g3h...');     -- a folder
 COPY t TO 'https://drive.google.com/file/d/1a2b3c.../view' (FORMAT csv);                 -- overwrites that file
 ```
-Handled by this extension even with httpfs loaded. Writing to a docs.google.com editor
-address (a native Sheet/Doc) is refused. `web_url` from `read_gdrive_files` reads back.
+Handled by this extension even with httpfs loaded (so it acts with the runner's secret).
+`?...&version=<id>` in an address reads that version. Folder addresses work in the metadata
+functions only, and nothing may follow the folder id. Writes need `/file/d/<id>/view` (or
+`gdrive://id:<id>`); bare `/file/d/<id>`, `open?id=` and editor addresses are refused.
+`web_url` from `read_gdrive_files` reads back.
 
 ## Native Sheets and Docs
 They have no bytes, so they are exported once per open: Sheets as CSV (the **first tab**),
@@ -57,6 +60,8 @@ CREATE TABLE budget AS SELECT * FROM read_csv('gdrive://Finance/Budget');
 ## Writing
 - Whole files only: sequential, streamed in bounded memory (`gdrive_upload_chunk_bytes`,
   16 MiB); positional writes and appends are refused. A failed `COPY` publishes nothing.
+- Names are case-sensitive (`Report.csv` and `report.csv` are two files). A write never
+  replaces a folder or a native Doc/Sheet; a trashed file is gone by path and by id.
 - Overwrite keeps the old file until the new one lands; the replaced file goes to the trash
   (`SET gdrive_permanent_delete = true` to delete outright). `write_blob` updates in place
   (same id, a new revision -- see gdrive-metadata's versions).
