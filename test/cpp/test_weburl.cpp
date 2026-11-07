@@ -100,3 +100,41 @@ TEST_CASE("WebUrlToGDrivePath: addresses map to the id: form, anything else pass
 	CHECK_FALSE(WebUrlToGDrivePath("https://drive.google.com/drive/my-drive", out, error));
 	CHECK_FALSE(error.empty());
 }
+
+TEST_CASE("ParseDriveWebUrl: only /file/d/<id>/<more> is writable", "[weburl]") {
+	// COPY stages at "tmp_" + the last segment; only here is that not the id.
+	CHECK(ParseDriveWebUrl("https://drive.google.com/file/d/" + kId + "/view").writable);
+	CHECK(ParseDriveWebUrl("https://drive.google.com/file/d/" + kId + "/view?usp=sharing").writable);
+	CHECK_FALSE(ParseDriveWebUrl("https://drive.google.com/file/d/" + kId).writable);
+	CHECK_FALSE(ParseDriveWebUrl("https://drive.google.com/open?id=" + kId).writable);
+	CHECK_FALSE(ParseDriveWebUrl("https://drive.google.com/drive/folders/" + kId).writable);
+	CHECK_FALSE(ParseDriveWebUrl("https://docs.google.com/spreadsheets/d/" + kDocId + "/edit").writable);
+	// What COPY makes of the non-writable forms: another id, or no address.
+	CHECK(ParseDriveWebUrl("https://drive.google.com/file/d/tmp_" + kId).id == "tmp_" + kId);
+	CHECK_FALSE(ParseDriveWebUrl("https://drive.google.com/tmp_open?id=" + kId).ok);
+}
+
+TEST_CASE("ParseDriveWebUrl: a version in the query is carried over", "[weburl]") {
+	auto p = ParseDriveWebUrl("https://drive.google.com/file/d/" + kId + "/view?usp=sharing&version=0B9fS7-rev");
+	REQUIRE(p.ok);
+	CHECK(p.version == "0B9fS7-rev");
+	std::string out, error;
+	REQUIRE(WebUrlToGDrivePath("https://drive.google.com/file/d/" + kId + "/view?version=0B9fS7-rev", out, error));
+	CHECK(out == "gdrive://id:" + kId + "?version=0B9fS7-rev");
+	REQUIRE(WebUrlToGDrivePath("https://drive.google.com/open?id=" + kId + "&version=42", out, error));
+	CHECK(out == "gdrive://id:" + kId + "?version=42");
+}
+
+TEST_CASE("ParseDriveWebUrl: a folder address is exactly the folder", "[weburl]") {
+	// "/folders/<id>/*.csv" used to read the whole folder, dropping "/*.csv".
+	CHECK_FALSE(ParseDriveWebUrl("https://drive.google.com/drive/folders/" + kId + "/*.csv").ok);
+	CHECK_FALSE(ParseDriveWebUrl("https://drive.google.com/drive/folders/" + kId + "/sub/x.csv").ok);
+	CHECK(ParseDriveWebUrl("https://drive.google.com/drive/folders/" + kId + "/").ok); // a trailing slash
+}
+
+TEST_CASE("IsDriveWebUrl: hosts are case-insensitive", "[weburl]") {
+	CHECK(IsDriveWebUrl("https://DRIVE.GOOGLE.COM/file/d/" + kId + "/view"));
+	auto p = ParseDriveWebUrl("https://Docs.Google.Com/spreadsheets/d/" + kDocId + "/edit");
+	REQUIRE(p.ok);
+	CHECK(p.is_editor);
+}

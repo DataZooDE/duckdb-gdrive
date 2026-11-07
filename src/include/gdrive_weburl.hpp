@@ -38,11 +38,18 @@ struct DriveWebUrl {
 	//! A Docs / Sheets / Slides / Forms / Drawings editor address: the file
 	//! is a native Google one, readable through export, never writable.
 	bool is_editor = false;
+	//! drive.google.com/file/d/<id>/<more>: the one form a write may use.
+	//! COPY stages to "tmp_" + the last segment, which here is not the id --
+	//! a bare /file/d/<id> or open?id=<id> would stage onto another id or none.
+	bool writable = false;
+	//! A "version=<revision id>" in the query: the address names that version.
+	std::string version;
 };
 
 DriveWebUrl ParseDriveWebUrl(const std::string &url);
 
-//! The gdrive:// path an address denotes ("gdrive://id:<id>"), or `path`
+//! The gdrive:// path an address denotes ("gdrive://id:<id>", with
+//! "?version=<id>" when the address carries one), or `path`
 //! itself when it is not a Drive address. False, with `error`, for an address
 //! on a Drive host that names no file.
 bool WebUrlToGDrivePath(const std::string &path, std::string &out, std::string &error);

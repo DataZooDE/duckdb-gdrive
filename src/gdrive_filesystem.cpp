@@ -496,14 +496,24 @@ std::string GDriveFileSystem::DisambiguatePath(const std::string &parent_path, c
 unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path_in, FileOpenFlags flags,
                                                   optional_ptr<FileOpener> opener) {
 	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, {
-	if (flags.OpenForWriting() && IsDriveWebUrl(path_in) && ParseDriveWebUrl(path_in).is_editor) {
-		// An editor address names a native Doc/Sheet/Slides file: there are
-		// no bytes to replace, and uploading CSV over a Sheet is not a write
-		// anyone means. Reading it works (export).
-		throw InvalidInputException("gdrive: cannot write to '%s': it is a Google Docs editor address (a native "
-		                            "Doc, Sheet or Slides file), which has no bytes to replace. Write a file "
-		                            "instead, e.g. to a gdrive:// path.",
-		                            path_in);
+	if (flags.OpenForWriting() && IsDriveWebUrl(path_in)) {
+		auto address = ParseDriveWebUrl(path_in);
+		if (address.ok && address.is_editor) {
+			// An editor address names a native Doc/Sheet/Slides file: there
+			// are no bytes to replace, and uploading CSV over a Sheet is not a
+			// write anyone means. Reading it works (export).
+			throw InvalidInputException("gdrive: cannot write to '%s': it is a Google Docs editor address (a native "
+			                            "Doc, Sheet or Slides file), which has no bytes to replace. Write a file "
+			                            "instead, e.g. to a gdrive:// path.",
+			                            path_in);
+		}
+		if (!address.ok || !address.writable) {
+			// COPY stages its output at "tmp_" + the address's last segment.
+			// Only in /file/d/<id>/<more> is that segment not the id itself.
+			throw InvalidInputException("gdrive: cannot write to '%s': write through a file's own address, "
+			                            "https://drive.google.com/file/d/<id>/view, or through gdrive://id:<id>",
+			                            path_in);
+		}
 	}
 	const string path = ToGDrivePath(path_in);
 	auto context = RequireOpener(opener, path);
@@ -1389,6 +1399,13 @@ void GDriveFileSystem::RemoveFile(const string &filename_in, optional_ptr<FileOp
 	bool permanent = GetBoolSetting(opener, "gdrive_permanent_delete", false);
 	MutateRemoveFile(*client, cache, auth, parsed.uri, permanent);
 	});
+}
+
+bool GDriveFileSystem::TryRemoveFile(const string &filename, optional_ptr<FileOpener> opener) {
+	if (IsDriveWebUrl(filename)) {
+		return false;
+	}
+	return FileSystem::TryRemoveFile(filename, opener);
 }
 
 vector<OpenFileInfo> GDriveFileSystem::Glob(const string &path, FileOpener *opener) {

@@ -318,6 +318,12 @@ public:
 	void MoveFile(const string &source, const string &target,
 	              optional_ptr<FileOpener> opener = nullptr) override;
 	void RemoveFile(const string &filename, optional_ptr<FileOpener> opener = nullptr) override;
+	//! DuckDB's cleanup of a failed COPY: "remove what I created". A browser
+	//! address names a file that existed BEFORE the COPY -- its tmp path maps
+	//! to the same id -- so that cleanup must never remove one. It used to:
+	//! a failed COPY to an address trashed (or deleted) the user's file.
+	//! remove_file() calls RemoveFile and is unaffected.
+	bool TryRemoveFile(const string &filename, optional_ptr<FileOpener> opener = nullptr) override;
 	vector<OpenFileInfo> Glob(const string &path, FileOpener *opener = nullptr) override;
 
 	void FileSync(FileHandle &handle) override;

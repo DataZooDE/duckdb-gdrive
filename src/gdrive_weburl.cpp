@@ -1,6 +1,7 @@
 // Browser addresses as paths. PURE: see gdrive_weburl.hpp.
 #include "gdrive_weburl.hpp"
 
+#include <cctype>
 #include <cstring>
 #include <vector>
 
@@ -67,15 +68,29 @@ std::string QueryValue(const std::string &query, const std::string &key) {
 
 } // namespace
 
+namespace {
+//! Hosts are case-insensitive: DRIVE.GOOGLE.COM is drive.google.com.
+bool HostAt(const std::string &url, size_t at, const char *host) {
+	const size_t n = std::strlen(host);
+	if (url.size() < at + n) {
+		return false;
+	}
+	for (size_t i = 0; i < n; i++) {
+		if (std::tolower(static_cast<unsigned char>(url[at + i])) != host[i]) {
+			return false;
+		}
+	}
+	return url.size() == at + n || url[at + n] == '/' || url[at + n] == '?';
+}
+} // namespace
+
 bool IsDriveWebUrl(const std::string &url) {
 	const size_t scheme = SchemeLength(url);
 	if (scheme == 0) {
 		return false;
 	}
 	for (auto host : kHosts) {
-		const size_t n = std::strlen(host);
-		if (url.size() >= scheme + n && url.compare(scheme, n, host) == 0 &&
-		    (url.size() == scheme + n || url[scheme + n] == '/' || url[scheme + n] == '?')) {
+		if (HostAt(url, scheme, host)) {
 			return true;
 		}
 	}
@@ -90,7 +105,10 @@ DriveWebUrl ParseDriveWebUrl(const std::string &url) {
 	}
 	auto rest = url.substr(SchemeLength(url));
 	auto slash = rest.find_first_of("/?");
-	const auto host = rest.substr(0, slash);
+	auto host = rest.substr(0, slash);
+	for (auto &c : host) {
+		c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+	}
 	rest = slash == std::string::npos ? std::string() : rest.substr(slash);
 	// Fragment (#gid=0) and query apart from the path.
 	auto hash = rest.find('#');
@@ -137,12 +155,15 @@ DriveWebUrl ParseDriveWebUrl(const std::string &url) {
 	if (host == "drive.google.com") {
 		if (parts.size() >= 3 && parts[0] == "file" && parts[1] == "d") {
 			id = parts[2];
+			out.writable = parts.size() >= 4;
 		} else if (parts.size() == 1 && (parts[0] == "open" || parts[0] == "uc")) {
 			id = QueryValue(query, "id");
-		} else if (parts.size() >= 3 && parts[0] == "drive" && parts[1] == "folders") {
+		} else if (parts.size() == 3 && parts[0] == "drive" && parts[1] == "folders") {
+			// Exactly the folder: "/folders/<id>/*.csv" is not a Drive address,
+			// and silently dropping the "/*.csv" read the whole folder.
 			id = parts[2];
 			out.is_folder = true;
-		} else if (parts.size() >= 4 && parts[0] == "drive" && parts[1] == "mobile" && parts[2] == "folders") {
+		} else if (parts.size() == 4 && parts[0] == "drive" && parts[1] == "mobile" && parts[2] == "folders") {
 			id = parts[3];
 			out.is_folder = true;
 		}
@@ -170,10 +191,12 @@ DriveWebUrl ParseDriveWebUrl(const std::string &url) {
 		            "drive.google.com/open?id=<id>) or a folder (drive.google.com/drive/folders/<id>).";
 		out.is_folder = false;
 		out.is_editor = false;
+		out.writable = false;
 		return out;
 	}
 	out.ok = true;
 	out.id = id;
+	out.version = QueryValue(query, "version");
 	return out;
 }
 
@@ -188,6 +211,12 @@ bool WebUrlToGDrivePath(const std::string &path, std::string &out, std::string &
 		return false;
 	}
 	out = "gdrive://id:" + parsed.id;
+	// Carried over, so the version reads -- and every write, move and remove
+	// of it is refused. Dropped, remove_file(<address>?version=...) used to
+	// remove the CURRENT file (found by exploratory testing).
+	if (!parsed.version.empty()) {
+		out += "?version=" + parsed.version;
+	}
 	return true;
 }
 
