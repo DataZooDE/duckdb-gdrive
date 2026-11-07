@@ -70,6 +70,13 @@ unique_ptr<FunctionData> GDriveStatsBind(ClientContext &, TableFunctionBindInput
 	    // A HIGH-WATER MARK since the last reset: the most bytes one write
 	    // handle held in memory. Streaming writes bound it to one chunk.
 	    {"upload_buffer_peak_bytes", stats.upload_buffer_peak_bytes},
+	    // The table functions' endpoints (read_gdrive_files and search_gdrive
+	    // count as files_list / files_get).
+	    {"permissions_list", stats.permissions_list},
+	    {"revisions_list", stats.revisions_list},
+	    {"revisions_media", stats.revisions_media},
+	    {"changes_list", stats.changes_list},
+	    {"drives_list", stats.drives_list},
 	    // A GAUGE, not a counter: the live size of the path cache, which S-2.11
 	    // requires to be bounded. Asserting the bound needs a way to see it.
 	    {"path_cache_entries", static_cast<int64_t>(GetGlobalPathCacheEntries())},
@@ -172,8 +179,9 @@ void RegisterGDriveStats(ExtensionLoader &loader) {
 	    "successful or not), upload_chunks "
 	    "(data PUTs to a resumable upload session -- streaming writes; every attempt), upload_status_queries "
 	    "(empty status PUTs before a resume), upload_aborts (sessions cancelled, nothing "
-	    "published), upload_buffer_peak_bytes (a HIGH-WATER MARK: most bytes one write handle held), total "
-	    "(sum of the files_* and upload_* call counters), and path_cache_entries (a GAUGE: the live size of the "
+	    "published), upload_buffer_peak_bytes (a HIGH-WATER MARK: most bytes one write handle held), permissions_list, "
+	    "revisions_list, revisions_media (ranged reads of an earlier version), changes_list, drives_list (the "
+	    "metadata table functions' calls), total (sum of every Drive API call counter), and path_cache_entries (a GAUGE: the live size of the "
 	    "path->id cache, bounded by gdrive_path_cache_entries). Process-wide, not reset between queries -- call it before and "
 	    "after an operation and diff the two snapshots to measure that operation's amplification.";
 	desc.parameter_names = {};

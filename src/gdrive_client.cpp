@@ -74,7 +74,8 @@ int64_t DriveCallStats::Total() const {
 	// and status queries) and cancels are real round trips too; the buffer
 	// peak is a gauge and is not.
 	return files_get + files_list + files_media + files_export + files_create + files_update + files_delete +
-	       upload_chunks + upload_status_queries + upload_aborts;
+	       upload_chunks + upload_status_queries + upload_aborts + permissions_list + revisions_list +
+	       revisions_media + changes_list + drives_list;
 }
 
 // ---------------------------------------------------------------------------
@@ -137,6 +138,14 @@ std::string AllDrivesParams() {
 }
 
 } // namespace internal
+
+std::string AllDrivesQuery() {
+	return internal::AllDrivesParams();
+}
+
+std::string QueryEncode(const std::string &value) {
+	return internal::UrlEncode(value);
+}
 
 using internal::AllDrivesParams;
 using internal::BuildRangeHeader;
@@ -531,8 +540,13 @@ public:
 		return ExecuteWithRetry(HttpMethod::GET, path, {}, "", "", &DriveCallStats::files_get, {200});
 	}
 
-	DriveResponse List(const std::string &query, const std::string &page_token) override {
-		std::vector<DriveFileMeta> all_files;
+	DriveResponse List(const std::string &query, const std::string &page_token,
+	                   const std::string &file_fields) override {
+		const std::string fields =
+		    file_fields.empty() ? ListFieldsMask() : "nextPageToken,files(" + file_fields + ")";
+		// Drive's own file objects, kept whole: a caller that asked for more
+		// fields than DriveFileMeta holds gets them in the combined body.
+		picojson::array files_array;
 		std::string token = page_token;
 		DriveResponse last;
 
@@ -543,8 +557,8 @@ public:
 		// truncated success.
 		for (;;) {
 			std::ostringstream qs;
-			qs << "/drive/v3/files?q=" << UrlEncode(query) << "&pageSize=1000&fields=" << UrlEncode(ListFieldsMask())
-			   << "&" << AllDrivesParams();
+			qs << "/drive/v3/files?q=" << UrlEncode(query) << "&pageSize=1000&fields=" << UrlEncode(fields) << "&"
+			   << AllDrivesParams();
 			if (!drive_id_.empty()) {
 				qs << "&corpora=drive&driveId=" << UrlEncode(drive_id_);
 			}
@@ -557,9 +571,9 @@ public:
 				return last;
 			}
 
-			std::vector<DriveFileMeta> page_files;
-			std::string next_token;
-			if (!ParseFileList(last.body, page_files, next_token)) {
+			picojson::value page;
+			const auto parse_err = picojson::parse(page, last.body);
+			if (!parse_err.empty() || !page.is<picojson::object>()) {
 				DriveResponse bad;
 				bad.ok = false;
 				bad.http_status = last.http_status;
@@ -567,8 +581,27 @@ public:
 				bad.error.message = "malformed files.list response body";
 				return bad;
 			}
-			for (auto &f : page_files) {
-				all_files.push_back(std::move(f));
+			auto &top = page.get<picojson::object>();
+			auto files_it = top.find("files");
+			if (files_it != top.end()) {
+				if (!files_it->second.is<picojson::array>()) {
+					DriveResponse bad;
+					bad.ok = false;
+					bad.http_status = last.http_status;
+					bad.error.kind = GDriveErrorKind::UNKNOWN;
+					bad.error.message = "malformed files.list response body";
+					return bad;
+				}
+				for (auto &f : files_it->second.get<picojson::array>()) {
+					if (f.is<picojson::object>()) {
+						files_array.push_back(std::move(f));
+					}
+				}
+			}
+			std::string next_token;
+			auto token_it = top.find("nextPageToken");
+			if (token_it != top.end() && token_it->second.is<std::string>()) {
+				next_token = token_it->second.get<std::string>();
 			}
 			if (next_token.empty()) {
 				break;
@@ -576,23 +609,9 @@ public:
 			token = next_token;
 		}
 
-		// Re-serialize the fully-paginated result as one body so the caller's
+		// One body for the fully-paginated result, so the caller's
 		// ParseFileList() sees the complete set with an empty next_page_token
 		// (there is nothing left to follow).
-		picojson::array files_array;
-		files_array.reserve(all_files.size());
-		for (const auto &f : all_files) {
-			picojson::object obj;
-			obj["id"] = picojson::value(f.id);
-			obj["name"] = picojson::value(f.name);
-			obj["mimeType"] = picojson::value(f.mime_type);
-			if (f.size >= 0) {
-				obj["size"] = picojson::value(std::to_string(f.size));
-			}
-			obj["modifiedTime"] = picojson::value(f.modified_time);
-			obj["headRevisionId"] = picojson::value(f.head_revision_id);
-			files_array.emplace_back(obj);
-		}
 		picojson::object top;
 		top["files"] = picojson::value(files_array);
 
@@ -601,6 +620,10 @@ public:
 		out.http_status = 200;
 		out.body = picojson::value(top).serialize();
 		return out;
+	}
+
+	DriveResponse ApiGet(const std::string &path_and_query, int64_t DriveCallStats::*counter) override {
+		return ExecuteWithRetry(HttpMethod::GET, path_and_query, {}, "", "", counter, {200});
 	}
 
 	DriveResponse Download(const std::string &file_id, int64_t start, int64_t end) override {
@@ -1001,6 +1024,21 @@ private:
 		}
 		if (counter == &DriveCallStats::upload_status_queries) {
 			return "upload.status";
+		}
+		if (counter == &DriveCallStats::permissions_list) {
+			return "permissions.list";
+		}
+		if (counter == &DriveCallStats::revisions_list) {
+			return "revisions.list";
+		}
+		if (counter == &DriveCallStats::revisions_media) {
+			return "revisions.media";
+		}
+		if (counter == &DriveCallStats::changes_list) {
+			return "changes.list";
+		}
+		if (counter == &DriveCallStats::drives_list) {
+			return "drives.list";
 		}
 		return "unknown";
 	}

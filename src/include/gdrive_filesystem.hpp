@@ -2,6 +2,7 @@
 
 #include "gdrive_blockcache.hpp"
 #include "gdrive_client.hpp"
+#include "gdrive_rows.hpp"
 #include "gdrive_uri.hpp"
 
 #include "duckdb/common/file_system.hpp"
@@ -210,10 +211,40 @@ public:
 	bool write_failed = false;
 };
 
+//! One match of a path argument, for the table functions: the gdrive:// path
+//! (an `id:` path for a duplicate name, as Glob returns it), the narrow
+//! metadata every caller has, and -- when the caller asked for it -- Drive's
+//! full file row from the same listing.
+struct GDriveItem {
+	std::string path;
+	DriveFileMeta meta;
+	bool has_row = false;
+	FileRow row;
+};
+
 class GDriveFileSystem : public FileSystem {
 public:
 	GDriveFileSystem();
 	~GDriveFileSystem() override;
+
+	//! The instance registered for `db`. The table functions resolve paths
+	//! through it, so they share the filesystem's path cache rather than
+	//! walking Drive again. Throws when the extension is not loaded into `db`.
+	static GDriveFileSystem &ForDatabase(DatabaseInstance &db);
+	//! Called once from LoadInternal, before the filesystem is handed to the
+	//! VFS. The destructor deregisters it.
+	void AttachToDatabase(DatabaseInstance &db);
+
+	//! What a path argument names, for the table functions:
+	//!  - a glob: the files it matches, exactly as Glob() finds them;
+	//!  - a literal file (or `id:`): that file;
+	//!  - a literal folder: the folder itself when `folder_as_item`, else the
+	//!    files directly in it.
+	//! Not found is an empty result; ambiguity and API errors throw, as in
+	//! Glob(). `rich` asks the listings for the FileRow fields as well -- no
+	//! extra calls for a listed match, one files.get for a literal one.
+	std::vector<GDriveItem> ResolveItems(const string &path, optional_ptr<FileOpener> opener, bool rich,
+	                                     bool folder_as_item);
 
 	//! Cheap prefix test; DuckDB calls this on every path for every filesystem.
 	bool CanHandleFile(const string &fpath) override;
@@ -293,6 +324,14 @@ public:
 	bool Trim(FileHandle &handle, idx_t offset_bytes, idx_t length_bytes) override;
 
 private:
+	//! Glob's engine. `file_fields` non-empty asks every listing for those
+	//! fields too; `items`, when non-null, receives each match with its
+	//! metadata (and FileRow, from the same listing).
+	vector<OpenFileInfo> GlobImpl(const string &path, optional_ptr<FileOpener> opener, const std::string &file_fields,
+	                              std::vector<GDriveItem> *items);
+
+	DatabaseInstance *attached_db = nullptr;
+
 	//! Resolve a gdrive:// path to metadata, consulting the cache first.
 	//!
 	//! More than one match is an ERROR naming both file ids and suggesting

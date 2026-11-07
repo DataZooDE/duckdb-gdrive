@@ -3,6 +3,7 @@
 #include "gdrive_extension.hpp"
 #include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 #include "gdrive_filesystem.hpp"
+#include "gdrive_files_functions.hpp"
 #include "gdrive_stats.hpp"
 #include "gdrive_version.hpp"
 #include "gdrive_vfs_functions.hpp"
@@ -82,7 +83,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// filesystem object spans every ClientContext for the life of the
 	// DatabaseInstance (see the CacheKey security note in
 	// gdrive_filesystem.hpp for why that matters).
-	loader.GetDatabaseInstance().GetFileSystem().RegisterSubSystem(make_uniq<gdrive::GDriveFileSystem>());
+	{
+		auto fs = make_uniq<gdrive::GDriveFileSystem>();
+		// The table functions find the filesystem (and its path cache) here.
+		fs->AttachToDatabase(loader.GetDatabaseInstance());
+		loader.GetDatabaseInstance().GetFileSystem().RegisterSubSystem(std::move(fs));
+	}
 
 	// D-6: RemoveFile trashes by default; this opts into permanent
 	// files.delete. Trash is recoverable, which is the safer default on a
@@ -201,6 +207,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	gdrive::RegisterGDriveSecrets(loader);
 	gdrive::RegisterGDriveStats(loader);
+	gdrive::RegisterFileFunctions(loader);
 
 	// remove_file()/move_file(): the two FileSystem operations SQL never got.
 	// Registered here for want of a better home -- they are scheme-generic and
