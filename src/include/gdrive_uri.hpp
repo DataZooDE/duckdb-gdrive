@@ -25,6 +25,8 @@ namespace gdrive {
 // ---------------------------------------------------------------------------
 
 constexpr const char *GDRIVE_SCHEME = "gdrive://";
+//! Suffix naming an earlier version: gdrive://a/b.csv?version=<revision id>.
+constexpr const char *GDRIVE_VERSION_QUERY = "?version=";
 
 enum class GDriveUriKind {
 	//! gdrive://a/b/c.parquet -- resolve segment by segment
@@ -39,6 +41,9 @@ struct GDriveUri {
 	std::string file_id;
 	//! Populated when kind == PATH. Empty vector means the drive root.
 	std::vector<std::string> segments;
+	//! A Drive revision id from a trailing "?version=<id>", else empty. The
+	//! file is resolved as usual; reads then come from that revision.
+	std::string version;
 
 	//! Round-trips back to the canonical textual form. Used in error messages,
 	//! so a user is always shown a path they could paste back.
@@ -73,6 +78,8 @@ bool IsGDriveUri(const std::string &uri);
 //!   - "id:" with an empty id is an error
 //!   - percent-decoding is NOT performed: Drive file names may legitimately
 //!     contain '%', and DuckDB hands us the path already un-escaped
+//!   - a trailing "?version=<id>" (no '/' after it) sets `version` and is
+//!     not part of the path; "?version=" with nothing after it is an error
 GDriveUriParse ParseGDriveUri(const std::string &uri);
 
 //! True iff `uri` has EXACTLY the shape "gdrive://id:<fileId>/**/*.<ext>"

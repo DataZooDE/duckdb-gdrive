@@ -138,6 +138,11 @@ public:
 	//! defines it). `end` < 0 means "to end of file".
 	virtual DriveResponse Download(const std::string &file_id, int64_t start, int64_t end) = 0;
 
+	//! revisions.get?alt=media: the same ranged read of an EARLIER version
+	//! (gdrive://...?version=<id>), counted as revisions_media.
+	virtual DriveResponse DownloadRevision(const std::string &file_id, const std::string &revision_id, int64_t start,
+	                                       int64_t end) = 0;
+
 	//! files.export. Does NOT support Range -- the whole export is fetched.
 	virtual DriveResponse Export(const std::string &file_id, const std::string &mime_type) = 0;
 

@@ -324,6 +324,32 @@ std::string RevisionFields() {
 	return "id,modifiedTime,size,md5Checksum,mimeType,keepForever,lastModifyingUser(displayName,emailAddress)";
 }
 
+namespace {
+bool RevisionOf(const picojson::object &o, RevisionRow &row, std::string &error) {
+	row.id = Str(o, "id");
+	if (row.id.empty()) {
+		error = "a revision without an id";
+		return false;
+	}
+	row.modified = Str(o, "modifiedTime");
+	row.modified_by = PersonOf(Obj(o, "lastModifyingUser"));
+	row.size = SizeOf(o, "size");
+	row.md5 = Str(o, "md5Checksum");
+	row.mime_type = Str(o, "mimeType");
+	row.keep_forever = false;
+	Bool(o, "keepForever", row.keep_forever);
+	return true;
+}
+} // namespace
+
+bool ParseRevision(const std::string &json_object, RevisionRow &out, std::string &error) {
+	picojson::value holder;
+	if (!ParseTop(json_object, holder, error)) {
+		return false;
+	}
+	return RevisionOf(holder.get<picojson::object>(), out, error);
+}
+
 bool ParseRevisions(const std::string &json_body, std::vector<RevisionRow> &out, std::string &next_page_token,
                     std::string &error) {
 	picojson::value holder;
@@ -334,17 +360,9 @@ bool ParseRevisions(const std::string &json_body, std::vector<RevisionRow> &out,
 	next_page_token = Str(top, "nextPageToken");
 	return ForEachItem(top, "revisions", error, [&](const picojson::object &o) {
 		RevisionRow row;
-		row.id = Str(o, "id");
-		if (row.id.empty()) {
-			error = "a revision without an id";
+		if (!RevisionOf(o, row, error)) {
 			return false;
 		}
-		row.modified = Str(o, "modifiedTime");
-		row.modified_by = PersonOf(Obj(o, "lastModifyingUser"));
-		row.size = SizeOf(o, "size");
-		row.md5 = Str(o, "md5Checksum");
-		row.mime_type = Str(o, "mimeType");
-		Bool(o, "keepForever", row.keep_forever);
 		out.push_back(std::move(row));
 		return true;
 	});

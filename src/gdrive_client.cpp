@@ -647,6 +647,16 @@ public:
 		return out;
 	}
 
+	DriveResponse DownloadRevision(const std::string &file_id, const std::string &revision_id, int64_t start,
+	                               int64_t end) override {
+		return ExecuteWithRetry(HttpMethod::GET,
+		                        "/drive/v3/files/" + UrlEncode(file_id) + "/revisions/" + UrlEncode(revision_id) +
+		                            "?alt=media&" + AllDrivesParams(),
+		                        {{"Range", BuildRangeHeader(start, end)}}, "", "", &DriveCallStats::revisions_media,
+		                        {200, 206}, /*retry_non_idempotent=*/false, /*trace_range_off=*/start,
+		                        /*trace_range_len=*/end - start + 1);
+	}
+
 	DriveResponse DownloadUnused(const std::string &file_id, int64_t start, int64_t end) {
 		std::string path =
 		    "/drive/v3/files/" + UrlEncode(file_id) + "?alt=media&" + AllDrivesParams();

@@ -257,6 +257,24 @@ void ReadExactRangeTail(const std::string &path, void *buffer, int64_t nr_bytes,
 
 std::string BuildBlockKey(const GDriveAuthContext &auth, const DriveFileMeta &meta);
 
+namespace {
+//! An earlier version (gdrive://...?version=<id>) can be read, nothing else:
+//! writing, moving or deleting "a version" would act on the CURRENT file.
+void RefuseVersion(const GDriveUri &uri, const char *operation) {
+	if (!uri.version.empty()) {
+		throw InvalidInputException("gdrive: cannot %s '%s': an earlier version of a file is read-only", operation,
+		                            uri.ToString());
+	}
+}
+
+//! A ranged read of whatever the handle reads: the file, or the revision it
+//! names.
+DriveResponse DownloadFor(GDriveClient &client, const GDriveFileHandleImpl &h, int64_t start, int64_t end) {
+	return h.version.empty() ? client.Download(h.meta.id, start, end)
+	                         : client.DownloadRevision(h.meta.id, h.version, start, end);
+}
+} // namespace
+
 std::string CanonicalPathOf(const GDriveUri &uri) {
 	if (uri.kind != GDriveUriKind::PATH) {
 		return "";
@@ -476,6 +494,7 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 	auto client = CreateGDriveClient(auth);
 
 	if (flags.OpenForWriting()) {
+		RefuseVersion(parsed.uri, "write");
 		// Sequential, buffered write only -- nothing reaches Drive until
 		// Close() (HLD section 7, R-3).
 		std::string parent_id;
@@ -770,7 +789,43 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 		}
 	}
 
+	// An earlier version: the size, time and revision are the version's, and
+	// reads come from revisions.get. Asked of Drive at every open (one call):
+	// a revision id is immutable, but whether Drive still keeps it is not.
+	if (!parsed.uri.version.empty()) {
+		if (meta.IsNativeGoogleFormat()) {
+			throw InvalidInputException(
+			    "gdrive: cannot read '%s': Drive keeps no downloadable content for earlier versions of Google "
+			    "Docs, Sheets or Slides (only for uploaded files)",
+			    parsed.uri.ToString());
+		}
+		auto resp = client->ApiGet("/drive/v3/files/" + QueryEncode(meta.id) + "/revisions/" +
+		                               QueryEncode(parsed.uri.version) + "?fields=" + QueryEncode(RevisionFields()) +
+		                               "&" + AllDrivesQuery(),
+		                           &DriveCallStats::revisions_list);
+		if (!resp.ok) {
+			if (resp.error.kind == GDriveErrorKind::NOT_FOUND) {
+				if (flags.ReturnNullIfNotExists()) {
+					return nullptr;
+				}
+				throw IOException("gdrive: no version '%s' of '%s' (gdrive_versions() lists the versions Drive "
+				                  "keeps)",
+				                  parsed.uri.version, path);
+			}
+			ThrowGDriveError(resp.error, path);
+		}
+		RevisionRow revision;
+		std::string error;
+		if (!ParseRevision(resp.body, revision, error)) {
+			throw IOException("gdrive: malformed revision response for '%s': %s", path, error);
+		}
+		meta.size = revision.size;
+		meta.modified_time = revision.modified;
+		meta.head_revision_id = revision.id;
+	}
+
 	auto handle = make_uniq<GDriveFileHandleImpl>(*this, path, flags, meta, auth);
+	handle->version = parsed.uri.version;
 	handle->block_size = static_cast<idx_t>(GetUBigIntSetting(opener, "gdrive_block_size_bytes", 16ULL * 1024 * 1024));
 	blocks.SetCapacity(static_cast<idx_t>(GetUBigIntSetting(opener, "gdrive_block_cache_bytes", 256ULL * 1024 * 1024)));
 	handle->block_key = BuildBlockKey(auth, meta);
@@ -822,6 +877,11 @@ std::string BuildBlockKey(const GDriveAuthContext &auth, const DriveFileMeta &me
 //! Returns true if the handle now points at a live, different file id.
 bool GDriveFileSystem::TryRecoverStaleHandle(GDriveFileHandle &base) {
 	auto &h = base.Cast<GDriveFileHandleImpl>();
+	if (!h.version.empty()) {
+		// A version is not "the file at this path": another file there now
+		// has other versions, not this one.
+		return false;
+	}
 	auto parsed = ParseGDriveUri(h.path);
 	if (!parsed.ok || parsed.uri.kind == GDriveUriKind::FILE_ID) {
 		// An explicit gdrive://id: that 404s is genuinely gone. Re-resolving
@@ -924,12 +984,12 @@ void GDriveFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, 
 	// Inclusive end, as HTTP Range and Drive both define it.
 	int64_t end = static_cast<int64_t>(location) + nr_bytes - 1;
 
-	auto resp = client->Download(h.meta.id, static_cast<int64_t>(location), end);
+	auto resp = DownloadFor(*client, h, static_cast<int64_t>(location), end);
 	if (!resp.ok && resp.error.kind == GDriveErrorKind::NOT_FOUND && TryRecoverStaleHandle(h)) {
 		// The path still exists, under a new id. Retry ONCE against it: a
 		// loop here would spin against a file being rewritten repeatedly.
 		client = CreateGDriveClient(h.auth_context);
-		resp = client->Download(h.meta.id, static_cast<int64_t>(location), end);
+		resp = DownloadFor(*client, h, static_cast<int64_t>(location), end);
 	}
 	if (!resp.ok) {
 		ThrowGDriveError(resp.error, h.path);
@@ -962,8 +1022,8 @@ void GDriveFileSystem::ReadViaBlockCache(GDriveFileHandle &base, void *buffer, i
 			auto block = blocks.GetBlock(
 			    h.block_key, block_index, h.block_size, static_cast<idx_t>(h.meta.size),
 			    [&](idx_t start, idx_t len, std::string &out) {
-				    auto r = client_for_block->Download(h.meta.id, static_cast<int64_t>(start),
-				                                        static_cast<int64_t>(start + len - 1));
+				    auto r = DownloadFor(*client_for_block, h, static_cast<int64_t>(start),
+				                         static_cast<int64_t>(start + len - 1));
 				    if (!r.ok) {
 					    if (r.error.kind == GDriveErrorKind::NOT_FOUND) {
 						    not_found = true;
@@ -1179,6 +1239,7 @@ void GDriveFileSystem::CreateDirectory(const string &directory, optional_ptr<Fil
 	if (!parsed.ok) {
 		throw IOException("gdrive: %s", parsed.error);
 	}
+	RefuseVersion(parsed.uri, "create a directory at");
 	auto auth = GetAuthContext(context, directory);
 	auto client = CreateGDriveClient(auth);
 	MutateCreateDirectory(*client, cache, auth, parsed.uri);
@@ -1191,6 +1252,7 @@ void GDriveFileSystem::RemoveDirectory(const string &directory, optional_ptr<Fil
 	if (!parsed.ok) {
 		throw IOException("gdrive: %s", parsed.error);
 	}
+	RefuseVersion(parsed.uri, "remove");
 	auto auth = GetAuthContext(context, directory);
 	auto client = CreateGDriveClient(auth);
 	bool permanent = GetBoolSetting(opener, "gdrive_permanent_delete", false);
@@ -1256,6 +1318,8 @@ void GDriveFileSystem::MoveFile(const string &source, const string &target, opti
 	if (!dst_parsed.ok) {
 		throw IOException("gdrive: %s", dst_parsed.error);
 	}
+	RefuseVersion(src_parsed.uri, "move");
+	RefuseVersion(dst_parsed.uri, "move onto");
 	auto auth = GetAuthContext(context, source);
 	auto client = CreateGDriveClient(auth);
 	bool permanent = GetBoolSetting(opener, "gdrive_permanent_delete", false);
@@ -1270,6 +1334,7 @@ void GDriveFileSystem::RemoveFile(const string &filename, optional_ptr<FileOpene
 	if (!parsed.ok) {
 		throw IOException("gdrive: %s", parsed.error);
 	}
+	RefuseVersion(parsed.uri, "remove");
 	auto auth = GetAuthContext(context, filename);
 	auto client = CreateGDriveClient(auth);
 	bool permanent = GetBoolSetting(opener, "gdrive_permanent_delete", false);
@@ -1341,7 +1406,8 @@ vector<OpenFileInfo> GDriveFileSystem::GlobImpl(const string &path, optional_ptr
 	// of a listing). Glob semantics: not-found is an empty result, but ONLY
 	// not-found -- ambiguity (R-4), auth failures and other API errors must
 	// still surface, so this uses TryResolvePath rather than a broad catch.
-	if (parsed.uri.kind == GDriveUriKind::FILE_ID || !HasGlobMetacharacters(path)) {
+	// A version path is one file: its '?' is not a glob character.
+	if (parsed.uri.kind == GDriveUriKind::FILE_ID || !parsed.uri.version.empty() || !HasGlobMetacharacters(path)) {
 		vector<OpenFileInfo> result;
 		auto auth = GetAuthContext(context, path);
 		auto client = CreateGDriveClient(auth);
@@ -1602,7 +1668,8 @@ std::vector<GDriveItem> GDriveFileSystem::ResolveItems(const string &path, optio
 		throw InvalidInputException("gdrive: %s", parsed.error);
 	}
 	std::vector<GDriveItem> items;
-	const bool literal = parsed.uri.kind == GDriveUriKind::FILE_ID || !HasGlobMetacharacters(path);
+	const bool literal =
+	    parsed.uri.kind == GDriveUriKind::FILE_ID || !parsed.uri.version.empty() || !HasGlobMetacharacters(path);
 	if (!literal) {
 		GlobImpl(path, opener, rich ? FileRowFields() : "", &items, /*include_folders=*/folder_as_item);
 		// Overlapping {a,b} expansions: Glob dedupes its paths, and so must

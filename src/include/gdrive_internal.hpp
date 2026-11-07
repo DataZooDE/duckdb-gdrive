@@ -118,6 +118,11 @@ public:
 	//! stale bytes.
 	std::string block_key;
 
+	//! A revision id when the handle reads an EARLIER version
+	//! (gdrive://...?version=<id>), else empty. Such a handle is read-only and
+	//! never re-resolves: the version it names is the version it reads.
+	std::string version;
+
 };
 
 //! The bare, scheme-free, segment-joined path a GDriveUri denotes -- the same

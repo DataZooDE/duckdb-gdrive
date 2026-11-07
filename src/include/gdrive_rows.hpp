@@ -113,6 +113,8 @@ struct RevisionRow {
 };
 
 std::string RevisionFields();
+//! One revisions.get answer.
+bool ParseRevision(const std::string &json_object, RevisionRow &out, std::string &error);
 bool ParseRevisions(const std::string &json_body, std::vector<RevisionRow> &out, std::string &next_page_token,
                     std::string &error);
 

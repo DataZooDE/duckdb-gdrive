@@ -44,8 +44,9 @@ bool IsGDriveUri(const std::string &uri) {
 }
 
 std::string GDriveUri::ToString() const {
+	const std::string suffix = version.empty() ? std::string() : std::string(GDRIVE_VERSION_QUERY) + version;
 	if (kind == GDriveUriKind::FILE_ID) {
-		return std::string(GDRIVE_SCHEME) + "id:" + file_id;
+		return std::string(GDRIVE_SCHEME) + "id:" + file_id + suffix;
 	}
 	std::string out(GDRIVE_SCHEME);
 	for (size_t i = 0; i < segments.size(); i++) {
@@ -54,7 +55,7 @@ std::string GDriveUri::ToString() const {
 		}
 		out += segments[i];
 	}
-	return out;
+	return out + suffix;
 }
 
 std::string GDriveUri::ParentPath() const {
@@ -87,7 +88,24 @@ GDriveUriParse ParseGDriveUri(const std::string &uri) {
 		return result;
 	}
 
-	const std::string rest = uri.substr(SCHEME_LEN);
+	std::string rest = uri.substr(SCHEME_LEN);
+
+	// "?version=<revision id>" at the very end names an earlier version of
+	// the file. Only that exact suffix: '?' everywhere else stays a glob
+	// character, and a revision id never contains '/'.
+	const auto version_at = rest.rfind(GDRIVE_VERSION_QUERY);
+	if (version_at != std::string::npos) {
+		const auto version = rest.substr(version_at + std::strlen(GDRIVE_VERSION_QUERY));
+		if (version.find('/') == std::string::npos) {
+			if (version.empty()) {
+				result.ok = false;
+				result.error = "\"?version=\" names no version, in \"" + uri + "\"";
+				return result;
+			}
+			result.uri.version = version;
+			rest = rest.substr(0, version_at);
+		}
+	}
 
 	// The "id:" form is special only in the LEADING position: a URI whose
 	// path begins with "id:" addresses a single file, not a traversable
