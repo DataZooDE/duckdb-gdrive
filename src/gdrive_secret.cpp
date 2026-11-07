@@ -70,6 +70,15 @@ bool HasNonEmptyOption(const CreateSecretInput &input, const char *key) {
 	return it != input.options.end() && !it->second.ToString().empty();
 }
 
+//! DRIVE_ID and ROOT_FOLDER_ID are two different bindings, not one setting
+//! twice: given both, DRIVE_ID silently won. Refused instead.
+void RefuseTwoRoots(const CreateSecretInput &input) {
+	if (HasNonEmptyOption(input, "drive_id") && HasNonEmptyOption(input, "root_folder_id")) {
+		throw InvalidInputException(
+		    "gdrive secret: give DRIVE_ID (a Shared Drive) or ROOT_FOLDER_ID (an ordinary folder), not both");
+	}
+}
+
 void ApplyDefaultScope(KeyValueSecret &result) {
 	// REQ-NF-04: default to the narrowest scope when unspecified.
 	//
@@ -107,6 +116,7 @@ unique_ptr<BaseSecret> CreateConfigSecret(ClientContext &, CreateSecretInput &in
 	CopyOption(input, *result, "client_secret");
 	CopyOption(input, *result, "drive_id");
 	CopyOption(input, *result, "root_folder_id");
+	RefuseTwoRoots(input);
 	CopyOption(input, *result, "drive_scope");
 
 	if (!HasNonEmptyOption(input, "access_token") && !HasNonEmptyOption(input, "refresh_token")) {
@@ -149,6 +159,7 @@ unique_ptr<BaseSecret> CreateServiceAccountSecret(ClientContext &, CreateSecretI
 	CopyOption(input, *result, "key_file");
 	CopyOption(input, *result, "drive_id");
 	CopyOption(input, *result, "root_folder_id");
+	RefuseTwoRoots(input);
 	CopyOption(input, *result, "drive_scope");
 
 	if (!HasNonEmptyOption(input, "key_file")) {
@@ -201,6 +212,7 @@ unique_ptr<BaseSecret> CreateCredentialChainSecret(ClientContext &, CreateSecret
 	// it addresses is not, so the root binding options still apply.
 	CopyOption(input, *result, "drive_id");
 	CopyOption(input, *result, "root_folder_id");
+	RefuseTwoRoots(input);
 	CopyOption(input, *result, "drive_scope");
 
 	ApplyDefaultScope(*result);
@@ -244,6 +256,7 @@ unique_ptr<BaseSecret> CreateAuthorizationCodeSecret(ClientContext &, CreateSecr
 	CopyOption(input, *result, "refresh_token");
 	CopyOption(input, *result, "drive_id");
 	CopyOption(input, *result, "root_folder_id");
+	RefuseTwoRoots(input);
 	CopyOption(input, *result, "drive_scope");
 
 	// Named individually so the reader is told WHICH half is missing. Google's

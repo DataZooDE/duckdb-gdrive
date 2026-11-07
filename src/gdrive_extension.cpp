@@ -4,6 +4,7 @@
 #include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 #include "gdrive_filesystem.hpp"
 #include "gdrive_files_functions.hpp"
+#include "gdrive_internal.hpp"
 #include "gdrive_permissions_functions.hpp"
 #include "gdrive_versions.hpp"
 #include "gdrive_changes.hpp"
@@ -125,11 +126,22 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// byte-stable across exports, which would make GetVersionTag-keyed
 	// caching lie. Sheets always export to text/csv regardless of this
 	// setting.
+	// Validated on SET: any other value used to fall back to text/plain
+	// silently, so a user asking for PDF got text without a word.
 	loader.GetDatabaseInstance().config.AddExtensionOption(
 	    "gdrive_docs_export_mime",
-	    "MIME type to export application/vnd.google-apps.document files as: "
-	    "'text/plain' (default) or 'text/markdown'. Sheets always export to text/csv.",
-	    LogicalType::VARCHAR, Value("text/plain"));
+	    "MIME type to export application/vnd.google-apps.document files as: 'text/plain' (default), "
+	    "'text/markdown', 'text/html', 'application/pdf', 'application/rtf', "
+	    "'application/vnd.openxmlformats-officedocument.wordprocessingml.document' (docx), "
+	    "'application/vnd.oasis.opendocument.text', 'application/epub+zip' or 'application/zip' (HTML). "
+	    "Sheets always export to text/csv.",
+	    LogicalType::VARCHAR, Value("text/plain"), [](ClientContext &, SetScope, Value &parameter) {
+		    if (!gdrive::IsDocsExportMime(parameter.ToString())) {
+			    throw InvalidInputException("gdrive_docs_export_mime: '%s' is not a format Drive exports a Doc "
+			                                "to (e.g. 'text/plain', 'text/markdown', 'application/pdf')",
+			                                parameter.ToString());
+		    }
+	    });
 
 	// An OPT-IN correctness/latency trade, off by default.
 	//

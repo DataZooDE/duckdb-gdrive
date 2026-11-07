@@ -98,6 +98,13 @@ struct GDriveAuthContext {
 //! material (REQ-NF-03).
 GDriveAuthContext GetAuthContext(optional_ptr<FileOpener> opener, const std::string &path);
 
+//! What to do when no gdrive secret applies -- one text for every function,
+//! leading with the argument-less default (D-10).
+constexpr const char *kNoSecretAdvice =
+    "create one first: CREATE SECRET (TYPE gdrive); uses your gcloud login (gcloud auth application-default "
+    "login --scopes=openid,https://www.googleapis.com/auth/drive); for a server, CREATE SECRET (TYPE gdrive, "
+    "PROVIDER service_account, KEY_FILE '/path/key.json'). See the README's Authentication section.";
+
 //! True when at least one gdrive secret is registered. Lets the filesystem
 //! produce "no gdrive secret configured; CREATE SECRET ..." rather than an
 //! opaque 401 from Google.

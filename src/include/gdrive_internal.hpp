@@ -205,6 +205,10 @@ void MutateRemoveDirectory(GDriveClient &client, GDrivePathCache &cache, const G
 //! regardless of the setting.
 std::string ExportMimeTypeFor(const DriveFileMeta &meta, const std::string &docs_export_mime_setting);
 
+//! A format Drive exports a Google Doc to (text/plain, text/markdown, PDF,
+//! DOCX, ...). gdrive_docs_export_mime accepts exactly these.
+bool IsDocsExportMime(const std::string &mime);
+
 //! Fetch the whole export once (Export does not support Range) and return the
 //! bytes. Throws via ThrowGDriveError on failure.
 std::string FetchExport(GDriveClient &client, const DriveFileMeta &meta, const std::string &export_mime_type,

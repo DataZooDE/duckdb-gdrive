@@ -711,7 +711,8 @@ nothing of the sort.
 > extension ever sees it. Writing `SCOPE 'https://www.googleapis.com/auth/drive'`
 > silently restricts the secret to paths beginning with that URL -- which no
 > `gdrive://` path does -- so the secret matches nothing and every query fails
-> with "no secret configured". The OAuth scope goes in `DRIVE_SCOPE`.
+> with "a gdrive secret exists, but none apply", which names this mistake. The
+> OAuth scope goes in `DRIVE_SCOPE`.
 
 Omitting `DRIVE_SCOPE` requests the narrowest scope that works,
 `drive.readonly`. **How much that protects you depends on the provider**, and
@@ -738,7 +739,7 @@ and nothing registered that is not here.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `gdrive_docs_export_mime` | `text/plain` | Export format for a Google **Doc**. `text/markdown` keeps structure. Sheets are always `text/csv`. |
+| `gdrive_docs_export_mime` | `text/plain` | Export format for a Google **Doc**: `text/plain`, `text/markdown` (keeps structure), `text/html`, `application/pdf`, `application/rtf`, the docx, ODT and EPUB types, or `application/zip` (zipped HTML); anything else is refused when set. Text exports lose Drive's byte-order mark. Sheets are always `text/csv`. |
 | `gdrive_permanent_delete` | `false` | `false` moves a deleted file to the Drive trash (recoverable); `true` deletes it outright. |
 | `gdrive_telemetry_enabled` | `true` | Anonymous usage telemetry shared with the other DataZoo extensions. `false` turns it off for the rest of the session; the environment variable `DATAZOO_DISABLE_TELEMETRY=1` turns it off entirely, including the load event. |
 | `gdrive_block_size_bytes` | 16 MiB | Read granularity. Drive charges ~1.3 s per ranged request regardless of size, so larger blocks mean fewer, faster requests -- but a `count(*)` over a Parquet footer then pays for a whole block it does not need. 16 MiB is the compromise; see `docs/benchmark.md` for the sweep. |
@@ -746,7 +747,7 @@ and nothing registered that is not here.
 | `gdrive_immutable_prefixes` | *(empty)* | Comma-separated `gdrive://` prefixes whose files are **never overwritten in place** -- typically a DuckLake/Iceberg `DATA_PATH`. Skips the per-open metadata refresh (~270 ms per file per query) for them. Matching is on whole path segments, so `gdrive://lake` does not cover `gdrive://lakehouse`. **Declaring a prefix whose files change causes stale reads that nothing can detect.** The promise you are making is stronger than "not overwritten": files under it must not be modified, replaced, *or* deleted-and-recreated at the same path while the process runs -- Drive keeps a file's id across an overwrite, returns no ETag, and ignores `If-Match`. Leave empty unless you know the files are immutable. |
 | `gdrive_adc_file` | *(empty)* | An Application Default Credentials file for `credential_chain`, overriding `GOOGLE_APPLICATION_CREDENTIALS` and the gcloud location. |
 | `gdrive_debug_token_max_age_seconds` | 0 | **Testing only.** Treats access tokens as expiring after at most this many seconds, so a handle outliving its token can be exercised in a test instead of after an hour. `0` uses the token's real lifetime. |
-| `gdrive_upload_chunk_bytes` | 16 MiB | Upload chunk size -- and the most memory one file being written holds. Files up to this size upload in one request on close; larger ones stream through a resumable upload session, one chunk at a time, as they are written. Rounded down to a multiple of 256 KiB (Drive's rule for every non-final chunk), at most 1 GiB. `gdrive_stats()` reports `upload_chunks`, `upload_aborts` and the high-water mark `upload_buffer_peak_bytes`. |
+| `gdrive_upload_chunk_bytes` | 16 MiB | Upload chunk size -- and the most memory one file being written holds. Files up to this size upload in one request on close; larger ones stream through a resumable upload session, one chunk at a time, as they are written. Rounded down to a multiple of 256 KiB (Drive's rule for every non-final chunk), at least 256 KiB and at most 1 GiB. `gdrive_stats()` reports `upload_chunks`, `upload_aborts` and the high-water mark `upload_buffer_peak_bytes`. |
 | `gdrive_path_cache_entries` | 4096 | Cap on cached `path -> file id` mappings, LRU. `0` is unbounded. Drive has no path addressing, so each dropped mapping costs one `files.list` per segment to rebuild -- cheap, which is why this cache may be evicted and the block cache is bounded separately. |
 
 ```sql

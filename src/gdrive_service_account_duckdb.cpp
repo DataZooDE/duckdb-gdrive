@@ -267,7 +267,10 @@ MintedToken MintServiceAccountToken(const ServiceAccountKey &key, const std::str
 	}
 
 	if (!parsed.parsed_ok || parsed.access_token.empty()) {
-		result.error = "Google token endpoint response did not contain an access_token";
+		// Google answers an assertion whose scope is not a real one ('drive',
+		// a typo) with 200 and no access_token -- not with invalid_scope.
+		result.error = "Google token endpoint response did not contain an access_token -- check that "
+		               "DRIVE_SCOPE is a valid OAuth scope, e.g. 'https://www.googleapis.com/auth/drive'";
 		return result;
 	}
 

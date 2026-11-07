@@ -258,7 +258,31 @@ void ReadExactRangeTail(const std::string &path, void *buffer, int64_t nr_bytes,
 
 std::string BuildBlockKey(const GDriveAuthContext &auth, const DriveFileMeta &meta);
 
+namespace {
+//! COPY ... TO 'gdrive://id:<id>' stages its output at "tmp_" + the file
+//! name: 'gdrive:/tmp_id:<id>' on DuckDB 1.5 (JoinPath), 'gdrive://tmp_id:<id>'
+//! on 2.0 (ReplaceFileName). Neither names a real file -- the id names one --
+//! so both are the target itself: written in place, moved onto itself (a
+//! no-op), and never removed by a failed COPY's cleanup.
+//! And on 1.5 the move back to the target computes 'gdrive:/id:<id>'.
+const char *const kStagingAliases[] = {"gdrive:/tmp_id:", "gdrive://tmp_id:", "gdrive:/id:"};
+
+bool IsCopyStagingAlias(const std::string &path) {
+	for (auto alias : kStagingAliases) {
+		if (path.rfind(alias, 0) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+} // namespace
+
 std::string ToGDrivePath(const std::string &path) {
+	for (auto alias : kStagingAliases) {
+		if (path.rfind(alias, 0) == 0) {
+			return std::string(GDRIVE_SCHEME) + "id:" + path.substr(std::strlen(alias));
+		}
+	}
 	std::string out, error;
 	if (!WebUrlToGDrivePath(path, out, error)) {
 		throw InvalidInputException("gdrive: %s", error);
@@ -270,6 +294,10 @@ namespace {
 //! FileExists / DirectoryExists answer for speculative probes and must not
 //! throw: an address on a Drive host that names nothing simply does not exist.
 bool TryToGDrivePath(const std::string &path, std::string &out) {
+	if (IsCopyStagingAlias(path)) {
+		out = ToGDrivePath(path);
+		return true;
+	}
 	std::string error;
 	return WebUrlToGDrivePath(path, out, error);
 }
@@ -471,14 +499,13 @@ GDriveFileSystem &GDriveFileSystem::ForDatabase(DatabaseInstance &db) {
 }
 
 bool GDriveFileSystem::CanHandleFile(const string &fpath) {
-	return IsGDriveUri(fpath) || IsDriveWebUrl(fpath);
+	return IsGDriveUri(fpath) || IsDriveWebUrl(fpath) || IsCopyStagingAlias(fpath);
 }
 
 DriveFileMeta GDriveFileSystem::ResolveOrThrow(optional_ptr<FileOpener> context, const GDriveUri &uri) {
 	if (!HasAnyGDriveSecret(context)) {
 		throw IOException(
-		    "gdrive: no gdrive secret configured for '%s' -- run CREATE SECRET (TYPE gdrive, ...) first.",
-		    uri.ToString());
+		    "gdrive: no gdrive secret configured for '%s' -- %s", uri.ToString(), kNoSecretAdvice);
 	}
 	auto auth = GetAuthContext(context, uri.ToString());
 	auto client = CreateGDriveClient(auth);
@@ -516,6 +543,11 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path_in, FileOpe
 		}
 	}
 	const string path = ToGDrivePath(path_in);
+	// 'gdrive://out/' names a folder, not a file: writing it used to create a
+	// FILE named "out" (the trailing slash is ignored when parsing).
+	if (flags.OpenForWriting() && !path.empty() && path.back() == '/') {
+		throw IOException("gdrive: cannot write to '%s': it names a folder, not a file", path_in);
+	}
 	auto context = RequireOpener(opener, path);
 	auto parsed = ParseGDriveUri(path);
 	if (!parsed.ok) {
@@ -523,7 +555,7 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path_in, FileOpe
 	}
 	if (!HasAnyGDriveSecret(context)) {
 		throw IOException(
-		    "gdrive: no gdrive secret configured for '%s' -- run CREATE SECRET (TYPE gdrive, ...) first.", path);
+		    "gdrive: no gdrive secret configured for '%s' -- %s", path, kNoSecretAdvice);
 	}
 	auto auth = GetAuthContext(context, path);
 	auto client = CreateGDriveClient(auth);
@@ -1402,7 +1434,7 @@ void GDriveFileSystem::RemoveFile(const string &filename_in, optional_ptr<FileOp
 }
 
 bool GDriveFileSystem::TryRemoveFile(const string &filename, optional_ptr<FileOpener> opener) {
-	if (IsDriveWebUrl(filename)) {
+	if (IsDriveWebUrl(filename) || IsCopyStagingAlias(filename)) {
 		return false;
 	}
 	return FileSystem::TryRemoveFile(filename, opener);
@@ -1448,7 +1480,7 @@ vector<OpenFileInfo> GDriveFileSystem::GlobImpl(const string &path, optional_ptr
 	// prevent, one layer up from where those requirements originally target.
 	if (!HasAnyGDriveSecret(context)) {
 		throw IOException(
-		    "gdrive: no gdrive secret configured for '%s' -- run CREATE SECRET (TYPE gdrive, ...) first.", path);
+		    "gdrive: no gdrive secret configured for '%s' -- %s", path, kNoSecretAdvice);
 	}
 	// Scope the metadata cache to THIS query before resolving anything, the
 	// same as OpenFile. Glob's literal-path probe below does a full resolve
@@ -1794,7 +1826,7 @@ std::vector<GDriveItem> GDriveFileSystem::ResolveItems(const string &path_in, op
 	auto context = RequireOpener(opener, path);
 	if (!HasAnyGDriveSecret(context)) {
 		throw IOException(
-		    "gdrive: no gdrive secret configured for '%s' -- run CREATE SECRET (TYPE gdrive, ...) first.", path);
+		    "gdrive: no gdrive secret configured for '%s' -- %s", path, kNoSecretAdvice);
 	}
 	{
 		auto ctx = FileOpener::TryGetClientContext(opener);
