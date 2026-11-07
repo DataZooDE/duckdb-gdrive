@@ -115,24 +115,30 @@ the path must not be NULL
 
 # ---------------------------------------------------------------------------
 # search_gdrive: Drive's full-text search. A hit's id: path reads back.
+#
+# Search covers EVERYTHING the identity can see, and the Drive is shared with
+# CI scratch runs and the e2e harness -- so assert on the fixture by its id,
+# never on "the" file of a name (another run's small.csv is a second hit).
 # ---------------------------------------------------------------------------
 query II
-SELECT path, mime_type FROM search_gdrive('small') WHERE name = 'small.csv'
+SELECT name, mime_type FROM search_gdrive('small') WHERE path = 'gdrive://id:${ID:small.csv}'
 ----
-gdrive://id:${ID:small.csv}	text/csv
+small.csv	text/csv
 
 statement ok
-SET VARIABLE hit = (SELECT path FROM search_gdrive('small') WHERE name = 'small.csv');
+SET VARIABLE hit = (SELECT path FROM search_gdrive('small') WHERE path = 'gdrive://id:${ID:small.csv}');
 
 query I
 SELECT sum(amount) FROM read_csv(getvariable('hit'))
 ----
 1500
 
-query I
-SELECT count(*) FROM search_gdrive('Budget', mime_type := 'application/vnd.google-apps.spreadsheet') WHERE name = 'Budget'
+query II
+SELECT count(*) FILTER (WHERE path = 'gdrive://id:${ID:Budget}'),
+       count(*) FILTER (WHERE mime_type <> 'application/vnd.google-apps.spreadsheet')
+FROM search_gdrive('Budget', mime_type := 'application/vnd.google-apps.spreadsheet')
 ----
-1
+1	0
 
 query I
 SELECT count(*) FROM search_gdrive('', max_results := 3)
