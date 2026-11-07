@@ -1,0 +1,80 @@
+# name: test/sql/gdrive_write_safety.test.template
+# description: writes never land on the wrong file -- name case, folders, native files, trash
+# group: [live]
+#
+# Three data-loss bugs found by exploratory testing (2026-11-07), each pinned:
+# Drive's name query is case-insensitive, an id write could replace a folder
+# or a native Sheet, and an id kept for a since-trashed file still read it.
+# The refusals happen before any byte is uploaded, so the id writes against
+# /fixtures below cannot change it; everything else is under scratch.
+
+require gdrive
+
+require-env GDRIVE_CI_DRIVE_ID
+
+require-env GDRIVE_OAUTH_CLIENT_ID
+
+require-env GDRIVE_OAUTH_CLIENT_SECRET
+
+require-env GDRIVE_USER_REFRESH_TOKEN
+
+statement ok
+CREATE SECRET gdrive_test (
+    TYPE gdrive,
+    PROVIDER config,
+    CLIENT_ID '${OAUTH_CLIENT_ID}',
+    CLIENT_SECRET '${OAUTH_CLIENT_SECRET}',
+    REFRESH_TOKEN '${USER_REFRESH_TOKEN}',
+    ROOT_FOLDER_ID '${DRIVE_ID}',
+    DRIVE_SCOPE 'https://www.googleapis.com/auth/drive'
+);
+
+# ---------------------------------------------------------------------------
+# Names are case-sensitive: Report.csv and report.csv are two files.
+# ---------------------------------------------------------------------------
+statement ok
+SELECT write_blob('gdrive://scratch/${SCRATCH}/case/Report.csv', encode(E'x\nUPPER\n'));
+
+statement ok
+SELECT write_blob('gdrive://scratch/${SCRATCH}/case/report.csv', encode(E'x\nlower\n'));
+
+query I
+SELECT x FROM read_csv('gdrive://scratch/${SCRATCH}/case/Report.csv')
+----
+UPPER
+
+query I
+SELECT x FROM read_csv('gdrive://scratch/${SCRATCH}/case/report.csv')
+----
+lower
+
+statement error
+SELECT * FROM read_csv('gdrive://scratch/${SCRATCH}/case/REPORT.csv')
+----
+No files found
+
+query I
+SELECT count(*) FROM glob('gdrive://scratch/${SCRATCH}/case/*.csv')
+----
+2
+
+# ---------------------------------------------------------------------------
+# An id names an existing file: never a folder, never a native Google file.
+# ---------------------------------------------------------------------------
+statement error
+SELECT write_blob('gdrive://id:${ID:Budget}', encode('a,b'))
+----
+it is a native Google file
+
+statement error
+SELECT write_blob('gdrive://id:${FIXTURES_ID}', encode('a,b'))
+----
+it is a folder, not a file
+
+query I
+SELECT count(*) FROM read_csv('gdrive://fixtures/Budget')
+----
+3
+
+# A trashed file read by id, and COPY by path onto a native Sheet, need the
+# harness (a file id, a Sheet in scratch): e2e/tests/test_write_safety.py.

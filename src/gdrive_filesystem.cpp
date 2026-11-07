@@ -9,6 +9,7 @@
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/main/client_context.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <unordered_set>
 #include <cstring>
@@ -47,6 +48,18 @@ std::string EscapeDriveQueryLiteral(const std::string &value) {
 	case GDriveExceptionType::IO:
 	default:
 		throw IOException(message);
+	}
+}
+
+void RefuseReplacing(const DriveFileMeta &existing, const std::string &target) {
+	if (existing.IsFolder()) {
+		throw IOException("gdrive: cannot write to '%s': it is a folder, not a file", target);
+	}
+	if (existing.IsNativeGoogleFormat()) {
+		throw InvalidInputException(
+		    "gdrive: cannot write to '%s': it is a native Google file (%s), which has no bytes to replace -- writing "
+		    "would destroy its content. Write a file under another name instead.",
+		    target, existing.mime_type);
 	}
 }
 
@@ -165,6 +178,14 @@ std::vector<DriveFileMeta> ListByName(GDriveClient &client, const std::string &p
 		matches.insert(matches.end(), page.begin(), page.end());
 		page_token = next;
 	} while (!page_token.empty());
+	// Drive compares names in `q` case-INSENSITIVELY ("name='report.csv'"
+	// also matches "Report.csv"), but stores them case-sensitively and lets
+	// both live in one folder. Without this filter, writing report.csv
+	// replaced a colleague's Report.csv (found by exploratory testing,
+	// 2026-11-07). Keep only the exact name.
+	matches.erase(std::remove_if(matches.begin(), matches.end(),
+	                             [&](const DriveFileMeta &m) { return m.name != name; }),
+	              matches.end());
 	return matches;
 }
 
@@ -273,7 +294,11 @@ bool TryResolvePath(GDrivePathCache &cache, GDriveClient &client, const GDriveAu
 				                                 throw IOException(
 				                                     "gdrive: malformed metadata response for '%s'", context_path);
 			                                 }
-			                                 return true;
+			                                 // A path never resolves to a trashed file (listings say
+			                                 // trashed=false); an id must not either. It used to: an
+			                                 // id: kept for a file COPY since replaced read the old,
+			                                 // trashed content without a word.
+			                                 return !fresh.trashed;
 		                                 },
 		                                 out);
 	}
@@ -405,6 +430,20 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 		std::string existing_id;
 
 		if (parsed.uri.kind == GDriveUriKind::FILE_ID) {
+			// One files.get: an id names an EXISTING file, and the write must
+			// not land on a folder or a native Doc/Sheet.
+			auto resp = client->GetMetadata(parsed.uri.file_id);
+			if (!resp.ok) {
+				ThrowGDriveError(resp.error, path);
+			}
+			DriveFileMeta existing;
+			if (!ParseFileMeta(resp.body, existing)) {
+				throw IOException("gdrive: malformed metadata response for '%s'", path);
+			}
+			if (existing.trashed) {
+				throw IOException("gdrive: cannot write to '%s': the file is in the trash", path);
+			}
+			RefuseReplacing(existing, path);
 			existing_id = parsed.uri.file_id;
 		} else {
 			name = parsed.uri.FileName();
@@ -537,6 +576,7 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 				if (existing_matches.size() > 1) {
 					ThrowAmbiguous(existing_matches, path);
 				} else if (existing_matches.size() == 1) {
+					RefuseReplacing(existing_matches[0], path);
 					existing_id = existing_matches[0].id;
 				}
 			}
@@ -640,7 +680,8 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 			if (!ParseFileMeta(resp.body, fresh)) {
 				fresh = meta;
 			}
-			return true;
+			// Trashed since the path was cached: as dead as a deleted id.
+			return !fresh.trashed;
 		}, refreshed);
 
 		if (found) {

@@ -58,6 +58,13 @@ std::string EscapeDriveQueryLiteral(const std::string &value);
 //! slash; empty means the root.
 std::string JoinGDrivePath(const std::string &parent_path, const std::string &name);
 
+//! A write would replace `existing` (an overwrite in place, or a move onto
+//! it): refuse when it is a folder or a native Google file. Drive accepts
+//! both -- a folder silently discards the bytes, a Sheet or Doc loses its
+//! content (or, replaced by a move, goes to the trash). Neither is a write
+//! anyone means. `target` names it in the message.
+void RefuseReplacing(const DriveFileMeta &existing, const std::string &target);
+
 //! Read an extension setting (gdrive_permanent_delete, gdrive_docs_export_mime)
 //! through the FileOpener, falling back to `default_value` when unset or when
 //! there is no opener at all (e.g. a handle-less internal call).

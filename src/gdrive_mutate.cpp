@@ -80,6 +80,14 @@ std::vector<DriveFileMeta> ListFilesNamedInParent(GDriveClient &client, const st
 		matches.insert(matches.end(), page.begin(), page.end());
 		page_token = next;
 	} while (!page_token.empty());
+	// Drive compares names in `q` case-INSENSITIVELY ("name='report.csv'"
+	// also matches "Report.csv"), but stores them case-sensitively and lets
+	// both live in one folder. Without this filter, writing report.csv
+	// replaced a colleague's Report.csv (found by exploratory testing,
+	// 2026-11-07). Keep only the exact name.
+	matches.erase(std::remove_if(matches.begin(), matches.end(),
+	                             [&](const DriveFileMeta &m) { return m.name != name; }),
+	              matches.end());
 	return matches;
 }
 
@@ -170,6 +178,12 @@ void MutateMoveFile(GDriveClient &client, GDrivePathCache &cache, const GDriveAu
 		    "gdrive: cannot overwrite '%s': %d files already share that name in the destination folder "
 		    "(ids: %s). Remove or rename them with the gdrive://id:<fileId> form before overwriting.",
 		    target_uri.ToString(), static_cast<int>(existing_at_dest.size()), ids);
+	}
+
+	// COPY's tmp-file staging ends in this move: replacing a native Sheet
+	// here trashed it and left a binary file in its place.
+	for (auto &existing : existing_at_dest) {
+		RefuseReplacing(existing, target_uri.ToString());
 	}
 
 	auto resp = client.Move(source_meta.id, new_parent_id, new_name, old_parent_id);

@@ -36,6 +36,9 @@ struct DriveFileMeta {
 	//! Feeds FileSystem::GetVersionTag, which DuckDB's caching layer uses as
 	//! the invalidation key. Drive's revision id fits that contract exactly.
 	std::string head_revision_id;
+	//! In the trash. Listings exclude trashed files in their query; an id:
+	//! path does not, and a trashed id must read as gone, not as a file.
+	bool trashed = false;
 
 	bool IsFolder() const;
 	//! application/vnd.google-apps.* -- has no bytes; must be read via

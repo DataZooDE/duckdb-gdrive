@@ -45,15 +45,16 @@ TEST_CASE("UrlEncode percent-encodes everything else", "[client]") {
 	REQUIRE(UrlEncode("") == "");
 }
 
-TEST_CASE("FileFieldsMask is exactly the six fields REQ-NF-01 allows", "[client]") {
+TEST_CASE("FileFieldsMask is exactly the seven fields REQ-NF-01 allows", "[client]") {
 	using duckdb::gdrive::internal::FileFieldsMask;
-	REQUIRE(FileFieldsMask() == "id,name,mimeType,size,modifiedTime,headRevisionId");
+	// `trashed` since 2026-11: an id: path must not read a file in the trash.
+	REQUIRE(FileFieldsMask() == "id,name,mimeType,size,modifiedTime,headRevisionId,trashed");
 }
 
 TEST_CASE("ListFieldsMask nests the same fields under files() with nextPageToken", "[client]") {
 	using duckdb::gdrive::internal::ListFieldsMask;
 	REQUIRE(ListFieldsMask() ==
-	        "nextPageToken,files(id,name,mimeType,size,modifiedTime,headRevisionId)");
+	        "nextPageToken,files(id,name,mimeType,size,modifiedTime,headRevisionId,trashed)");
 }
 
 TEST_CASE("BuildRangeHeader is inclusive of both endpoints", "[client]") {
