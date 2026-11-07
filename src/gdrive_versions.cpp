@@ -5,6 +5,7 @@
 #include "gdrive_versions.hpp"
 #include "gdrive_banner.hpp"
 #include "gdrive_filesystem.hpp"
+#include "gdrive_glob.hpp"
 #include "gdrive_internal.hpp"
 #include "gdrive_rows.hpp"
 #include "gdrive_table_util.hpp"
@@ -33,18 +34,24 @@ unique_ptr<FunctionData> VersionsBind(ClientContext &context, TableFunctionBindI
 		if (!parsed.ok) {
 			throw InvalidInputException("gdrive: %s", parsed.error);
 		}
-		if (!parsed.uri.version.empty()) {
-			throw InvalidInputException("gdrive: name the file, not one of its versions: '%s'", path);
+		if (HasGlobMetacharacters(path) && parsed.uri.kind != GDriveUriKind::FILE_ID && parsed.uri.version.empty()) {
+			throw InvalidInputException("gdrive: gdrive_versions takes one file, not a glob: '%s'", path);
 		}
 		auto opener = ClientData::Get(context).file_opener.get();
 		auto &fs = GDriveFileSystem::ForDatabase(DatabaseInstance::GetDatabase(context));
-		auto items = fs.ResolveItems(path, opener, /*rich=*/false, /*folder_as_item=*/true);
-		if (items.size() != 1 || items[0].meta.IsFolder()) {
-			throw InvalidInputException("gdrive: no such file: '%s' (gdrive_versions takes one file, not a folder "
-			                            "or a glob)",
-			                            path);
+		// rich: the row's revision comes from a files.get made now. The path
+		// cache's headRevisionId can predate an in-place write made in this
+		// process, which marked the wrong revision current (found by
+		// exploratory testing after COPY ... (USE_TMP_FILE false)).
+		auto items = fs.ResolveItems(path, opener, /*rich=*/true, /*folder_as_item=*/true);
+		if (items.size() != 1) {
+			throw InvalidInputException("gdrive: no such file: '%s'", path);
+		}
+		if (items[0].meta.IsFolder()) {
+			throw InvalidInputException("gdrive: '%s' is a folder; gdrive_versions takes a file", path);
 		}
 		const auto &item = items[0];
+		const auto &head = item.row.version;
 		auto client = CreateGDriveClient(GetAuthContext(opener, path));
 		const std::string what = "the versions of '" + path + "'";
 		std::vector<RevisionRow> revisions;
@@ -80,7 +87,7 @@ unique_ptr<FunctionData> VersionsBind(ClientContext &context, TableFunctionBindI
 			const auto &r = revisions[i];
 			// The head revision is the file itself. A native Google file has no
 			// headRevisionId, so there the newest revision is the current one.
-			const bool current = item.meta.head_revision_id.empty() ? i == 0 : r.id == item.meta.head_revision_id;
+			const bool current = head.empty() ? i == 0 : r.id == head;
 			data->rows.push_back({Value(r.id),
 			                      Value(current ? item.path : item.path + GDRIVE_VERSION_QUERY + r.id),
 			                      Value::BOOLEAN(current), TimestampOrNull(r.modified), TextOrNull(r.modified_by.name),

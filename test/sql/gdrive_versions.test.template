@@ -133,7 +133,32 @@ name the file, not one of its versions
 statement error
 SELECT * FROM gdrive_versions('gdrive://scratch/${SCRATCH}/versions')
 ----
-gdrive_versions takes one file
+is a folder; gdrive_versions takes a file
+
+# The metadata functions describe a file, not a version of one: they used to
+# report the CURRENT revision's size and md5 under a ?version= path.
+statement error
+SELECT * FROM read_gdrive_files(getvariable('old'))
+----
+name the file, not one of its versions
+
+statement error
+SELECT * FROM gdrive_permissions(getvariable('old'))
+----
+name the file, not one of its versions
+
+# An in-place COPY in this same process: the new revision is the current one.
+# (The path cache's revision used to win, swapping current and path.)
+statement ok
+COPY (SELECT 9 AS a) TO 'gdrive://scratch/${SCRATCH}/versions/v.csv' (FORMAT csv, USE_TMP_FILE false);
+
+query II
+SELECT count(*) FILTER (WHERE v.current),
+       bool_and(v.md5 = f.md5) FILTER (WHERE v.current)
+FROM gdrive_versions('gdrive://scratch/${SCRATCH}/versions/v.csv') v,
+     read_gdrive_files('gdrive://scratch/${SCRATCH}/versions/v.csv') f
+----
+1	true
 
 # A native Sheet has revisions too, but Drive keeps no downloadable content
 # for them: listed, not readable.

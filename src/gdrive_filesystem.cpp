@@ -1667,9 +1667,16 @@ std::vector<GDriveItem> GDriveFileSystem::ResolveItems(const string &path, optio
 	if (!parsed.ok) {
 		throw InvalidInputException("gdrive: %s", parsed.error);
 	}
+	// The metadata functions describe a file; a version of one has none of
+	// its own to describe (read_gdrive_files used to report the CURRENT
+	// revision's size and md5 under a ?version= path).
+	if (!parsed.uri.version.empty()) {
+		throw InvalidInputException("gdrive: name the file, not one of its versions: '%s' (gdrive_versions() lists "
+		                            "them)",
+		                            path);
+	}
 	std::vector<GDriveItem> items;
-	const bool literal =
-	    parsed.uri.kind == GDriveUriKind::FILE_ID || !parsed.uri.version.empty() || !HasGlobMetacharacters(path);
+	const bool literal = parsed.uri.kind == GDriveUriKind::FILE_ID || !HasGlobMetacharacters(path);
 	if (!literal) {
 		GlobImpl(path, opener, rich ? FileRowFields() : "", &items, /*include_folders=*/folder_as_item);
 		// Overlapping {a,b} expansions: Glob dedupes its paths, and so must
