@@ -66,9 +66,22 @@ token must not be empty
 statement error
 SELECT * FROM gdrive_changes('gdrive://fixtures/small.csv')
 ----
-gdrive_changes takes one folder
+is a file; gdrive_changes takes a folder
 
 statement error
 SELECT * FROM gdrive_changes('gdrive://fixtures/no-such-folder')
 ----
-no such folder
+no such file or folder
+
+statement error
+SELECT * FROM gdrive_changes('gdrive://fixtures/*')
+----
+takes one folder, not a glob
+
+# Two files share a name in fixtures/dup: neither gets the ambiguous joined
+# path; each gets its own id: path, which reads back.
+query III
+SELECT count(*), bool_and(path = 'gdrive://id:' || id), count(DISTINCT id)
+FROM gdrive_changes('gdrive://fixtures/dup') WHERE _change = 'upsert' AND name = 'dup.csv'
+----
+2	true	2

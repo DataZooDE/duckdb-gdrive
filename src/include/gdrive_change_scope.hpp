@@ -39,8 +39,11 @@ public:
 	//! Whether an item with this name and these parents is (strictly) under
 	//! the folder; when it is, `relative_path` is its path below the folder
 	//! ("a/b/c.csv"). Several parents (a legacy multi-parent file): the first
-	//! one that leads to the folder wins.
-	bool Locate(const std::string &name, const std::vector<std::string> &parents, std::string &relative_path);
+	//! one that leads to the folder wins. `representable`, when given, is set
+	//! false if a name along the way contains '/': then no joined path reads
+	//! back, and the caller must address the item by id.
+	bool Locate(const std::string &name, const std::vector<std::string> &parents, std::string &relative_path,
+	            bool *representable = nullptr);
 
 	//! Lookups made so far: the cost of the walk, for tests and diagnostics.
 	size_t Lookups() const {
@@ -52,6 +55,8 @@ private:
 		bool in = false;
 		//! Path of this folder below the scope folder; empty for the folder itself.
 		std::string relative_path;
+		//! No name on the way down contains '/'.
+		bool representable = true;
 	};
 
 	//! Where folder `id` stands; memoised. `depth` guards against a parent

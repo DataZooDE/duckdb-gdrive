@@ -13,7 +13,7 @@ constexpr int kMaxDepth = 256;
 
 ChangeScope::ChangeScope(std::string folder_id_p, Lookup lookup_p)
     : folder_id(std::move(folder_id_p)), lookup(std::move(lookup_p)) {
-	memo[folder_id] = Entry {true, ""};
+	memo[folder_id] = Entry {true, "", true};
 }
 
 const ChangeScope::Entry &ChangeScope::Folder(const std::string &id, int depth) {
@@ -34,6 +34,7 @@ const ChangeScope::Entry &ChangeScope::Folder(const std::string &id, int depth) 
 				if (up.in) {
 					entry.in = true;
 					entry.relative_path = up.relative_path.empty() ? node.name : up.relative_path + "/" + node.name;
+					entry.representable = up.representable && node.name.find('/') == std::string::npos;
 					break;
 				}
 			}
@@ -44,11 +45,14 @@ const ChangeScope::Entry &ChangeScope::Folder(const std::string &id, int depth) 
 }
 
 bool ChangeScope::Locate(const std::string &name, const std::vector<std::string> &parents,
-                         std::string &relative_path) {
+                         std::string &relative_path, bool *representable) {
 	for (auto &parent : parents) {
 		const Entry &up = Folder(parent, 0);
 		if (up.in) {
 			relative_path = up.relative_path.empty() ? name : up.relative_path + "/" + name;
+			if (representable) {
+				*representable = up.representable && name.find('/') == std::string::npos;
+			}
 			return true;
 		}
 	}

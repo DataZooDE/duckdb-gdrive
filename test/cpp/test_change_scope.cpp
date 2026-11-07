@@ -98,3 +98,17 @@ TEST_CASE("ChangeScope: a failing lookup propagates", "[changes][scope]") {
 	std::string rel;
 	CHECK_THROWS_AS(scope.Locate("f.csv", {"a"}, rel), std::runtime_error);
 }
+
+TEST_CASE("ChangeScope: a '/' in a name makes the path unrepresentable", "[changes][scope]") {
+	auto tree = Tree();
+	tree["s"] = ChangeScopeNode {"a/b", {"F"}};
+	auto scope = ScopeOver(tree, "F");
+	std::string rel;
+	bool representable = false;
+	REQUIRE(scope.Locate("x.csv", {"a"}, rel, &representable));
+	CHECK(representable);
+	REQUIRE(scope.Locate("x.csv", {"s"}, rel, &representable));
+	CHECK_FALSE(representable); // under a folder named "a/b"
+	REQUIRE(scope.Locate("q/4.csv", {"F"}, rel, &representable));
+	CHECK_FALSE(representable); // its own name
+}
