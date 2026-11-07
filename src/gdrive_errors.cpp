@@ -462,6 +462,16 @@ std::string FormatUserMessage(const GDriveError &error, const std::string &conte
 	switch (error.kind) {
 	case GDriveErrorKind::NOT_FOUND:
 		out = "no such file: " + context;
+		// Two not-founds that are about the SECRET, not the path. Drive names
+		// neither: a folder id given as DRIVE_ID answers "Shared drive not
+		// found", and a ROOT_FOLDER_ID that does not exist (or is not shared)
+		// answers "File not found: ." for the root's listing.
+		if (error.message.rfind("Shared drive not found", 0) == 0) {
+			out += " -- the secret's DRIVE_ID is not a Shared Drive this identity can see. DRIVE_ID takes a "
+			       "Shared Drive id (gdrive_drives() lists them); for an ordinary folder use ROOT_FOLDER_ID";
+		} else if (error.message == "File not found: .") {
+			out += " -- the secret's ROOT_FOLDER_ID does not exist, or is not shared with this identity";
+		}
 		break;
 	case GDriveErrorKind::UNAUTHENTICATED:
 		// REQ-NF-03: never interpolate Google's raw message here. Google's
@@ -483,14 +493,14 @@ std::string FormatUserMessage(const GDriveError &error, const std::string &conte
 		// application-default login` without --scopes, so the reader has done
 		// nothing wrong and needs a fix, not a diagnosis.
 		out = "insufficient OAuth scope for " + context +
-		      ": the access token was not granted a Google Drive scope. This is not a "
-		      "file-sharing problem.\n"
-		      "If the credential came from gcloud, request the Drive scope explicitly:\n"
+		      ": the access token's scope does not allow this request (no Drive scope at all, or a "
+		      "read-only one for a write). This is not a file-sharing problem.\n"
+		      "For a gdrive secret, set DRIVE_SCOPE 'https://www.googleapis.com/auth/drive' -- the default "
+		      "is drive.readonly, which cannot write.\n"
+		      "If the credential came from gcloud, request the Drive scope at login:\n"
 		      "  gcloud auth application-default login \\\n"
 		      "    --scopes=openid,https://www.googleapis.com/auth/drive\n"
-		      "(gcloud's default scope, cloud-platform, does not include Drive.)\n"
-		      "For a gdrive secret, set DRIVE_SCOPE to a Drive scope such as "
-		      "'https://www.googleapis.com/auth/drive'.";
+		      "(gcloud's default scope, cloud-platform, does not include Drive.)";
 		break;
 	case GDriveErrorKind::STORAGE_QUOTA:
 		out = "Drive storage quota exceeded while accessing " + context +
@@ -509,7 +519,10 @@ std::string FormatUserMessage(const GDriveError &error, const std::string &conte
 		out = "temporary Drive API failure while accessing " + context + ": retry with backoff";
 		break;
 	case GDriveErrorKind::INVALID_REQUEST:
-		out = "invalid Drive API request for " + context + " (internal error, not a user mistake)";
+		// Usually a request this extension built wrongly -- but Drive answers
+		// an over-long search text the same way ("The query is too complex"),
+		// so do not claim which; Drive's own message follows.
+		out = "Drive rejected the request for " + context + " as invalid";
 		break;
 	case GDriveErrorKind::NOT_DOWNLOADABLE:
 		out = context + " has no downloadable content (a native Google format); export it instead";

@@ -169,14 +169,15 @@ id:
 #
 # Google's two export formats for a Doc are observably different, which makes
 # this a real assertion rather than a smoke test:
-#   text/plain     -> begins with a UTF-8 BOM, no hard line breaks
-#   text/markdown  -> no BOM, and "  \n" hard breaks
-# If the setting were ignored, BOTH markdown assertions below would fail.
+#   text/plain     -> no hard line breaks (Drive also prefixes a UTF-8 BOM,
+#                     which the extension strips since 2026-11-07)
+#   text/markdown  -> "  \n" hard breaks
+# If the setting were ignored, the markdown hard-break assertion would fail.
 # ---------------------------------------------------------------------------
 query I
 SELECT starts_with(content, chr(65279)) FROM read_text('gdrive://fixtures/Notes')
 ----
-true
+false
 
 query I
 SELECT contains(content, '  ' || chr(10)) FROM read_text('gdrive://fixtures/Notes')

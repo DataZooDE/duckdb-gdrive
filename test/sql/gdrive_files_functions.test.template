@@ -1,0 +1,205 @@
+# name: test/sql/gdrive_files_functions.test.template
+# description: read_gdrive_files, search_gdrive, gdrive_drives -- against REAL Google Drive
+# group: [live]
+#
+# Materialised into test/sql/live/ by e2e/helpers/materialise.py. Read-only:
+# everything here reads the permanent /fixtures tree (decision D-1: no fake).
+
+require gdrive
+
+require-env GDRIVE_CI_DRIVE_ID
+
+require-env GDRIVE_CI_SA_KEY_FILE
+
+statement ok
+CREATE SECRET gdrive_test (
+    TYPE gdrive,
+    PROVIDER service_account,
+    KEY_FILE '${SA_KEY_FILE}',
+    ROOT_FOLDER_ID '${DRIVE_ID}',
+    DRIVE_SCOPE 'https://www.googleapis.com/auth/drive'
+);
+
+# ---------------------------------------------------------------------------
+# read_gdrive_files: one file, every column Drive gives us for it.
+# ---------------------------------------------------------------------------
+query IIIIIII
+SELECT path, name, size, mime_type, id = '${ID:small.csv}', md5, web_url LIKE 'https://drive.google.com/file/d/%'
+FROM read_gdrive_files('gdrive://fixtures/small.csv')
+----
+gdrive://fixtures/small.csv	small.csv	75	text/csv	true	b420c535a6c6c3574d1599f8df6df115	true
+
+query IIIIII
+SELECT created IS NOT NULL, modified >= created, version IS NOT NULL, parent_id = '${FIXTURES_ID}',
+       typeof(properties), starred
+FROM read_gdrive_files('gdrive://fixtures/small.csv')
+----
+true	true	true	true	MAP(VARCHAR, VARCHAR)	false
+
+# Without the scheme, a path is relative to the secret's root, as in the
+# sibling extension's functions.
+query I
+SELECT name FROM read_gdrive_files('fixtures/small.csv')
+----
+small.csv
+
+# The id: form.
+query I
+SELECT name FROM read_gdrive_files('gdrive://id:${ID:small.csv}')
+----
+small.csv
+
+# ---------------------------------------------------------------------------
+# A folder means the files directly in it -- never the folders.
+# ---------------------------------------------------------------------------
+query II
+SELECT count(*) FILTER (WHERE name IN ('small.csv', 'empty.csv', 'Budget', 'Notes')),
+       count(*) FILTER (WHERE mime_type = 'application/vnd.google-apps.folder')
+FROM read_gdrive_files('gdrive://fixtures')
+----
+4	0
+
+# A native Sheet reports no checksum, no revision id and no size.
+query III
+SELECT md5 IS NULL, version IS NULL, size IS NULL FROM read_gdrive_files('gdrive://fixtures/Budget')
+----
+true	true	true
+
+# ---------------------------------------------------------------------------
+# A glob: the rows come from the listings glob() makes anyway -- no files.get
+# per match.
+# ---------------------------------------------------------------------------
+statement ok
+CALL gdrive_reset_stats();
+
+query II
+SELECT count(*), count(*) FILTER (WHERE name LIKE 'part-%.parquet' AND md5 IS NOT NULL)
+FROM read_gdrive_files('gdrive://fixtures/parts/part-*.parquet')
+----
+10	10
+
+query II
+SELECT (SELECT value FROM gdrive_stats() WHERE metric = 'files_get'),
+       (SELECT value FROM gdrive_stats() WHERE metric = 'files_list') <= 3
+----
+0	true
+
+# Past Drive's 100-item page.
+query I
+SELECT count(*) FROM read_gdrive_files('gdrive://fixtures/many')
+----
+150
+
+# Duplicate names come back as id: paths, as glob() returns them (R-4).
+query II
+SELECT count(*), bool_and(path LIKE 'gdrive://id:%') FROM read_gdrive_files('gdrive://fixtures/dup/*')
+----
+2	true
+
+# Recursive: '**' reaches the nested fixture.
+query I
+SELECT count(*) > 0 FROM read_gdrive_files('gdrive://fixtures/**/*.csv') WHERE path LIKE 'gdrive://fixtures/many/%'
+----
+true
+
+# Nothing matches: zero rows, not an error.
+query I
+SELECT count(*) FROM read_gdrive_files('gdrive://fixtures/no-such-folder/*.csv')
+----
+0
+
+statement error
+SELECT * FROM read_gdrive_files(NULL)
+----
+the path must not be NULL
+
+# A brace expansion of literal names is resolved without a listing; its rows
+# must still be complete (they came back blank -- found in review). An
+# overlapping expansion lists each file once, with its row.
+query IIII
+SELECT count(*), count(*) FILTER (WHERE name IS NOT NULL AND id IS NOT NULL AND mime_type = 'text/csv'),
+       count(DISTINCT path), bool_and(size IS NOT NULL)
+FROM read_gdrive_files('gdrive://fixtures/{small,empty}.csv')
+----
+2	2	2	true
+
+query II
+SELECT count(*), count(*) FILTER (WHERE name = 'small.csv' AND id = '${ID:small.csv}')
+FROM read_gdrive_files('gdrive://fixtures/{small.csv,small*.csv}')
+----
+1	1
+
+# A literal path that names nothing is an error, not zero rows: a typo must
+# not read as "no files". (A glob that matches nothing is zero rows, above.)
+statement error
+SELECT * FROM read_gdrive_files('gdrive://fixtures/no-such.csv')
+----
+no such file or folder
+
+# Another scheme is not taken as a relative Drive name.
+statement error
+SELECT * FROM read_gdrive_files('s3://bucket/x.csv')
+----
+is not a gdrive:// path
+
+# Native Docs/Sheets have no size of their own: Drive's 1024 is not one.
+query I
+SELECT size IS NULL FROM read_gdrive_files('gdrive://fixtures/Notes')
+----
+true
+
+# ---------------------------------------------------------------------------
+# search_gdrive: Drive's full-text search. A hit's id: path reads back.
+#
+# Search covers EVERYTHING the identity can see, and the Drive is shared with
+# CI scratch runs and the e2e harness -- so assert on the fixture by its id,
+# never on "the" file of a name (another run's small.csv is a second hit).
+# ---------------------------------------------------------------------------
+query II
+SELECT name, mime_type FROM search_gdrive('small') WHERE path = 'gdrive://id:${ID:small.csv}'
+----
+small.csv	text/csv
+
+statement ok
+SET VARIABLE hit = (SELECT path FROM search_gdrive('small') WHERE path = 'gdrive://id:${ID:small.csv}');
+
+query I
+SELECT sum(amount) FROM read_csv(getvariable('hit'))
+----
+1500
+
+query II
+SELECT count(*) FILTER (WHERE path = 'gdrive://id:${ID:Budget}'),
+       count(*) FILTER (WHERE mime_type <> 'application/vnd.google-apps.spreadsheet')
+FROM search_gdrive('Budget', mime_type := 'application/vnd.google-apps.spreadsheet')
+----
+1	0
+
+query I
+SELECT count(*) FROM search_gdrive('', max_results := 3)
+----
+3
+
+statement error
+SELECT * FROM search_gdrive('x', max_results := 0)
+----
+max_results must be at least 1
+
+# ---------------------------------------------------------------------------
+# gdrive_drives: one drives.list call. The CI service account is a member of
+# no Shared Drive, so what it returns is not asserted -- only its shape.
+# ---------------------------------------------------------------------------
+statement ok
+CALL gdrive_reset_stats();
+
+query IIII
+SELECT typeof(name), typeof(id), typeof(created), typeof(hidden)
+FROM (SELECT * FROM gdrive_drives() UNION ALL SELECT NULL::VARCHAR, NULL::VARCHAR, NULL::TIMESTAMP, NULL::BOOLEAN)
+LIMIT 1
+----
+VARCHAR	VARCHAR	TIMESTAMP	BOOLEAN
+
+query I
+SELECT value FROM gdrive_stats() WHERE metric = 'drives_list'
+----
+1

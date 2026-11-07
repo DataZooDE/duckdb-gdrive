@@ -819,3 +819,44 @@ TEST_CASE("NOT_FOUND user message says no such file", "[errors]") {
 	auto msg = FormatUserMessage(err, "gdrive://x/y.csv");
 	REQUIRE(msg.find("no such file") != std::string::npos);
 }
+
+// ---------------------------------------------------------------------------
+// Messages that say what to fix (exploratory testing, 2026-11-07). The bodies
+// are the messages Drive returned for each mistake, verbatim.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("A folder id as DRIVE_ID: the not-found names the secret's binding", "[errors]") {
+	GDriveError err;
+	err.kind = GDriveErrorKind::NOT_FOUND;
+	err.message = "Shared drive not found: 1uvNWxbD2dBDCOysRwHPq-8vB5hrZFlzX";
+	auto msg = FormatUserMessage(err, "gdrive://fixtures");
+	REQUIRE(msg.find("DRIVE_ID takes a Shared Drive id") != std::string::npos);
+	REQUIRE(msg.find("ROOT_FOLDER_ID") != std::string::npos);
+}
+
+TEST_CASE("A missing ROOT_FOLDER_ID: the not-found names the secret's binding", "[errors]") {
+	GDriveError err;
+	err.kind = GDriveErrorKind::NOT_FOUND;
+	err.message = "File not found: .";
+	REQUIRE(FormatUserMessage(err, "gdrive://fixtures").find("ROOT_FOLDER_ID does not exist") != std::string::npos);
+	// An ordinary not-found is left alone.
+	err.message = "File not found: 1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.";
+	REQUIRE(FormatUserMessage(err, "gdrive://x").find("ROOT_FOLDER_ID") == std::string::npos);
+}
+
+TEST_CASE("INSUFFICIENT_SCOPE leads with DRIVE_SCOPE and names the read-only case", "[errors]") {
+	GDriveError err;
+	err.kind = GDriveErrorKind::INSUFFICIENT_SCOPE;
+	auto msg = FormatUserMessage(err, "gdrive://x");
+	REQUIRE(msg.find("read-only") != std::string::npos);
+	REQUIRE(msg.find("DRIVE_SCOPE") < msg.find("gcloud"));
+}
+
+TEST_CASE("INVALID_REQUEST does not call a user's over-long input an internal error", "[errors]") {
+	GDriveError err;
+	err.kind = GDriveErrorKind::INVALID_REQUEST;
+	err.message = "The query is too complex.";
+	auto msg = FormatUserMessage(err, "the Shared Drives");
+	REQUIRE(msg.find("internal error") == std::string::npos);
+	REQUIRE(msg.find("The query is too complex.") != std::string::npos);
+}

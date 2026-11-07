@@ -1,0 +1,78 @@
+# name: test/sql/gdrive_browser_urls.test.template
+# description: browser addresses (drive.google.com, docs.google.com) as paths -- against REAL Google Drive
+# group: [live]
+#
+# Read-only, over /fixtures. Writing through an address, and the precedence
+# over httpfs (which this runner cannot install), are in
+# e2e/tests/test_browser_urls.py.
+
+require gdrive
+
+require-env GDRIVE_CI_DRIVE_ID
+
+require-env GDRIVE_CI_SA_KEY_FILE
+
+statement ok
+CREATE SECRET gdrive_test (
+    TYPE gdrive,
+    PROVIDER service_account,
+    KEY_FILE '${SA_KEY_FILE}',
+    ROOT_FOLDER_ID '${DRIVE_ID}',
+    DRIVE_SCOPE 'https://www.googleapis.com/auth/drive'
+);
+
+# The address bar, "Copy link", and the old open?id= form: one file, by id.
+query I
+SELECT sum(amount) FROM read_csv('https://drive.google.com/file/d/${ID:small.csv}/view?usp=sharing')
+----
+1500
+
+query I
+SELECT sum(amount) FROM read_csv('https://drive.google.com/open?id=${ID:small.csv}')
+----
+1500
+
+# The address web_url reports reads straight back.
+statement ok
+SET VARIABLE small = (SELECT web_url FROM read_gdrive_files('gdrive://fixtures/small.csv'));
+
+query II
+SELECT sum(amount), file_size(getvariable('small')) FROM read_csv(getvariable('small'))
+----
+1500	75
+
+# glob() hands back the address itself.
+query I
+SELECT file = getvariable('small') FROM glob(getvariable('small'))
+----
+true
+
+# A Sheet's editor address reads through export, like gdrive://fixtures/Budget.
+query I
+SELECT count(*) = (SELECT count(*) FROM read_csv('gdrive://fixtures/Budget'))
+FROM read_csv('https://docs.google.com/spreadsheets/d/${ID:Budget}/edit#gid=0')
+----
+true
+
+# A folder address: the metadata functions take it as the folder.
+query I
+SELECT count(*) FROM read_gdrive_files('https://drive.google.com/drive/folders/${ID:parts}?usp=sharing')
+----
+10
+
+query I
+SELECT count(*) > 0 FROM gdrive_permissions('https://drive.google.com/drive/folders/${ID:parts}') WHERE role = 'owner'
+----
+true
+
+# An address on a Drive host that names nothing says which forms work...
+statement error
+SELECT * FROM read_csv('https://drive.google.com/drive/my-drive')
+----
+names no file or folder
+
+# ...and a file the identity cannot see matches nothing, as a missing path does.
+statement error
+SELECT * FROM read_csv('https://drive.google.com/file/d/1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/view')
+----
+No files found that match the pattern

@@ -27,7 +27,7 @@ the code that cites it.
 | **D-10** | **`credential_chain` is the default provider**, resolving Application Default Credentials ourselves rather than via `google-cloud-cpp`. | `CREATE SECRET (TYPE gdrive);` works with no arguments after `gcloud auth application-default login`. See the pitfall below for why the SDK was rejected. The default provider changed from `config`, which could never succeed argument-less, so no working statement changed meaning. |
 | **D-11** | `datazoo-oauth2` is public at `github.com/DataZooDE/datazoo-oauth2`, consumed as a commit-pinned submodule. | Forced by community-extensions building this repo from source: a private submodule cannot be cloned by their builder. Reaffirms HLD §5.4's rejection of vendoring. |
 | **D-12** | The `erpl-web` migration gate runs that repo's **live** OAuth suites, not just its offline Catch2 binaries. | Needs real SAP Datasphere / Entra / Business Central credentials. Consistent with D-1: a suite that only proves the code compiles is not a gate. |
-| **D-13** | **CalVer, `vYYYY.MM.DD`**, matching the other DataZoo extensions. | The community descriptor carries **no `version:` field** — `2026.08.01` is not valid semver (leading zeros), so the tagged `ref` is the version. `src/gdrive_version.cpp` is a hardcoded string and `make check_stamp` fails if it does not match the tag; nothing compared them before v2026.08.01. |
+| **D-13** | **CalVer, `vYYYY.MM.DD`**, matching the other DataZoo extensions. | The community descriptor carries the CalVer string as `version:` (e.g. `2026.10.18`), as duckdb-sharepoint's does, and the tagged commit as `ref`/`variegata` -- the `ref` is what builds. (An earlier reading held that `version:` must be omitted as not valid semver; the v2026.10.18 submission carried it and merged and built fine, so it stays.) `src/gdrive_version.cpp` is a hardcoded string and `make check_stamp` fails if it does not match the tag; nothing compared them before v2026.08.01. |
 | **D-14** | **`gdrive_immutable_prefixes` is opt-in and empty by default.** | It skips the per-open metadata refresh for paths the user declares are never modified in place. The extension cannot verify the claim: Drive keeps a file id across an overwrite, returns no `ETag`, and *silently ignores* `If-Match` (verified 2026-08-01 — a bogus precondition returns `206` and the data, not `412`). So it is a user assertion, and the promise is stronger than "not overwritten": not modified, not replaced, and not deleted-and-recreated while the process runs. |
 
 Target name: **`gdrive`** — `INSTALL gdrive; LOAD gdrive;`, and `TARGET_NAME`
@@ -212,6 +212,12 @@ src/
   gdrive_errors.cpp           PURE: Drive error -> DuckDB exception classification
   gdrive_glob.cpp             PURE: local glob (Drive's API cannot glob)
   gdrive_service_account_pure.cpp  PURE: RFC 7523 assertion construction
+  gdrive_rows.cpp             PURE: Drive API JSON -> rows for the table functions
+  gdrive_change_scope.cpp     PURE: is a changed file under the folder, at what path
+  gdrive_weburl.cpp           PURE: drive.google.com / docs.google.com address -> id
+  gdrive_files_functions.cpp  read_gdrive_files, search_gdrive, gdrive_drives
+  gdrive_permissions_functions.cpp, gdrive_versions.cpp, gdrive_changes.cpp
+                              the other metadata table functions
   include/                    one header per module; the pure/DuckDB split
                               shares a header
 test/cpp/                     Catch2, pure logic only
@@ -220,9 +226,45 @@ test/sql/                     SQLLogicTest; *.test.template gets fixture ids
                               substituted at run time into test/sql/live/
 e2e/                          uv + pytest harness: fixture provisioning,
                               API-call-count assertions, write round trips
+examples/                     one SQL file each, run against live Drive
+plugins/duckdb-gdrive/        Claude Code plugin: skills documenting the SQL API
+                              (.claude-plugin/marketplace.json at the root)
 duckdb/                       submodule, v1.5.6 (latest stable)
 extension-ci-tools/           submodule, v1.5-variegata (rolling 1.5 branch)
 ```
+
+## SQL surface conventions (shared with duckdb-sharepoint)
+
+The two extensions are the same product over two APIs, and a user who knows
+one should be able to guess the other. New SQL follows these rules, which
+duckdb-sharepoint established first:
+
+- **Paths stay paths.** Anything that names a file is a path a *reader* can
+  take, not a named parameter: `?version=<id>` for an earlier version, a
+  browser address for a file. Then `read_parquet`, `read_csv`, `read_blob`
+  and every future reader inherit it for free. Only a trailing `?version=` is
+  special; `?` elsewhere stays a glob character.
+- **`read_<ext>_<thing>(path or glob)`** returns rows of a thing
+  (`read_gdrive_files`). **`<ext>_<noun>(path, opt := …)`** returns metadata
+  about a thing (`gdrive_versions`, `gdrive_changes`, `gdrive_permissions`,
+  `gdrive_drives`). **`search_<ext>(text)`** searches. Options are named
+  parameters, never positional beyond the first.
+- **Same column names for the same idea**: `path`, `name`, `size`,
+  `created`, `modified`, `modified_by`, `modified_by_email`, `web_url`, `id`;
+  `_change` / `token` with one final `checkpoint` row for change feeds;
+  `granted_by` = `direct` | `inherited` | `link` and `link_scope` =
+  `anonymous` | `organization` for permissions. Where the API genuinely
+  differs the column says so in its own words (Drive has one `role` per
+  permission, Graph a `roles` list) rather than faking the other's shape.
+- **Timestamps are UTC `TIMESTAMP`**, NULL when the API omits them; empty
+  API text is NULL, not `''`.
+- **A path a function returns reads back**: a search hit is a
+  `gdrive://id:` path, a version row's `path` carries its `?version=`.
+- **Table functions take no subqueries** (DuckDB's rule): documentation shows
+  `SET VARIABLE x = (...)` + `getvariable('x')`.
+- **Bind-time, materialised rows** (`gdrive_table_util.hpp`): metadata is
+  small and the column set never depends on scan time. Each function counts
+  its own calls in `gdrive_stats()`, and its live test asserts the cost.
 
 ## Pure vs DuckDB source split
 
@@ -248,12 +290,19 @@ So when verifying one track's work while another is mid-slice, compile that
 track standalone instead of waiting:
 
 ```bash
-CATCH_INC=$(ls -d build/release/vcpkg_installed/*/include | head -1)
-CATCH_LIB=$(ls -d build/release/vcpkg_installed/*/lib | head -1)
-g++ -std=c++17 -Isrc/include -I"$CATCH_INC" \
+L=$(ls -d build/release/vcpkg_installed/*/ | head -1)
+g++ -std=c++17 -DPICOJSON_USE_INT64 -Isrc/include -I"$L/include" \
     test/cpp/test_uri.cpp src/gdrive_uri.cpp \
-    -L"$CATCH_LIB" -lCatch2Main -lCatch2 -o /tmp/t && /tmp/t
+    "$L/lib/manual-link/libCatch2Main.a" "$L/lib/libCatch2.a" -o /tmp/t && /tmp/t
 ```
+
+vcpkg puts `Catch2Main` under `lib/manual-link/`, so `-lCatch2Main` on `lib/`
+does not find it. `-DPICOJSON_USE_INT64` for any source that parses JSON (see
+the pitfall below).
+
+The same trap bites **stacked branches**: an untracked `test_*.cpp` that
+belongs to a LATER branch is GLOBbed into this one's Catch2 binary and breaks
+its link. Park it outside the tree (or `git stash -u` it) while building.
 
 ## Common pitfalls
 
@@ -540,6 +589,58 @@ publish nothing), and a failed `COPY` itself `TryRemoveFile`s every file it
 created -- with `USE_TMP_FILE false` that is the real target, so an
 overwrite that fails mid-stream deletes the old file exactly as on local
 disk; with the default tmp-file staging the old file survives.
+
+**Drive drops a file-level grant that does not exceed an inherited one
+(2026-11-07).** `permissions.create` of `reader` or `writer` on a file, for
+someone who already inherits `writer` from the folder, answers 200 -- and the
+permission's `permissionDetails` still list only the inherited writer. Nothing
+records the file-level grant, so `gdrive_permissions` says `inherited`, which is
+what Drive will act on. Only a grant ABOVE the inherited role shows up as a
+direct detail (the owner: `[writer inherited, owner direct]`). Pinned in
+`e2e/tests/test_permissions.py`. A `link` row (type `anyone`) is not tested
+live: it would make a file public, so its mapping is covered by the captured
+bodies in `test/cpp/test_rows.cpp` only.
+
+**Drive's changes feed is per drive and lags (2026-11-07).** `changes.list`
+reports every file the identity can see, not a folder's, so `gdrive_changes`
+places each change by walking parents (`ChangeScope`, pure, one `files.get`
+per folder at most). A change outside the folder is emitted as a path-less
+`delete`, deliberately: it may be a move OUT, which a mirror must drop. And a
+file uploaded seconds ago is often not in the feed yet (3 s was not enough),
+so anything asserting on changes SINCE a token polls, in
+`e2e/tests/test_changes.py`, never in SQLLogicTest. An unknown token answers
+`400 Invalid Value` on `pageToken`.
+
+**Crew review + exploratory testing, 2026-11-07 -- what they found that the
+suites did not.** Every live suite was green; independent reviewers and three
+testers acting as users found seven data-loss or wrong-answer bugs. The
+lessons:
+
+- *A path alias is a deletion hazard.* COPY stages at `dir/tmp_<name>` and, on
+  failure, `TryRemoveFile`s what it "created" (v1.5.6: the global state's
+  destructor; 2.0: `copy_output_lifecycle.cpp`). A browser address's tmp path
+  maps to the SAME file id, so the cleanup trashed the user's file.
+  `GDriveFileSystem::TryRemoveFile` is a no-op for addresses. Test the FAILURE
+  path of every write form, not just success.
+- *Drive's `name='...'` query is case-insensitive*, Drive's names are not:
+  writing `report.csv` replaced `Report.csv`. Name matches are filtered to the
+  exact name client-side.
+- *Drive accepts writes that destroy*: `files.update` with bytes onto a folder
+  (discarded) or a native Sheet (content gone), a move onto a Sheet (trashed).
+  `RefuseReplacing` gates every write and move.
+- *Translating a URL must keep everything that changes its meaning*: dropping
+  `?version=` turned `remove_file(<address>?version=...)` into removing the
+  current file.
+- *The changes feed reports a folder, not its children*, when the folder is
+  renamed or moved; and it is per drive, so "outside the folder" is every
+  other change the identity can see. `gdrive_changes` expands folder events
+  and makes out-of-folder deletes opt-in (`outside := true`).
+- *Empty is not "nothing"*: a literal path that names nothing must error, or a
+  permissions audit with a typo reports "nothing shared".
+- Native Docs/Sheets report `size: 1024` whatever their content.
+
+`.crew/` holds the crew runs (git-ignored). `helpers.drop_scratch` only
+accepts `run-*` names -- exploratory testers need their own cleanup.
 
 **Releasing:** follow `docs/RELEASE.md`. The community-extensions repo builds
 from a tagged commit and runs none of our live tests, so whatever is broken

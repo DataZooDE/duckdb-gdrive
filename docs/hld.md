@@ -479,3 +479,38 @@ sequenced first rather than bundled into M2.
 7. **Public or private source?** Community-extension distribution requires
    public. If it must stay private, users have to build it themselves, which
    materially reduces the value.
+
+## 14. Drive's metadata as tables (added 2026-11)
+
+Written after the fact, as §§13-15 of duckdb-sharepoint's HLD were: the
+sibling grew a metadata surface, and this extension follows its shape (see
+CLAUDE.md, "SQL surface conventions").
+
+| function | Drive endpoint | cost |
+|---|---|---|
+| `read_gdrive_files(path)` | the glob's own `files.list`, with a wider field mask | a glob: the listings `glob()` makes, no call per match; a literal file: +1 `files.get` |
+| `search_gdrive(text)` | `files.list?q=fullText contains …`, `corpora=allDrives` (or the secret's drive) | one call per page of 1000 |
+| `gdrive_drives()` | `drives.list` | one call per page of 100 |
+| `gdrive_versions(path)` | `revisions.list` | one per page; reading `?version=` is one `revisions.get` + ranged `revisions/<id>?alt=media` |
+| `gdrive_changes(folder, token)` | `changes.getStartPageToken`, `changes.list` | one per page, + one `files.get` per folder the parent walk has not seen |
+| `gdrive_permissions(path)` | `permissions.list` | one per item |
+
+- **Resolution is shared with the filesystem.** `GDriveFileSystem::ResolveItems`
+  runs the same glob and path cache as `glob()`; a per-database registry
+  (`ForDatabase`) is how a table function finds the filesystem, since the VFS
+  offers no typed lookup. `List()` takes a field-mask override and keeps
+  Drive's whole objects, so the extra columns cost no extra calls.
+- **The changes feed is per drive.** `ChangeScope` (pure) places each change
+  by walking parents, memoised. A change it places outside the folder is a
+  path-less `delete`: it may be a move out, and a mirror must drop it.
+- **A version is read-only and never stale-recovers.** Writing, moving or
+  removing a `?version=` path is refused (each would act on the current file),
+  and the block cache keys on the revision id.
+- **Browser addresses** map to `gdrive://id:` in every filesystem entry point;
+  `IsManuallySet()` keeps httpfs from winning them. `COPY` to an address
+  stages its tmp file at the same id, so a move onto itself is a no-op.
+- Drive behaviours found on the way (verified 2026-11-07): the changes feed
+  lags writes by more than 3 s; an unknown token is `400 Invalid Value`; a
+  file-level grant no higher than an inherited one is not recorded; native
+  Docs/Sheets list revisions but have no downloadable content for them; a
+  native file reports a `size` (1024) but no `md5Checksum` or `headRevisionId`.

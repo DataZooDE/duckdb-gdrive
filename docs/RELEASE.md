@@ -39,6 +39,7 @@ make smoke_loadable     # artifact LOADS into a stock duckdb
                         # release so a skip fails instead of passing quietly
 make smoke_static       # only platform libraries dynamically linked
 make verify_readme      # README <-> code agree in BOTH directions
+make check_plugin_version  # the Claude Code plugin's version is the release's
 make latency            # per-request Drive latency; the figures the docs quote
 make unit_test
 make check_credentials
@@ -65,8 +66,8 @@ gh run list --repo DataZooDE/duckdb-gdrive --limit 4
 `Checks` covers hygiene, musl, the artifact, and the live suite.
 `Main Extension Distribution Pipeline` is the one that matters for
 publishing: it builds v1.5.6 (smoke-tested and deployed) and the DuckDB 2.0
-line (build and test only) across Linux amd64/arm64, Windows and both macOS
-architectures.
+line (build and test only) across Linux amd64/arm64, Windows and Apple Silicon
+macOS.
 
 ## Tagging
 
@@ -88,6 +89,14 @@ the version itself and passes `EXTENSION_VERSION` explicitly, and the stamp
 check asserts it whenever HEAD is exactly on a tag.
 
 ### Versioning: CalVer, `vYYYY.MM.DD`
+
+The Claude Code plugin carries the same version: `version` in
+`plugins/duckdb-gdrive/.claude-plugin/plugin.json` and in each
+`plugins/duckdb-gdrive/skills/*/SKILL.md`. `/plugin marketplace update` decides
+on it whether a user has the newest skills, so a release that changes the SQL
+surface without bumping it leaves people on the old documentation.
+`make check_plugin_version` fails when any of them differs from
+`src/gdrive_version.cpp`.
 
 The scheme is **CalVer**, matching every other DataZoo extension (`erpl_*`,
 `anofox_*`, `quack_oauth`): the tag is the release date, and there is no
@@ -123,7 +132,7 @@ copy for a long time after a re-upload:
 
 ```bash
 T=vYYYY.MM.DD; N=gdrive; B=https://s3.eu-west-1.amazonaws.com/get.erpl.io
-for v in v1.5.6; do for a in linux_amd64 linux_arm64 osx_amd64 osx_arm64 windows_amd64; do
+for v in v1.5.6; do for a in linux_amd64 linux_arm64 osx_arm64 windows_amd64; do
   echo "$v $a: $(curl -sf $B/$N/$T/$v/$a/$N.duckdb_extension.gz | gunzip 2>/dev/null | tail -c 512 | strings -n 4 | grep -m1 -E '^v20')"
 done; done
 ```
@@ -164,6 +173,25 @@ commit lands on a merged PR and changes nothing.
    `ref`. One commit builds on both (duckdb-compat). There is no `andium`
    key: DuckDB 1.4.x is not supported.
 3. Open the PR.
+4. **After the merge, ask for the v1.5.6 build. Nothing builds it on its own.**
+   A merge (push to main) runs community-extensions' `build.yml` for DuckDB 2.0
+   only; `scripts/build.py` reads `variegata` only when a maintainer dispatches
+   `build.yml` with `duckdb_version: v1.5.6`. duckdb-sharepoint's v2026.10.18
+   merged without that request and v1.5.6 had no binary (its #48). Comment on
+   the merged PR:
+
+   > Thanks for merging! Could someone run the **DuckDB v1.5.6** build for
+   > `gdrive` (`build.yml` with `duckdb_version: v1.5.6`, `deploy: true`)?
+   > The descriptor sets `variegata` to the same SHA as `ref`.
+
+   Done when the v1.5.6 binary exists on every platform:
+
+   ```bash
+   for a in linux_amd64 linux_arm64 osx_arm64 windows_amd64; do
+     echo "$a $(curl -s -o /dev/null -w '%{http_code}' \
+       https://community-extensions.duckdb.org/v1.5.6/$a/gdrive.duckdb_extension.gz)"
+   done
+   ```
 
 **0.1.0 was submitted 2026-07-30 as duckdb/community-extensions#2407**, ref
 `181b851`.
@@ -210,7 +238,12 @@ still blocks is the decision below.
 
 ## Excluded platforms, and why
 
-`windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads`.
+`osx_amd64;windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads`.
+
+Intel macOS: community-extensions no longer builds it (since 2026-11, for any
+extension), so DuckDB's own channel has no Intel macOS binary of ours anyway;
+we no longer build, smoke-test or deploy it either. The same call as
+duckdb-sharepoint's.
 
 wasm is not a gap to close later: the extension is HTTPS calls to the Drive
 API plus a loopback redirect server for interactive OAuth, and neither works

@@ -1,0 +1,86 @@
+# name: test/sql/gdrive_permissions.test.template
+# description: gdrive_permissions -- who can reach a file, against REAL Google Drive
+# group: [live]
+#
+# Read-only, over /fixtures. Which grants exist depends on how the fixture root
+# is shared, so only what must hold is asserted: the owner (fixtures are seeded
+# by the delegated user, who owns them) and the mapping's invariants. Grants
+# added by a test live in e2e/tests/test_permissions.py.
+
+require gdrive
+
+require-env GDRIVE_CI_DRIVE_ID
+
+require-env GDRIVE_CI_SA_KEY_FILE
+
+statement ok
+CREATE SECRET gdrive_test (
+    TYPE gdrive,
+    PROVIDER service_account,
+    KEY_FILE '${SA_KEY_FILE}',
+    ROOT_FOLDER_ID '${DRIVE_ID}',
+    DRIVE_SCOPE 'https://www.googleapis.com/auth/drive'
+);
+
+# The owner's grant is on the file itself: direct, even though the owner also
+# inherits writer from the folder.
+query IIIII
+SELECT path, file_id = '${ID:small.csv}', granted_by, grantee_type, grantee_email IS NOT NULL
+FROM gdrive_permissions('gdrive://fixtures/small.csv') WHERE role = 'owner'
+----
+gdrive://fixtures/small.csv	true	direct	user	true
+
+# Every row is one of the three kinds, and only link rows carry a scope.
+query III
+SELECT count(*) > 0, bool_and(granted_by IN ('direct', 'inherited', 'link')),
+       bool_and((link_scope IS NULL) = (granted_by <> 'link'))
+FROM gdrive_permissions('gdrive://fixtures/small.csv')
+----
+true	true	true
+
+# A folder is an item of its own.
+query I
+SELECT count(*) > 0 FROM gdrive_permissions('gdrive://fixtures') WHERE path = 'gdrive://fixtures' AND role = 'owner'
+----
+true
+
+# A glob: every match, one permissions.list each, no files.get.
+statement ok
+CALL gdrive_reset_stats();
+
+query II
+SELECT count(DISTINCT path), count(DISTINCT file_id) FROM gdrive_permissions('gdrive://fixtures/parts/part-*.parquet')
+----
+10	10
+
+query II
+SELECT (SELECT value FROM gdrive_stats() WHERE metric = 'permissions_list'),
+       (SELECT value FROM gdrive_stats() WHERE metric = 'files_get')
+----
+10	0
+
+# A typo must not read as "nothing is shared": a literal path that names
+# nothing is an error. A glob that matches nothing is zero rows.
+statement error
+SELECT count(*) FROM gdrive_permissions('gdrive://fixtures/no-such.csv')
+----
+no such file or folder
+
+query I
+SELECT count(*) FROM gdrive_permissions('gdrive://fixtures/no-such-dir/*.csv')
+----
+0
+
+# A glob's folders are audited too: a folder shared with anyone exposes its
+# whole tree, and must not hide behind its files.
+query II
+SELECT count(DISTINCT path) FILTER (WHERE path IN ('gdrive://fixtures/many', 'gdrive://fixtures/parts')),
+       count(DISTINCT path) FILTER (WHERE path LIKE 'gdrive://fixtures/many/%')
+FROM gdrive_permissions('gdrive://fixtures/*')
+----
+2	0
+
+statement error
+SELECT * FROM gdrive_permissions(NULL)
+----
+the path must not be NULL

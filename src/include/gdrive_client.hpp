@@ -36,6 +36,9 @@ struct DriveFileMeta {
 	//! Feeds FileSystem::GetVersionTag, which DuckDB's caching layer uses as
 	//! the invalidation key. Drive's revision id fits that contract exactly.
 	std::string head_revision_id;
+	//! In the trash. Listings exclude trashed files in their query; an id:
+	//! path does not, and a trashed id must read as gone, not as a file.
+	bool trashed = false;
 
 	bool IsFolder() const;
 	//! application/vnd.google-apps.* -- has no bytes; must be read via
@@ -80,6 +83,16 @@ struct DriveCallStats {
 	//! HIGH-WATER MARK, not a count: the most bytes one write handle held in
 	//! memory (bounded by gdrive_upload_chunk_bytes). Not in Total().
 	int64_t upload_buffer_peak_bytes = 0;
+	//! The metadata endpoints behind the table functions: permissions.list,
+	//! revisions.list (and revisions.get), changes.list (and
+	//! getStartPageToken), drives.list.
+	int64_t permissions_list = 0;
+	int64_t revisions_list = 0;
+	//! Ranged downloads of an EARLIER version (`?version=`), apart from
+	//! files_media so a cost assertion on current-version reads stays exact.
+	int64_t revisions_media = 0;
+	int64_t changes_list = 0;
+	int64_t drives_list = 0;
 
 	int64_t Total() const;
 };
@@ -108,11 +121,27 @@ public:
 	//! Follows nextPageToken to exhaustion -- a caller must never see a
 	//! partial listing, which is how "the glob silently dropped files" bugs
 	//! happen.
-	virtual DriveResponse List(const std::string &query, const std::string &page_token = "") = 0;
+	//!
+	//! `file_fields`, when non-empty, replaces the narrow field mask inside
+	//! `files(...)` -- the table functions ask for owners, links, checksums.
+	//! The combined body keeps every field Drive returned.
+	virtual DriveResponse List(const std::string &query, const std::string &page_token = "",
+	                           const std::string &file_fields = "") = 0;
+
+	//! One GET against the Drive API v3, retried and counted like every other
+	//! call. `path_and_query` starts at "/drive/v3/"; the caller adds
+	//! AllDrivesQuery() where the endpoint takes it (drives.list does not).
+	//! Does not follow pages: the callers each have their own token field.
+	virtual DriveResponse ApiGet(const std::string &path_and_query, int64_t DriveCallStats::*counter) = 0;
 
 	//! files.get?alt=media with `Range: bytes=start-end` (inclusive, as HTTP
 	//! defines it). `end` < 0 means "to end of file".
 	virtual DriveResponse Download(const std::string &file_id, int64_t start, int64_t end) = 0;
+
+	//! revisions.get?alt=media: the same ranged read of an EARLIER version
+	//! (gdrive://...?version=<id>), counted as revisions_media.
+	virtual DriveResponse DownloadRevision(const std::string &file_id, const std::string &revision_id, int64_t start,
+	                                       int64_t end) = 0;
 
 	//! files.export. Does NOT support Range -- the whole export is fetched.
 	virtual DriveResponse Export(const std::string &file_id, const std::string &mime_type) = 0;
@@ -166,6 +195,12 @@ public:
 	virtual const DriveCallStats &Stats() const = 0;
 	virtual void ResetStats() = 0;
 };
+
+//! "supportsAllDrives=true&includeItemsFromAllDrives=true" -- see CLAUDE.md:
+//! without it Drive answers "not found" for files in a Shared Drive.
+std::string AllDrivesQuery();
+//! Percent-encoding for one query-string value.
+std::string QueryEncode(const std::string &value);
 
 //! Parse a files.get / files.list JSON payload. PURE enough to unit-test, but
 //! kept here because it is meaningless without the transport.

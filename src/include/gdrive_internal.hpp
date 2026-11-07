@@ -58,6 +58,18 @@ std::string EscapeDriveQueryLiteral(const std::string &value);
 //! slash; empty means the root.
 std::string JoinGDrivePath(const std::string &parent_path, const std::string &name);
 
+//! A write would replace `existing` (an overwrite in place, or a move onto
+//! it): refuse when it is a folder or a native Google file. Drive accepts
+//! both -- a folder silently discards the bytes, a Sheet or Doc loses its
+//! content (or, replaced by a move, goes to the trash). Neither is a write
+//! anyone means. `target` names it in the message.
+void RefuseReplacing(const DriveFileMeta &existing, const std::string &target);
+
+//! A browser address (gdrive_weburl.hpp) as its gdrive://id: path; any other
+//! path unchanged. Throws InvalidInputException for an address on a Drive host
+//! that names no file or folder, listing the forms that work.
+std::string ToGDrivePath(const std::string &path);
+
 //! Read an extension setting (gdrive_permanent_delete, gdrive_docs_export_mime)
 //! through the FileOpener, falling back to `default_value` when unset or when
 //! there is no opener at all (e.g. a handle-less internal call).
@@ -110,6 +122,11 @@ public:
 	//! overwrite (which keeps the file id) miss the cache instead of serving
 	//! stale bytes.
 	std::string block_key;
+
+	//! A revision id when the handle reads an EARLIER version
+	//! (gdrive://...?version=<id>), else empty. Such a handle is read-only and
+	//! never re-resolves: the version it names is the version it reads.
+	std::string version;
 
 };
 
@@ -187,6 +204,10 @@ void MutateRemoveDirectory(GDriveClient &client, GDrivePathCache &cache, const G
 //! gdrive_docs_export_mime setting (D-7). Sheets always export to text/csv,
 //! regardless of the setting.
 std::string ExportMimeTypeFor(const DriveFileMeta &meta, const std::string &docs_export_mime_setting);
+
+//! A format Drive exports a Google Doc to (text/plain, text/markdown, PDF,
+//! DOCX, ...). gdrive_docs_export_mime accepts exactly these.
+bool IsDocsExportMime(const std::string &mime);
 
 //! Fetch the whole export once (Export does not support Range) and return the
 //! bytes. Throws via ThrowGDriveError on failure.

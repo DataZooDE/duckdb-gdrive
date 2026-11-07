@@ -1,0 +1,176 @@
+# name: test/sql/gdrive_versions.test.template
+# description: gdrive_versions and gdrive://...?version= -- against REAL Google Drive
+# group: [live]
+#
+# Writes one scratch file twice, IN PLACE (write_blob updates the existing id;
+# COPY's default tmp-file-and-move would make a new file with no history), so
+# Drive keeps two revisions of it. Its own file, for the reason CLAUDE.md
+# gives under "Cost assertions belong in their own test file".
+
+require gdrive
+
+require-env GDRIVE_CI_DRIVE_ID
+
+require-env GDRIVE_OAUTH_CLIENT_ID
+
+require-env GDRIVE_OAUTH_CLIENT_SECRET
+
+require-env GDRIVE_USER_REFRESH_TOKEN
+
+# The delegated user: a service account cannot write outside a Shared Drive.
+statement ok
+CREATE SECRET gdrive_test (
+    TYPE gdrive,
+    PROVIDER config,
+    CLIENT_ID '${OAUTH_CLIENT_ID}',
+    CLIENT_SECRET '${OAUTH_CLIENT_SECRET}',
+    REFRESH_TOKEN '${USER_REFRESH_TOKEN}',
+    ROOT_FOLDER_ID '${DRIVE_ID}',
+    DRIVE_SCOPE 'https://www.googleapis.com/auth/drive'
+);
+
+statement ok
+SELECT write_blob('gdrive://scratch/${SCRATCH}/versions/v.csv', encode(E'a\n1\n'));
+
+statement ok
+SELECT write_blob('gdrive://scratch/${SCRATCH}/versions/v.csv', encode(E'a\n2\n3\n'));
+
+# ---------------------------------------------------------------------------
+# gdrive_versions: newest first; the current one's path is the file itself,
+# an earlier one's carries ?version=.
+# ---------------------------------------------------------------------------
+query IIIII
+SELECT current, size, path = 'gdrive://scratch/${SCRATCH}/versions/v.csv',
+       path LIKE 'gdrive://scratch/${SCRATCH}/versions/v.csv?version=%', md5 IS NOT NULL
+FROM gdrive_versions('gdrive://scratch/${SCRATCH}/versions/v.csv')
+----
+true	6	true	false	true
+false	4	false	true	true
+
+query III
+SELECT count(*), max(modified) >= min(modified), bool_and(modified_by_email IS NOT NULL)
+FROM gdrive_versions('gdrive://scratch/${SCRATCH}/versions/v.csv')
+----
+2	true	true
+
+statement ok
+SET VARIABLE old = (SELECT path FROM gdrive_versions('gdrive://scratch/${SCRATCH}/versions/v.csv') WHERE NOT current);
+
+statement ok
+SET VARIABLE old_id = (SELECT version FROM gdrive_versions('gdrive://scratch/${SCRATCH}/versions/v.csv') WHERE NOT current);
+
+# ---------------------------------------------------------------------------
+# Reading an earlier version, with any reader. One revisions.get for the
+# version's size, then ranged media from revisions -- never the current file.
+# ---------------------------------------------------------------------------
+statement ok
+CALL gdrive_reset_stats();
+
+query I
+SELECT a FROM read_csv(getvariable('old'))
+----
+1
+
+query III
+SELECT (SELECT value FROM gdrive_stats() WHERE metric = 'revisions_list'),
+       (SELECT value FROM gdrive_stats() WHERE metric = 'revisions_media') >= 1,
+       (SELECT value FROM gdrive_stats() WHERE metric = 'files_media')
+----
+1	true	0
+
+# The current file is untouched by all this.
+query I
+SELECT a FROM read_csv('gdrive://scratch/${SCRATCH}/versions/v.csv') ORDER BY a
+----
+2
+3
+
+query II
+SELECT size, content = encode(E'a\n1\n') FROM read_blob(getvariable('old'))
+----
+4	true
+
+query I
+SELECT file_size(getvariable('old'))
+----
+4
+
+# The id: form takes a version too. (Through a variable: a table function's
+# arguments cannot contain a subquery.)
+statement ok
+SET VARIABLE old_by_id = (SELECT 'gdrive://id:' || id || '?version=' || getvariable('old_id')
+                          FROM read_gdrive_files('gdrive://scratch/${SCRATCH}/versions/v.csv'));
+
+query I
+SELECT a FROM read_csv(getvariable('old_by_id'))
+----
+1
+
+# ---------------------------------------------------------------------------
+# An earlier version is read-only: writing, moving or deleting "it" would act
+# on the current file.
+# ---------------------------------------------------------------------------
+statement error
+SELECT write_blob(getvariable('old'), encode('x'))
+----
+an earlier version of a file is read-only
+
+statement error
+SELECT remove_file(getvariable('old'))
+----
+an earlier version of a file is read-only
+
+statement error
+SELECT * FROM read_csv('gdrive://scratch/${SCRATCH}/versions/v.csv?version=no-such-revision')
+----
+no version 'no-such-revision'
+
+statement error
+SELECT * FROM gdrive_versions(getvariable('old'))
+----
+name the file, not one of its versions
+
+statement error
+SELECT * FROM gdrive_versions('gdrive://scratch/${SCRATCH}/versions')
+----
+is a folder; gdrive_versions takes a file
+
+# The metadata functions describe a file, not a version of one: they used to
+# report the CURRENT revision's size and md5 under a ?version= path.
+statement error
+SELECT * FROM read_gdrive_files(getvariable('old'))
+----
+name the file, not one of its versions
+
+statement error
+SELECT * FROM gdrive_permissions(getvariable('old'))
+----
+name the file, not one of its versions
+
+# An in-place COPY in this same process: the new revision is the current one.
+# (The path cache's revision used to win, swapping current and path.)
+statement ok
+COPY (SELECT 9 AS a) TO 'gdrive://scratch/${SCRATCH}/versions/v.csv' (FORMAT csv, USE_TMP_FILE false);
+
+query II
+SELECT count(*) FILTER (WHERE v.current),
+       bool_and(v.md5 = f.md5) FILTER (WHERE v.current)
+FROM gdrive_versions('gdrive://scratch/${SCRATCH}/versions/v.csv') v,
+     read_gdrive_files('gdrive://scratch/${SCRATCH}/versions/v.csv') f
+----
+1	true
+
+# A native Sheet has revisions too, but Drive keeps no downloadable content
+# for them: listed, not readable.
+query II
+SELECT count(*) >= 1, bool_or(current) FROM gdrive_versions('gdrive://fixtures/Budget')
+----
+true	true
+
+statement ok
+SET VARIABLE sheet_old = (SELECT 'gdrive://fixtures/Budget?version=' || version FROM gdrive_versions('gdrive://fixtures/Budget') LIMIT 1);
+
+statement error
+SELECT * FROM read_csv(getvariable('sheet_old'))
+----
+earlier versions of Google Docs, Sheets or Slides

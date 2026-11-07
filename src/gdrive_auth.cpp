@@ -532,17 +532,18 @@ RefreshResult RefreshUserToken(const std::string &client_id, const std::string &
 		// 400.
 		if (parsed.parsed_ok && parsed.error == "invalid_grant") {
 			result.error +=
-			    "\n\nThe refresh token is no longer valid. Google revokes one when access is "
-			    "withdrawn, when the OAuth client is deleted, or after ~6 months unused while the "
-			    "project is still in \"Testing\" publishing status. Obtain a new one (for this repo, "
-			    "`make oauth_consent`) and recreate the secret. A service-account key does not "
-			    "expire this way.";
+			    "\n\nGoogle does not accept this refresh token: it was revoked (access withdrawn, the "
+			    "OAuth client deleted, or ~6 months unused while the project is in \"Testing\" "
+			    "publishing status), or it was never a valid token for this CLIENT_ID. Sign in again -- "
+			    "PROVIDER authorization_code on this machine, or a fresh token for PROVIDER config -- and "
+			    "recreate the secret. A service-account key does not expire this way.";
 		}
 		return result;
 	}
 
 	if (!parsed.parsed_ok || parsed.access_token.empty()) {
-		result.error = "Google token endpoint response did not contain an access_token";
+		result.error = "Google token endpoint response did not contain an access_token -- check that "
+		               "DRIVE_SCOPE is a valid OAuth scope, e.g. 'https://www.googleapis.com/auth/drive'";
 		return result;
 	}
 
@@ -1223,13 +1224,9 @@ GDriveAuthContext GetAuthContext(optional_ptr<FileOpener> opener, const std::str
 		}
 		// REQ from this slice: name the path and show a CREATE SECRET example
 		// rather than letting an opaque 401 come back from Google.
-		throw IOException(
-		    "gdrive: no secret configured for path '%s'. Create one first, e.g.:\n"
-		    "  CREATE SECRET gdrive_sa (TYPE gdrive, PROVIDER service_account, "
-		    "KEY_FILE '/etc/creds/sa.json');\n"
-		    "or, with a pre-obtained token:\n"
-		    "  CREATE SECRET gdrive_tok (TYPE gdrive, PROVIDER config, ACCESS_TOKEN '...');",
-		    path.c_str());
+		// The same advice every entry point gives (kNoSecretAdvice), leading
+		// with the argument-less default (D-10).
+		throw IOException("gdrive: no gdrive secret configured for '%s' -- %s", path.c_str(), kNoSecretAdvice);
 	}
 
 	const BaseSecret &base = match.GetSecret();

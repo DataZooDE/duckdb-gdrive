@@ -4,12 +4,15 @@
 // contract and docs/hld.md sections 3, 4, 6, 8 for the design this follows.
 #include "gdrive_internal.hpp"
 #include "gdrive_glob.hpp"
+#include "gdrive_weburl.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/main/client_context.hpp"
 
+#include <algorithm>
 #include <cstdint>
+#include <unordered_map>
 #include <unordered_set>
 #include <cstring>
 #include <functional>
@@ -47,6 +50,18 @@ std::string EscapeDriveQueryLiteral(const std::string &value) {
 	case GDriveExceptionType::IO:
 	default:
 		throw IOException(message);
+	}
+}
+
+void RefuseReplacing(const DriveFileMeta &existing, const std::string &target) {
+	if (existing.IsFolder()) {
+		throw IOException("gdrive: cannot write to '%s': it is a folder, not a file", target);
+	}
+	if (existing.IsNativeGoogleFormat()) {
+		throw InvalidInputException(
+		    "gdrive: cannot write to '%s': it is a native Google file (%s), which has no bytes to replace -- writing "
+		    "would destroy its content. Write a file under another name instead.",
+		    target, existing.mime_type);
 	}
 }
 
@@ -165,19 +180,32 @@ std::vector<DriveFileMeta> ListByName(GDriveClient &client, const std::string &p
 		matches.insert(matches.end(), page.begin(), page.end());
 		page_token = next;
 	} while (!page_token.empty());
+	// Drive compares names in `q` case-INSENSITIVELY ("name='report.csv'"
+	// also matches "Report.csv"), but stores them case-sensitively and lets
+	// both live in one folder. Without this filter, writing report.csv
+	// replaced a colleague's Report.csv (found by exploratory testing,
+	// 2026-11-07). Keep only the exact name.
+	matches.erase(std::remove_if(matches.begin(), matches.end(),
+	                             [&](const DriveFileMeta &m) { return m.name != name; }),
+	              matches.end());
 	return matches;
 }
 
 //! One files.list call for ALL children of `parent_id`, paginated to
 //! exhaustion. Used by ListFiles/Glob, which need the whole folder rather
 //! than one name.
+//!
+//! `file_fields` non-empty asks the listing for those fields as well, and
+//! `rows` (then required) receives the FileRow of each child, in the same
+//! order as the returned metadata.
 std::vector<DriveFileMeta> ListChildren(GDriveClient &client, const std::string &parent_id,
-                                        const std::string &context_path) {
+                                        const std::string &context_path, const std::string &file_fields = "",
+                                        std::vector<FileRow> *rows = nullptr) {
 	std::string query = "'" + parent_id + "' in parents and trashed=false";
 	std::vector<DriveFileMeta> children;
 	std::string page_token;
 	do {
-		auto resp = client.List(query, page_token);
+		auto resp = client.List(query, page_token, file_fields);
 		if (!resp.ok) {
 			ThrowGDriveError(resp.error, context_path);
 		}
@@ -185,6 +213,16 @@ std::vector<DriveFileMeta> ListChildren(GDriveClient &client, const std::string 
 		std::string next;
 		if (!ParseFileList(resp.body, page, next)) {
 			throw IOException("gdrive: malformed listing response for '%s'", context_path);
+		}
+		if (rows) {
+			// Same body, same order: ParseFileList skips only objects without
+			// an id, and ParseFileRowList rejects those outright.
+			std::vector<FileRow> page_rows;
+			std::string row_next, error;
+			if (!ParseFileRowList(resp.body, page_rows, row_next, error) || page_rows.size() != page.size()) {
+				throw IOException("gdrive: malformed listing response for '%s': %s", context_path, error);
+			}
+			rows->insert(rows->end(), page_rows.begin(), page_rows.end());
 		}
 		children.insert(children.end(), page.begin(), page.end());
 		page_token = next;
@@ -219,6 +257,66 @@ void ReadExactRangeTail(const std::string &path, void *buffer, int64_t nr_bytes,
 } // namespace
 
 std::string BuildBlockKey(const GDriveAuthContext &auth, const DriveFileMeta &meta);
+
+namespace {
+//! COPY ... TO 'gdrive://id:<id>' stages its output at "tmp_" + the file
+//! name: 'gdrive:/tmp_id:<id>' on DuckDB 1.5 (JoinPath), 'gdrive://tmp_id:<id>'
+//! on 2.0 (ReplaceFileName). Neither names a real file -- the id names one --
+//! so both are the target itself: written in place, moved onto itself (a
+//! no-op), and never removed by a failed COPY's cleanup.
+//! And on 1.5 the move back to the target computes 'gdrive:/id:<id>'.
+const char *const kStagingAliases[] = {"gdrive:/tmp_id:", "gdrive://tmp_id:", "gdrive:/id:"};
+
+bool IsCopyStagingAlias(const std::string &path) {
+	for (auto alias : kStagingAliases) {
+		if (path.rfind(alias, 0) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+} // namespace
+
+std::string ToGDrivePath(const std::string &path) {
+	for (auto alias : kStagingAliases) {
+		if (path.rfind(alias, 0) == 0) {
+			return std::string(GDRIVE_SCHEME) + "id:" + path.substr(std::strlen(alias));
+		}
+	}
+	std::string out, error;
+	if (!WebUrlToGDrivePath(path, out, error)) {
+		throw InvalidInputException("gdrive: %s", error);
+	}
+	return out;
+}
+
+namespace {
+//! FileExists / DirectoryExists answer for speculative probes and must not
+//! throw: an address on a Drive host that names nothing simply does not exist.
+bool TryToGDrivePath(const std::string &path, std::string &out) {
+	if (IsCopyStagingAlias(path)) {
+		out = ToGDrivePath(path);
+		return true;
+	}
+	std::string error;
+	return WebUrlToGDrivePath(path, out, error);
+}
+//! An earlier version (gdrive://...?version=<id>) can be read, nothing else:
+//! writing, moving or deleting "a version" would act on the CURRENT file.
+void RefuseVersion(const GDriveUri &uri, const char *operation) {
+	if (!uri.version.empty()) {
+		throw InvalidInputException("gdrive: cannot %s '%s': an earlier version of a file is read-only", operation,
+		                            uri.ToString());
+	}
+}
+
+//! A ranged read of whatever the handle reads: the file, or the revision it
+//! names.
+DriveResponse DownloadFor(GDriveClient &client, const GDriveFileHandleImpl &h, int64_t start, int64_t end) {
+	return h.version.empty() ? client.Download(h.meta.id, start, end)
+	                         : client.DownloadRevision(h.meta.id, h.version, start, end);
+}
+} // namespace
 
 std::string CanonicalPathOf(const GDriveUri &uri) {
 	if (uri.kind != GDriveUriKind::PATH) {
@@ -273,7 +371,11 @@ bool TryResolvePath(GDrivePathCache &cache, GDriveClient &client, const GDriveAu
 				                                 throw IOException(
 				                                     "gdrive: malformed metadata response for '%s'", context_path);
 			                                 }
-			                                 return true;
+			                                 // A path never resolves to a trashed file (listings say
+			                                 // trashed=false); an id must not either. It used to: an
+			                                 // id: kept for a file COPY since replaced read the old,
+			                                 // trashed content without a word.
+			                                 return !fresh.trashed;
 		                                 },
 		                                 out);
 	}
@@ -356,18 +458,54 @@ DriveFileMeta ResolvePath(GDrivePathCache &cache, GDriveClient &client, const GD
 GDriveFileSystem::GDriveFileSystem() {
 }
 
+namespace {
+//! DatabaseInstance -> its GDriveFileSystem. The VFS owns the filesystem and
+//! offers no typed lookup, so the table functions find it here. One entry per
+//! database the extension is loaded into; the filesystem removes its own on
+//! destruction, which happens with its database.
+std::mutex &RegistryLock() {
+	static std::mutex lock;
+	return lock;
+}
+std::unordered_map<const DatabaseInstance *, GDriveFileSystem *> &Registry() {
+	static std::unordered_map<const DatabaseInstance *, GDriveFileSystem *> registry;
+	return registry;
+}
+} // namespace
+
 GDriveFileSystem::~GDriveFileSystem() {
+	if (attached_db) {
+		std::lock_guard<std::mutex> guard(RegistryLock());
+		auto it = Registry().find(attached_db);
+		if (it != Registry().end() && it->second == this) {
+			Registry().erase(it);
+		}
+	}
+}
+
+void GDriveFileSystem::AttachToDatabase(DatabaseInstance &db) {
+	std::lock_guard<std::mutex> guard(RegistryLock());
+	attached_db = &db;
+	Registry()[&db] = this;
+}
+
+GDriveFileSystem &GDriveFileSystem::ForDatabase(DatabaseInstance &db) {
+	std::lock_guard<std::mutex> guard(RegistryLock());
+	auto it = Registry().find(&db);
+	if (it == Registry().end()) {
+		throw InternalException("gdrive: the gdrive filesystem is not registered with this database");
+	}
+	return *it->second;
 }
 
 bool GDriveFileSystem::CanHandleFile(const string &fpath) {
-	return IsGDriveUri(fpath);
+	return IsGDriveUri(fpath) || IsDriveWebUrl(fpath) || IsCopyStagingAlias(fpath);
 }
 
 DriveFileMeta GDriveFileSystem::ResolveOrThrow(optional_ptr<FileOpener> context, const GDriveUri &uri) {
 	if (!HasAnyGDriveSecret(context)) {
 		throw IOException(
-		    "gdrive: no gdrive secret configured for '%s' -- run CREATE SECRET (TYPE gdrive, ...) first.",
-		    uri.ToString());
+		    "gdrive: no gdrive secret configured for '%s' -- %s", uri.ToString(), kNoSecretAdvice);
 	}
 	auto auth = GetAuthContext(context, uri.ToString());
 	auto client = CreateGDriveClient(auth);
@@ -382,9 +520,34 @@ std::string GDriveFileSystem::DisambiguatePath(const std::string &parent_path, c
 	return JoinGDrivePath(parent_path, meta.name);
 }
 
-unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFlags flags,
+unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path_in, FileOpenFlags flags,
                                                   optional_ptr<FileOpener> opener) {
 	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, {
+	if (flags.OpenForWriting() && IsDriveWebUrl(path_in)) {
+		auto address = ParseDriveWebUrl(path_in);
+		if (address.ok && address.is_editor) {
+			// An editor address names a native Doc/Sheet/Slides file: there
+			// are no bytes to replace, and uploading CSV over a Sheet is not a
+			// write anyone means. Reading it works (export).
+			throw InvalidInputException("gdrive: cannot write to '%s': it is a Google Docs editor address (a native "
+			                            "Doc, Sheet or Slides file), which has no bytes to replace. Write a file "
+			                            "instead, e.g. to a gdrive:// path.",
+			                            path_in);
+		}
+		if (!address.ok || !address.writable) {
+			// COPY stages its output at "tmp_" + the address's last segment.
+			// Only in /file/d/<id>/<more> is that segment not the id itself.
+			throw InvalidInputException("gdrive: cannot write to '%s': write through a file's own address, "
+			                            "https://drive.google.com/file/d/<id>/view, or through gdrive://id:<id>",
+			                            path_in);
+		}
+	}
+	const string path = ToGDrivePath(path_in);
+	// 'gdrive://out/' names a folder, not a file: writing it used to create a
+	// FILE named "out" (the trailing slash is ignored when parsing).
+	if (flags.OpenForWriting() && !path.empty() && path.back() == '/') {
+		throw IOException("gdrive: cannot write to '%s': it names a folder, not a file", path_in);
+	}
 	auto context = RequireOpener(opener, path);
 	auto parsed = ParseGDriveUri(path);
 	if (!parsed.ok) {
@@ -392,12 +555,13 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 	}
 	if (!HasAnyGDriveSecret(context)) {
 		throw IOException(
-		    "gdrive: no gdrive secret configured for '%s' -- run CREATE SECRET (TYPE gdrive, ...) first.", path);
+		    "gdrive: no gdrive secret configured for '%s' -- %s", path, kNoSecretAdvice);
 	}
 	auto auth = GetAuthContext(context, path);
 	auto client = CreateGDriveClient(auth);
 
 	if (flags.OpenForWriting()) {
+		RefuseVersion(parsed.uri, "write");
 		// Sequential, buffered write only -- nothing reaches Drive until
 		// Close() (HLD section 7, R-3).
 		std::string parent_id;
@@ -405,6 +569,20 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 		std::string existing_id;
 
 		if (parsed.uri.kind == GDriveUriKind::FILE_ID) {
+			// One files.get: an id names an EXISTING file, and the write must
+			// not land on a folder or a native Doc/Sheet.
+			auto resp = client->GetMetadata(parsed.uri.file_id);
+			if (!resp.ok) {
+				ThrowGDriveError(resp.error, path);
+			}
+			DriveFileMeta existing;
+			if (!ParseFileMeta(resp.body, existing)) {
+				throw IOException("gdrive: malformed metadata response for '%s'", path);
+			}
+			if (existing.trashed) {
+				throw IOException("gdrive: cannot write to '%s': the file is in the trash", path);
+			}
+			RefuseReplacing(existing, path);
 			existing_id = parsed.uri.file_id;
 		} else {
 			name = parsed.uri.FileName();
@@ -537,6 +715,7 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 				if (existing_matches.size() > 1) {
 					ThrowAmbiguous(existing_matches, path);
 				} else if (existing_matches.size() == 1) {
+					RefuseReplacing(existing_matches[0], path);
 					existing_id = existing_matches[0].id;
 				}
 			}
@@ -640,7 +819,8 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 			if (!ParseFileMeta(resp.body, fresh)) {
 				fresh = meta;
 			}
-			return true;
+			// Trashed since the path was cached: as dead as a deleted id.
+			return !fresh.trashed;
 		}, refreshed);
 
 		if (found) {
@@ -676,7 +856,43 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFl
 		}
 	}
 
+	// An earlier version: the size, time and revision are the version's, and
+	// reads come from revisions.get. Asked of Drive at every open (one call):
+	// a revision id is immutable, but whether Drive still keeps it is not.
+	if (!parsed.uri.version.empty()) {
+		if (meta.IsNativeGoogleFormat()) {
+			throw InvalidInputException(
+			    "gdrive: cannot read '%s': Drive keeps no downloadable content for earlier versions of Google "
+			    "Docs, Sheets or Slides (only for uploaded files)",
+			    parsed.uri.ToString());
+		}
+		auto resp = client->ApiGet("/drive/v3/files/" + QueryEncode(meta.id) + "/revisions/" +
+		                               QueryEncode(parsed.uri.version) + "?fields=" + QueryEncode(RevisionFields()) +
+		                               "&" + AllDrivesQuery(),
+		                           &DriveCallStats::revisions_list);
+		if (!resp.ok) {
+			if (resp.error.kind == GDriveErrorKind::NOT_FOUND) {
+				if (flags.ReturnNullIfNotExists()) {
+					return nullptr;
+				}
+				throw IOException("gdrive: no version '%s' of '%s' (gdrive_versions() lists the versions Drive "
+				                  "keeps)",
+				                  parsed.uri.version, path);
+			}
+			ThrowGDriveError(resp.error, path);
+		}
+		RevisionRow revision;
+		std::string error;
+		if (!ParseRevision(resp.body, revision, error)) {
+			throw IOException("gdrive: malformed revision response for '%s': %s", path, error);
+		}
+		meta.size = revision.size;
+		meta.modified_time = revision.modified;
+		meta.head_revision_id = revision.id;
+	}
+
 	auto handle = make_uniq<GDriveFileHandleImpl>(*this, path, flags, meta, auth);
+	handle->version = parsed.uri.version;
 	handle->block_size = static_cast<idx_t>(GetUBigIntSetting(opener, "gdrive_block_size_bytes", 16ULL * 1024 * 1024));
 	blocks.SetCapacity(static_cast<idx_t>(GetUBigIntSetting(opener, "gdrive_block_cache_bytes", 256ULL * 1024 * 1024)));
 	handle->block_key = BuildBlockKey(auth, meta);
@@ -728,6 +944,11 @@ std::string BuildBlockKey(const GDriveAuthContext &auth, const DriveFileMeta &me
 //! Returns true if the handle now points at a live, different file id.
 bool GDriveFileSystem::TryRecoverStaleHandle(GDriveFileHandle &base) {
 	auto &h = base.Cast<GDriveFileHandleImpl>();
+	if (!h.version.empty()) {
+		// A version is not "the file at this path": another file there now
+		// has other versions, not this one.
+		return false;
+	}
 	auto parsed = ParseGDriveUri(h.path);
 	if (!parsed.ok || parsed.uri.kind == GDriveUriKind::FILE_ID) {
 		// An explicit gdrive://id: that 404s is genuinely gone. Re-resolving
@@ -830,12 +1051,12 @@ void GDriveFileSystem::Read(FileHandle &handle, void *buffer, int64_t nr_bytes, 
 	// Inclusive end, as HTTP Range and Drive both define it.
 	int64_t end = static_cast<int64_t>(location) + nr_bytes - 1;
 
-	auto resp = client->Download(h.meta.id, static_cast<int64_t>(location), end);
+	auto resp = DownloadFor(*client, h, static_cast<int64_t>(location), end);
 	if (!resp.ok && resp.error.kind == GDriveErrorKind::NOT_FOUND && TryRecoverStaleHandle(h)) {
 		// The path still exists, under a new id. Retry ONCE against it: a
 		// loop here would spin against a file being rewritten repeatedly.
 		client = CreateGDriveClient(h.auth_context);
-		resp = client->Download(h.meta.id, static_cast<int64_t>(location), end);
+		resp = DownloadFor(*client, h, static_cast<int64_t>(location), end);
 	}
 	if (!resp.ok) {
 		ThrowGDriveError(resp.error, h.path);
@@ -868,8 +1089,8 @@ void GDriveFileSystem::ReadViaBlockCache(GDriveFileHandle &base, void *buffer, i
 			auto block = blocks.GetBlock(
 			    h.block_key, block_index, h.block_size, static_cast<idx_t>(h.meta.size),
 			    [&](idx_t start, idx_t len, std::string &out) {
-				    auto r = client_for_block->Download(h.meta.id, static_cast<int64_t>(start),
-				                                        static_cast<int64_t>(start + len - 1));
+				    auto r = DownloadFor(*client_for_block, h, static_cast<int64_t>(start),
+				                         static_cast<int64_t>(start + len - 1));
 				    if (!r.ok) {
 					    if (r.error.kind == GDriveErrorKind::NOT_FOUND) {
 						    not_found = true;
@@ -1037,7 +1258,11 @@ std::string GDriveFileSystem::GetVersionTag(FileHandle &handle) {
 // failure). These functions simply were not using it. Same discipline, one
 // layer up.
 // ---------------------------------------------------------------------------
-bool GDriveFileSystem::FileExists(const string &filename, optional_ptr<FileOpener> opener) {
+bool GDriveFileSystem::FileExists(const string &filename_in, optional_ptr<FileOpener> opener) {
+	string filename;
+	if (!TryToGDrivePath(filename_in, filename)) {
+		return false;
+	}
 	auto context = RequireOpener(opener, filename);
 	if (!HasAnyGDriveSecret(context)) {
 		// No gdrive secret at all: nothing to check against, and erroring here
@@ -1057,7 +1282,11 @@ bool GDriveFileSystem::FileExists(const string &filename, optional_ptr<FileOpene
 	return !meta.IsFolder();
 }
 
-bool GDriveFileSystem::DirectoryExists(const string &directory, optional_ptr<FileOpener> opener) {
+bool GDriveFileSystem::DirectoryExists(const string &directory_in, optional_ptr<FileOpener> opener) {
+	string directory;
+	if (!TryToGDrivePath(directory_in, directory)) {
+		return false;
+	}
 	auto context = RequireOpener(opener, directory);
 	if (!HasAnyGDriveSecret(context)) {
 		return false;
@@ -1078,34 +1307,42 @@ bool GDriveFileSystem::DirectoryExists(const string &directory, optional_ptr<Fil
 	return meta.IsFolder();
 }
 
-void GDriveFileSystem::CreateDirectory(const string &directory, optional_ptr<FileOpener> opener) {
+void GDriveFileSystem::CreateDirectory(const string &directory_in, optional_ptr<FileOpener> opener) {
 	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, {
+	const string directory = ToGDrivePath(directory_in);
 	auto context = RequireOpener(opener, directory);
 	auto parsed = ParseGDriveUri(directory);
 	if (!parsed.ok) {
 		throw IOException("gdrive: %s", parsed.error);
 	}
+	RefuseVersion(parsed.uri, "create a directory at");
 	auto auth = GetAuthContext(context, directory);
 	auto client = CreateGDriveClient(auth);
 	MutateCreateDirectory(*client, cache, auth, parsed.uri);
 	});
 }
 
-void GDriveFileSystem::RemoveDirectory(const string &directory, optional_ptr<FileOpener> opener) {
+void GDriveFileSystem::RemoveDirectory(const string &directory_in, optional_ptr<FileOpener> opener) {
+	const string directory = ToGDrivePath(directory_in);
 	auto context = RequireOpener(opener, directory);
 	auto parsed = ParseGDriveUri(directory);
 	if (!parsed.ok) {
 		throw IOException("gdrive: %s", parsed.error);
 	}
+	RefuseVersion(parsed.uri, "remove");
 	auto auth = GetAuthContext(context, directory);
 	auto client = CreateGDriveClient(auth);
 	bool permanent = GetBoolSetting(opener, "gdrive_permanent_delete", false);
 	MutateRemoveDirectory(*client, cache, auth, parsed.uri, permanent);
 }
 
-bool GDriveFileSystem::ListFiles(const string &directory, const std::function<void(const string &, bool)> &callback,
+bool GDriveFileSystem::ListFiles(const string &directory_in, const std::function<void(const string &, bool)> &callback,
                                  FileOpener *opener) {
 	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, {
+	string directory;
+	if (!TryToGDrivePath(directory_in, directory)) {
+		return false;
+	}
 	optional_ptr<FileOpener> op(opener);
 	auto context = RequireOpener(op, directory);
 	if (!HasAnyGDriveSecret(context)) {
@@ -1151,8 +1388,17 @@ bool GDriveFileSystem::ListFiles(const string &directory, const std::function<vo
 	});
 }
 
-void GDriveFileSystem::MoveFile(const string &source, const string &target, optional_ptr<FileOpener> opener) {
+void GDriveFileSystem::MoveFile(const string &source_in, const string &target_in, optional_ptr<FileOpener> opener) {
 	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, {
+	const string source = ToGDrivePath(source_in);
+	const string target = ToGDrivePath(target_in);
+	// COPY ... TO '<browser address>' stages a "tmp_" sibling and moves it
+	// onto the target -- but an address names a file by id, so both are the
+	// same id and the write already went to the file itself. A move onto
+	// itself is a no-op; carried out it would delete the file it replaced.
+	if (source == target) {
+		return;
+	}
 	auto context = RequireOpener(opener, source);
 	auto src_parsed = ParseGDriveUri(source);
 	if (!src_parsed.ok) {
@@ -1162,6 +1408,8 @@ void GDriveFileSystem::MoveFile(const string &source, const string &target, opti
 	if (!dst_parsed.ok) {
 		throw IOException("gdrive: %s", dst_parsed.error);
 	}
+	RefuseVersion(src_parsed.uri, "move");
+	RefuseVersion(dst_parsed.uri, "move onto");
 	auto auth = GetAuthContext(context, source);
 	auto client = CreateGDriveClient(auth);
 	bool permanent = GetBoolSetting(opener, "gdrive_permanent_delete", false);
@@ -1169,13 +1417,15 @@ void GDriveFileSystem::MoveFile(const string &source, const string &target, opti
 	});
 }
 
-void GDriveFileSystem::RemoveFile(const string &filename, optional_ptr<FileOpener> opener) {
+void GDriveFileSystem::RemoveFile(const string &filename_in, optional_ptr<FileOpener> opener) {
 	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, {
+	const string filename = ToGDrivePath(filename_in);
 	auto context = RequireOpener(opener, filename);
 	auto parsed = ParseGDriveUri(filename);
 	if (!parsed.ok) {
 		throw IOException("gdrive: %s", parsed.error);
 	}
+	RefuseVersion(parsed.uri, "remove");
 	auto auth = GetAuthContext(context, filename);
 	auto client = CreateGDriveClient(auth);
 	bool permanent = GetBoolSetting(opener, "gdrive_permanent_delete", false);
@@ -1183,9 +1433,46 @@ void GDriveFileSystem::RemoveFile(const string &filename, optional_ptr<FileOpene
 	});
 }
 
+bool GDriveFileSystem::TryRemoveFile(const string &filename, optional_ptr<FileOpener> opener) {
+	if (IsDriveWebUrl(filename) || IsCopyStagingAlias(filename)) {
+		return false;
+	}
+	return FileSystem::TryRemoveFile(filename, opener);
+}
+
 vector<OpenFileInfo> GDriveFileSystem::Glob(const string &path, FileOpener *opener) {
 	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, {
-	optional_ptr<FileOpener> op(opener);
+		// A browser address is one file or folder by id: glob() hands back the
+		// address itself, so a reader opens what the user wrote.
+		if (IsDriveWebUrl(path)) {
+			auto results = GlobImpl(ToGDrivePath(path), opener, "", nullptr);
+			for (auto &r : results) {
+				r.path = path;
+			}
+			return results;
+		}
+		return GlobImpl(path, opener, "", nullptr);
+	});
+}
+
+vector<OpenFileInfo> GDriveFileSystem::GlobImpl(const string &path, optional_ptr<FileOpener> op,
+                                                const std::string &file_fields, std::vector<GDriveItem> *items,
+                                                bool include_folders) {
+	// Each match, recorded for ResolveItems as it is added to the result.
+	auto add_item = [items](const std::string &match_path, const DriveFileMeta &meta, const FileRow *row) {
+		if (!items) {
+			return;
+		}
+		GDriveItem item;
+		item.path = match_path;
+		item.meta = meta;
+		if (row) {
+			item.row = *row;
+			item.has_row = true;
+		}
+		items->push_back(std::move(item));
+	};
+	{
 	auto context = RequireOpener(op, path);
 	// Deliberately NOT swallowed into "no matches": a missing secret is a
 	// configuration error, not an empty result, and reporting it as zero
@@ -1193,7 +1480,7 @@ vector<OpenFileInfo> GDriveFileSystem::Glob(const string &path, FileOpener *open
 	// prevent, one layer up from where those requirements originally target.
 	if (!HasAnyGDriveSecret(context)) {
 		throw IOException(
-		    "gdrive: no gdrive secret configured for '%s' -- run CREATE SECRET (TYPE gdrive, ...) first.", path);
+		    "gdrive: no gdrive secret configured for '%s' -- %s", path, kNoSecretAdvice);
 	}
 	// Scope the metadata cache to THIS query before resolving anything, the
 	// same as OpenFile. Glob's literal-path probe below does a full resolve
@@ -1228,7 +1515,8 @@ vector<OpenFileInfo> GDriveFileSystem::Glob(const string &path, FileOpener *open
 	// of a listing). Glob semantics: not-found is an empty result, but ONLY
 	// not-found -- ambiguity (R-4), auth failures and other API errors must
 	// still surface, so this uses TryResolvePath rather than a broad catch.
-	if (parsed.uri.kind == GDriveUriKind::FILE_ID || !HasGlobMetacharacters(path)) {
+	// A version path is one file: its '?' is not a glob character.
+	if (parsed.uri.kind == GDriveUriKind::FILE_ID || !parsed.uri.version.empty() || !HasGlobMetacharacters(path)) {
 		vector<OpenFileInfo> result;
 		auto auth = GetAuthContext(context, path);
 		auto client = CreateGDriveClient(auth);
@@ -1240,6 +1528,7 @@ vector<OpenFileInfo> GDriveFileSystem::Glob(const string &path, FileOpener *open
 		// filesystem's glob yields files only.
 		if (TryResolvePath(cache, *client, auth, parsed.uri, meta) && !meta.IsFolder()) {
 			result.emplace_back(path);
+			add_item(path, meta, nullptr);
 		}
 		return result;
 	}
@@ -1271,6 +1560,7 @@ vector<OpenFileInfo> GDriveFileSystem::Glob(const string &path, FileOpener *open
 			DriveFileMeta meta;
 			if (literal.ok && TryResolvePath(cache, *client, auth, literal.uri, meta) && !meta.IsFolder()) {
 				result.emplace_back(std::string(GDRIVE_SCHEME) + one_pattern);
+				add_item(std::string(GDRIVE_SCHEME) + one_pattern, meta, nullptr);
 			}
 			continue;
 		}
@@ -1295,12 +1585,20 @@ vector<OpenFileInfo> GDriveFileSystem::Glob(const string &path, FileOpener *open
 		// -- Drive's API cannot glob. `listing` maps a path relative to
 		// split.literal_prefix to its metadata.
 		std::vector<std::pair<std::string, DriveFileMeta>> listing;
+		// Parallel to `listing` when the caller asked for rows (file_fields).
+		std::vector<FileRow> listing_rows;
+		const bool rich = !file_fields.empty();
 		std::function<void(const std::string &, const std::string &)> list_folder;
 		list_folder = [&](const std::string &folder_id, const std::string &rel_prefix) {
-			auto children = ListChildren(*client, folder_id, path);
-			for (auto &child : children) {
+			std::vector<FileRow> child_rows;
+			auto children = ListChildren(*client, folder_id, path, file_fields, rich ? &child_rows : nullptr);
+			for (size_t c = 0; c < children.size(); c++) {
+				auto &child = children[c];
 				std::string rel = rel_prefix.empty() ? child.name : (rel_prefix + "/" + child.name);
 				listing.emplace_back(rel, child);
+				if (rich) {
+					listing_rows.push_back(child_rows[c]);
+				}
 				if (split.recursive && child.IsFolder()) {
 					list_folder(child.id, rel);
 				}
@@ -1392,6 +1690,18 @@ vector<OpenFileInfo> GDriveFileSystem::Glob(const string &path, FileOpener *open
 			// them) and still cached (path resolution needs them) -- only
 			// the result set excludes them.
 			if (meta.IsFolder()) {
+				// Not a glob result -- but an audit of "who can reach what"
+				// must see a folder shared with anyone, not only its files.
+				if (include_folders) {
+					bool ambiguous = false;
+					for (auto &other : listing) {
+						ambiguous = ambiguous || (&other != &entry && other.first == rel_path);
+					}
+					auto slash = full_rel_path.find_last_of('/');
+					add_item(DisambiguatePath(slash == std::string::npos ? "" : full_rel_path.substr(0, slash), meta,
+					                          ambiguous),
+					         meta, rich ? &listing_rows[&entry - listing.data()] : nullptr);
+				}
 				continue;
 			}
 
@@ -1409,6 +1719,7 @@ vector<OpenFileInfo> GDriveFileSystem::Glob(const string &path, FileOpener *open
 			auto slash = full_rel_path.find_last_of('/');
 			std::string entry_parent = (slash == std::string::npos) ? "" : full_rel_path.substr(0, slash);
 			result.emplace_back(DisambiguatePath(entry_parent, meta, ambiguous));
+			add_item(result.back().path, meta, rich ? &listing_rows[&entry - listing.data()] : nullptr);
 		}
 	}
 	// Overlapping {a,b} expansions ("{a,a}.csv", "{x,*}.csv") must not return a
@@ -1433,10 +1744,142 @@ vector<OpenFileInfo> GDriveFileSystem::Glob(const string &path, FileOpener *open
 		DriveFileMeta meta;
 		if (TryResolvePath(cache, *client, auth, parsed.uri, meta) && !meta.IsFolder()) {
 			result.emplace_back(path);
+			add_item(path, meta, nullptr);
 		}
 	}
 	return result;
-	});
+	}
+}
+
+namespace {
+//! files.get with the FileRow fields: a literal match's row, or one Glob
+//! resolved without a listing (a brace-literal, the literal fallback).
+FileRow FetchFileRow(GDriveClient &client, const std::string &file_id, const std::string &path) {
+	auto resp = client.ApiGet("/drive/v3/files/" + QueryEncode(file_id) + "?fields=" + QueryEncode(FileRowFields()) +
+	                              "&" + AllDrivesQuery(),
+	                          &DriveCallStats::files_get);
+	if (!resp.ok) {
+		ThrowGDriveError(resp.error, path);
+	}
+	FileRow row;
+	std::string error;
+	if (!ParseFileRow(resp.body, row, error)) {
+		throw IOException("gdrive: malformed metadata response for '%s': %s", path, error);
+	}
+	return row;
+}
+} // namespace
+
+std::vector<GDriveItem> GDriveFileSystem::ResolveItems(const string &path_in, optional_ptr<FileOpener> opener,
+                                                       bool rich, bool folder_as_item) {
+	const string path = ToGDrivePath(path_in);
+	auto parsed = ParseGDriveUri(path);
+	if (!parsed.ok) {
+		throw InvalidInputException("gdrive: %s", parsed.error);
+	}
+	// The metadata functions describe a file; a version of one has none of
+	// its own to describe (read_gdrive_files used to report the CURRENT
+	// revision's size and md5 under a ?version= path).
+	if (!parsed.uri.version.empty()) {
+		throw InvalidInputException("gdrive: name the file, not one of its versions: '%s' (gdrive_versions() lists "
+		                            "them)",
+		                            path);
+	}
+	std::vector<GDriveItem> items;
+	const bool literal = parsed.uri.kind == GDriveUriKind::FILE_ID || !HasGlobMetacharacters(path);
+	if (!literal) {
+		GlobImpl(path, opener, rich ? FileRowFields() : "", &items, /*include_folders=*/folder_as_item);
+		// Overlapping {a,b} expansions: Glob dedupes its paths, and so must
+		// this -- keeping a match that came with its row over one without.
+		std::unordered_map<std::string, size_t> at;
+		std::vector<GDriveItem> unique;
+		for (auto &item : items) {
+			auto hit = at.find(item.path);
+			if (hit == at.end()) {
+				at.emplace(item.path, unique.size());
+				unique.push_back(std::move(item));
+			} else if (!unique[hit->second].has_row && item.has_row) {
+				unique[hit->second] = std::move(item);
+			}
+		}
+		// A brace-literal ("{a,b}.csv") or the literal fallback is resolved
+		// directly, with no listing to carry the row: fetch it, one files.get
+		// each. Without this those rows came back blank (found in review).
+		if (rich) {
+			std::unique_ptr<GDriveClient> client;
+			for (auto &item : unique) {
+				if (item.has_row) {
+					continue;
+				}
+				if (!client) {
+					client = CreateGDriveClient(GetAuthContext(RequireOpener(opener, path), path));
+				}
+				item.row = FetchFileRow(*client, item.meta.id, item.path);
+				item.has_row = true;
+			}
+		}
+		return unique;
+	}
+
+	// A literal path: resolved directly, folders included -- the table
+	// functions take a folder where Glob() never returns one.
+	auto context = RequireOpener(opener, path);
+	if (!HasAnyGDriveSecret(context)) {
+		throw IOException(
+		    "gdrive: no gdrive secret configured for '%s' -- %s", path, kNoSecretAdvice);
+	}
+	{
+		auto ctx = FileOpener::TryGetClientContext(opener);
+		cache.BeginQuery(ctx ? ctx->transaction.GetActiveQuery() : 0);
+	}
+	cache.SetMaxEntries(static_cast<idx_t>(GetUBigIntSetting(opener, "gdrive_path_cache_entries", 4096)));
+	auto auth = GetAuthContext(context, path);
+	auto client = CreateGDriveClient(auth);
+	DriveFileMeta meta;
+	if (!TryResolvePath(cache, *client, auth, parsed.uri, meta)) {
+		// A literal path that names nothing is an error, as in the sibling
+		// extension: returning no rows made a typo read as "nothing is shared"
+		// in a permissions audit. Only a glob may match nothing.
+		throw IOException("gdrive: no such file or folder: '%s'", path);
+	}
+
+	if (meta.IsFolder() && !folder_as_item) {
+		// The files directly in the folder: one listing, rows included.
+		std::vector<FileRow> rows;
+		auto children = ListChildren(*client, meta.id, path, rich ? FileRowFields() : "", rich ? &rows : nullptr);
+		std::unordered_map<std::string, int> name_counts;
+		for (auto &child : children) {
+			name_counts[child.name]++;
+		}
+		const auto parent_path = CanonicalPathOf(parsed.uri);
+		for (size_t i = 0; i < children.size(); i++) {
+			if (children[i].IsFolder()) {
+				continue;
+			}
+			GDriveItem item;
+			// Under an id: folder there is no path to join onto, so each child
+			// is addressed by its own id.
+			const bool by_id = parsed.uri.kind == GDriveUriKind::FILE_ID || name_counts[children[i].name] > 1;
+			item.path = DisambiguatePath(parent_path, children[i], by_id);
+			item.meta = children[i];
+			if (rich) {
+				item.row = rows[i];
+				item.has_row = true;
+			}
+			items.push_back(std::move(item));
+		}
+		return items;
+	}
+
+	GDriveItem item;
+	item.path = path;
+	item.meta = meta;
+	if (rich) {
+		item.row = FetchFileRow(*client, meta.id, path);
+		item.has_row = true;
+	}
+	items.push_back(std::move(item));
+	return items;
 }
 
 void GDriveFileSystem::AbortFileWrite(FileHandle &handle) {

@@ -37,6 +37,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: No credentials tracked (REQ-NF-03)
         run: ./scripts/check_no_credentials.sh
+      # No submodules, no build: the script reads three kinds of text file.
+      - name: Claude Code plugin version is the extension's
+        run: ./scripts/check_plugin_version.sh
 
   # write_blob/remove_file/move_file/file_size are registered by this extension
   # AND duckdb-sharepoint with IGNORE_ON_CONFLICT; whichever loads first wins,

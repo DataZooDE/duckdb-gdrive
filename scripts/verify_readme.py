@@ -139,7 +139,10 @@ def main() -> int:
     checked = 0
     for stmt in statements:
         head = stmt.lstrip().upper()
-        executable = head.startswith("CREATE SECRET") or head.startswith("SET ")
+        # SET VARIABLE is not a setting: it evaluates a query (usually over
+        # gdrive:// paths), so it is illustrative here, like any other read.
+        executable = head.startswith("CREATE SECRET") or (head.startswith("SET ") and
+                                                          not head.startswith("SET VARIABLE"))
         if not executable:
             continue
         # A secret with the same name may already exist from a previous block.
@@ -293,7 +296,7 @@ def main() -> int:
     skipped = []
     for stmt in statements:
         head = stmt.lstrip().upper()
-        if head.startswith("CREATE SECRET") or head.startswith("SET "):
+        if head.startswith("CREATE SECRET") or (head.startswith("SET ") and not head.startswith("SET VARIABLE")):
             continue
         if "..." in stmt or not head.startswith("SELECT"):
             skipped.append(stmt.splitlines()[0][:60])

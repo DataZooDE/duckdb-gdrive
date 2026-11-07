@@ -101,7 +101,7 @@ AdcParse ParseAdcJson(const std::string &json_text) {
 			return result;
 		}
 		result.error = "no \"type\" field, so this is not an Application Default Credentials "
-		               "document. Expected \"authorized_user\" or \"service_account\".";
+		               "document. Expected \"authorized_user\", \"service_account\" or \"external_account\".";
 		return result;
 	}
 
@@ -237,7 +237,7 @@ AdcParse ParseAdcJson(const std::string &json_text) {
 
 	// The type value itself is a short, fixed enum-like string, never secret.
 	result.error = "unexpected credential type \"" + type +
-	                "\". Expected \"authorized_user\" or \"service_account\".";
+	                "\". Expected \"authorized_user\", \"service_account\" or \"external_account\".";
 	return result;
 }
 

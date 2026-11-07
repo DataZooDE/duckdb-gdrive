@@ -356,3 +356,43 @@ TEST_CASE("PathMatchesAnyPrefix is off by default and never matches nothing", "[
 	REQUIRE_FALSE(PathMatchesAnyPrefix("", "gdrive://a"));
 	REQUIRE_FALSE(PathMatchesAnyPrefix("gdrive://other/x", "gdrive://a,gdrive://b"));
 }
+
+// ---------------------------------------------------------------------------
+// "?version=<revision id>" -- an earlier version of a file (gdrive_versions).
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ParseGDriveUri: a trailing ?version= names a revision, not a path", "[uri][version]") {
+	auto p = ParseGDriveUri("gdrive://Finance/actuals.csv?version=0B9fS7-FFsZTlL285U1lpZ0dGWUtYd3NnM0lST1ZFMlVUaEFNPQ");
+	REQUIRE(p.ok);
+	CHECK(p.uri.kind == GDriveUriKind::PATH);
+	CHECK(p.uri.segments == std::vector<std::string> {"Finance", "actuals.csv"});
+	CHECK(p.uri.version == "0B9fS7-FFsZTlL285U1lpZ0dGWUtYd3NnM0lST1ZFMlVUaEFNPQ");
+	CHECK(p.uri.FileName() == "actuals.csv");
+	// Round-trips, so error messages show what the user wrote.
+	CHECK(p.uri.ToString() == "gdrive://Finance/actuals.csv?version=0B9fS7-FFsZTlL285U1lpZ0dGWUtYd3NnM0lST1ZFMlVUaEFNPQ");
+
+	auto by_id = ParseGDriveUri("gdrive://id:1abc?version=42");
+	REQUIRE(by_id.ok);
+	CHECK(by_id.uri.kind == GDriveUriKind::FILE_ID);
+	CHECK(by_id.uri.file_id == "1abc");
+	CHECK(by_id.uri.version == "42");
+	CHECK(by_id.uri.ToString() == "gdrive://id:1abc?version=42");
+}
+
+TEST_CASE("ParseGDriveUri: '?' elsewhere is still a glob character", "[uri][version]") {
+	auto p = ParseGDriveUri("gdrive://a/part-?.csv");
+	REQUIRE(p.ok);
+	CHECK(p.uri.version.empty());
+	CHECK(p.uri.FileName() == "part-?.csv");
+	// "?version=" followed by more path is not the suffix.
+	auto q = ParseGDriveUri("gdrive://a?version=1/b.csv");
+	REQUIRE(q.ok);
+	CHECK(q.uri.version.empty());
+	CHECK(q.uri.segments == std::vector<std::string> {"a?version=1", "b.csv"});
+}
+
+TEST_CASE("ParseGDriveUri: an empty ?version= is an error", "[uri][version]") {
+	auto p = ParseGDriveUri("gdrive://a/b.csv?version=");
+	CHECK_FALSE(p.ok);
+	CHECK(p.error.find("names no version") != std::string::npos);
+}
