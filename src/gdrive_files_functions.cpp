@@ -104,17 +104,19 @@ unique_ptr<FunctionData> SearchBind(ClientContext &context, TableFunctionBindInp
 		const auto text = StringValue::Get(input.inputs[0]);
 		int64_t max_results = 500;
 		std::string mime_type;
-		for (auto &kv : input.named_parameters) {
-			if (kv.second.IsNull()) {
-				continue;
-			}
-			if (kv.first == "max_results") {
-				max_results = BigIntValue::Get(kv.second);
+		// Through the compat shim: DuckDB 2.0 keys named parameters by its own
+		// name type, not std::string.
+		if (auto v = duckdb_compat::FindNamedParameter(input.named_parameters, "max_results")) {
+			if (!v->IsNull()) {
+				max_results = v->GetValue<int64_t>();
 				if (max_results < 1) {
 					throw InvalidInputException("search_gdrive: max_results must be at least 1");
 				}
-			} else if (kv.first == "mime_type") {
-				mime_type = StringValue::Get(kv.second);
+			}
+		}
+		if (auto v = duckdb_compat::FindNamedParameter(input.named_parameters, "mime_type")) {
+			if (!v->IsNull()) {
+				mime_type = StringValue::Get(*v);
 			}
 		}
 		std::string query = "trashed=false";
@@ -183,9 +185,10 @@ unique_ptr<FunctionData> DrivesBind(ClientContext &context, TableFunctionBindInp
 	unique_ptr<FunctionData> result;
 	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, {
 		std::string search;
-		auto it = input.named_parameters.find("search");
-		if (it != input.named_parameters.end() && !it->second.IsNull()) {
-			search = StringValue::Get(it->second);
+		if (auto v = duckdb_compat::FindNamedParameter(input.named_parameters, "search")) {
+			if (!v->IsNull()) {
+				search = StringValue::Get(*v);
+			}
 		}
 		auto opener = ClientData::Get(context).file_opener.get();
 		auto auth = GetAuthContext(opener, GDRIVE_SCHEME);
@@ -256,8 +259,8 @@ void RegisterFileFunctions(ExtensionLoader &loader) {
 	{
 		TableFunction fn("search_gdrive", {LogicalType::VARCHAR}, RowsScan, SearchBind, RowsCursorInit);
 		duckdb_compat::NameParameters(fn, {"text"});
-		fn.named_parameters["max_results"] = LogicalType::BIGINT;
-		fn.named_parameters["mime_type"] = LogicalType::VARCHAR;
+		duckdb_compat::AddNamedParameter(fn, "max_results", LogicalType::BIGINT);
+		duckdb_compat::AddNamedParameter(fn, "mime_type", LogicalType::VARCHAR);
 		Register(loader, fn,
 		         "Drive's full-text search over names and contents, as rows with read_gdrive_files' columns. path is "
 		         "a gdrive://id: path, so a hit reads straight back. Searches what the secret's identity can see (its "
@@ -268,7 +271,7 @@ void RegisterFileFunctions(ExtensionLoader &loader) {
 	}
 	{
 		TableFunction fn("gdrive_drives", {}, RowsScan, DrivesBind, RowsCursorInit);
-		fn.named_parameters["search"] = LogicalType::VARCHAR;
+		duckdb_compat::AddNamedParameter(fn, "search", LogicalType::VARCHAR);
 		Register(loader, fn,
 		         "The Shared Drives the secret's identity is a member of: name, id (what DRIVE_ID takes), created, "
 		         "hidden. search := '<text>' keeps those whose name contains it.",
