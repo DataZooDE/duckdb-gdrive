@@ -154,9 +154,14 @@ def test_changes_since_a_token(writer, scratch, sql, gdrive_secret_sql):
     assert by_id[leaving][:3] == ["delete", leaving, ""], by_id[leaving]
     assert by_id[elsewhere][:3] == ["delete", elsewhere, ""], by_id[elsewhere]
 
-    # From the new token, nothing we made is reported again.
-    again = _changes(sql, gdrive_secret_sql, base, _token(rows))
-    assert not (wanted & set(_by_id(again))), again
+    # From the new token, what comes back again must agree with what we already
+    # have. Drive's feed is AT LEAST once: one move can yield a second entry
+    # that lands after the token we were given (seen in CI, 2026-11-07: the
+    # moved-in file again, as the same upsert). Re-applying it is harmless for
+    # a mirror; a DIFFERENT answer for the same item would not be.
+    again = _by_id(_changes(sql, gdrive_secret_sql, base, _token(rows)))
+    for item in wanted & set(again):
+        assert again[item][:3] == by_id[item][:3], (again[item], by_id[item])
 
 
 def test_a_renamed_folder_brings_its_subtree(writer, scratch, sql, gdrive_secret_sql):
