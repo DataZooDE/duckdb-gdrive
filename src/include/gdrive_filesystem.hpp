@@ -248,7 +248,17 @@ public:
 	                                     bool folder_as_item);
 
 	//! Cheap prefix test; DuckDB calls this on every path for every filesystem.
+	//! gdrive:// paths, and browser addresses on Drive's hosts
+	//! (gdrive_weburl.hpp).
 	bool CanHandleFile(const string &fpath) override;
+	//! httpfs claims every https:// address, and the VFS gives a path to the
+	//! LAST filesystem that claims it unless one is "manually set". Drive
+	//! addresses must reach this extension even when httpfs loads later (it
+	//! autoloads on the first other https:// path), or they are fetched
+	//! without credentials. Same answer as duckdb-sharepoint's.
+	bool IsManuallySet() override {
+		return true;
+	}
 	//! gdrive:// paths are already canonical. The base implementation
 	//! collapses "//" for any scheme missing from DuckDB's hard-coded list of
 	//! remote prefixes, which turned `ATTACH 'gdrive://a/db.duckdb'` into

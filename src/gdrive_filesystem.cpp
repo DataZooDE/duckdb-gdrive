@@ -4,6 +4,7 @@
 // contract and docs/hld.md sections 3, 4, 6, 8 for the design this follows.
 #include "gdrive_internal.hpp"
 #include "gdrive_glob.hpp"
+#include "gdrive_weburl.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/timestamp.hpp"
@@ -257,7 +258,21 @@ void ReadExactRangeTail(const std::string &path, void *buffer, int64_t nr_bytes,
 
 std::string BuildBlockKey(const GDriveAuthContext &auth, const DriveFileMeta &meta);
 
+std::string ToGDrivePath(const std::string &path) {
+	std::string out, error;
+	if (!WebUrlToGDrivePath(path, out, error)) {
+		throw InvalidInputException("gdrive: %s", error);
+	}
+	return out;
+}
+
 namespace {
+//! FileExists / DirectoryExists answer for speculative probes and must not
+//! throw: an address on a Drive host that names nothing simply does not exist.
+bool TryToGDrivePath(const std::string &path, std::string &out) {
+	std::string error;
+	return WebUrlToGDrivePath(path, out, error);
+}
 //! An earlier version (gdrive://...?version=<id>) can be read, nothing else:
 //! writing, moving or deleting "a version" would act on the CURRENT file.
 void RefuseVersion(const GDriveUri &uri, const char *operation) {
@@ -456,7 +471,7 @@ GDriveFileSystem &GDriveFileSystem::ForDatabase(DatabaseInstance &db) {
 }
 
 bool GDriveFileSystem::CanHandleFile(const string &fpath) {
-	return IsGDriveUri(fpath);
+	return IsGDriveUri(fpath) || IsDriveWebUrl(fpath);
 }
 
 DriveFileMeta GDriveFileSystem::ResolveOrThrow(optional_ptr<FileOpener> context, const GDriveUri &uri) {
@@ -478,9 +493,19 @@ std::string GDriveFileSystem::DisambiguatePath(const std::string &parent_path, c
 	return JoinGDrivePath(parent_path, meta.name);
 }
 
-unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path, FileOpenFlags flags,
+unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path_in, FileOpenFlags flags,
                                                   optional_ptr<FileOpener> opener) {
 	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, {
+	if (flags.OpenForWriting() && IsDriveWebUrl(path_in) && ParseDriveWebUrl(path_in).is_editor) {
+		// An editor address names a native Doc/Sheet/Slides file: there are
+		// no bytes to replace, and uploading CSV over a Sheet is not a write
+		// anyone means. Reading it works (export).
+		throw InvalidInputException("gdrive: cannot write to '%s': it is a Google Docs editor address (a native "
+		                            "Doc, Sheet or Slides file), which has no bytes to replace. Write a file "
+		                            "instead, e.g. to a gdrive:// path.",
+		                            path_in);
+	}
+	const string path = ToGDrivePath(path_in);
 	auto context = RequireOpener(opener, path);
 	auto parsed = ParseGDriveUri(path);
 	if (!parsed.ok) {
@@ -1191,7 +1216,11 @@ std::string GDriveFileSystem::GetVersionTag(FileHandle &handle) {
 // failure). These functions simply were not using it. Same discipline, one
 // layer up.
 // ---------------------------------------------------------------------------
-bool GDriveFileSystem::FileExists(const string &filename, optional_ptr<FileOpener> opener) {
+bool GDriveFileSystem::FileExists(const string &filename_in, optional_ptr<FileOpener> opener) {
+	string filename;
+	if (!TryToGDrivePath(filename_in, filename)) {
+		return false;
+	}
 	auto context = RequireOpener(opener, filename);
 	if (!HasAnyGDriveSecret(context)) {
 		// No gdrive secret at all: nothing to check against, and erroring here
@@ -1211,7 +1240,11 @@ bool GDriveFileSystem::FileExists(const string &filename, optional_ptr<FileOpene
 	return !meta.IsFolder();
 }
 
-bool GDriveFileSystem::DirectoryExists(const string &directory, optional_ptr<FileOpener> opener) {
+bool GDriveFileSystem::DirectoryExists(const string &directory_in, optional_ptr<FileOpener> opener) {
+	string directory;
+	if (!TryToGDrivePath(directory_in, directory)) {
+		return false;
+	}
 	auto context = RequireOpener(opener, directory);
 	if (!HasAnyGDriveSecret(context)) {
 		return false;
@@ -1232,8 +1265,9 @@ bool GDriveFileSystem::DirectoryExists(const string &directory, optional_ptr<Fil
 	return meta.IsFolder();
 }
 
-void GDriveFileSystem::CreateDirectory(const string &directory, optional_ptr<FileOpener> opener) {
+void GDriveFileSystem::CreateDirectory(const string &directory_in, optional_ptr<FileOpener> opener) {
 	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, {
+	const string directory = ToGDrivePath(directory_in);
 	auto context = RequireOpener(opener, directory);
 	auto parsed = ParseGDriveUri(directory);
 	if (!parsed.ok) {
@@ -1246,7 +1280,8 @@ void GDriveFileSystem::CreateDirectory(const string &directory, optional_ptr<Fil
 	});
 }
 
-void GDriveFileSystem::RemoveDirectory(const string &directory, optional_ptr<FileOpener> opener) {
+void GDriveFileSystem::RemoveDirectory(const string &directory_in, optional_ptr<FileOpener> opener) {
+	const string directory = ToGDrivePath(directory_in);
 	auto context = RequireOpener(opener, directory);
 	auto parsed = ParseGDriveUri(directory);
 	if (!parsed.ok) {
@@ -1259,9 +1294,13 @@ void GDriveFileSystem::RemoveDirectory(const string &directory, optional_ptr<Fil
 	MutateRemoveDirectory(*client, cache, auth, parsed.uri, permanent);
 }
 
-bool GDriveFileSystem::ListFiles(const string &directory, const std::function<void(const string &, bool)> &callback,
+bool GDriveFileSystem::ListFiles(const string &directory_in, const std::function<void(const string &, bool)> &callback,
                                  FileOpener *opener) {
 	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, {
+	string directory;
+	if (!TryToGDrivePath(directory_in, directory)) {
+		return false;
+	}
 	optional_ptr<FileOpener> op(opener);
 	auto context = RequireOpener(op, directory);
 	if (!HasAnyGDriveSecret(context)) {
@@ -1307,8 +1346,17 @@ bool GDriveFileSystem::ListFiles(const string &directory, const std::function<vo
 	});
 }
 
-void GDriveFileSystem::MoveFile(const string &source, const string &target, optional_ptr<FileOpener> opener) {
+void GDriveFileSystem::MoveFile(const string &source_in, const string &target_in, optional_ptr<FileOpener> opener) {
 	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, {
+	const string source = ToGDrivePath(source_in);
+	const string target = ToGDrivePath(target_in);
+	// COPY ... TO '<browser address>' stages a "tmp_" sibling and moves it
+	// onto the target -- but an address names a file by id, so both are the
+	// same id and the write already went to the file itself. A move onto
+	// itself is a no-op; carried out it would delete the file it replaced.
+	if (source == target) {
+		return;
+	}
 	auto context = RequireOpener(opener, source);
 	auto src_parsed = ParseGDriveUri(source);
 	if (!src_parsed.ok) {
@@ -1327,8 +1375,9 @@ void GDriveFileSystem::MoveFile(const string &source, const string &target, opti
 	});
 }
 
-void GDriveFileSystem::RemoveFile(const string &filename, optional_ptr<FileOpener> opener) {
+void GDriveFileSystem::RemoveFile(const string &filename_in, optional_ptr<FileOpener> opener) {
 	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, {
+	const string filename = ToGDrivePath(filename_in);
 	auto context = RequireOpener(opener, filename);
 	auto parsed = ParseGDriveUri(filename);
 	if (!parsed.ok) {
@@ -1343,7 +1392,18 @@ void GDriveFileSystem::RemoveFile(const string &filename, optional_ptr<FileOpene
 }
 
 vector<OpenFileInfo> GDriveFileSystem::Glob(const string &path, FileOpener *opener) {
-	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, { return GlobImpl(path, opener, "", nullptr); });
+	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, {
+		// A browser address is one file or folder by id: glob() hands back the
+		// address itself, so a reader opens what the user wrote.
+		if (IsDriveWebUrl(path)) {
+			auto results = GlobImpl(ToGDrivePath(path), opener, "", nullptr);
+			for (auto &r : results) {
+				r.path = path;
+			}
+			return results;
+		}
+		return GlobImpl(path, opener, "", nullptr);
+	});
 }
 
 vector<OpenFileInfo> GDriveFileSystem::GlobImpl(const string &path, optional_ptr<FileOpener> op,
@@ -1661,8 +1721,9 @@ FileRow FetchFileRow(GDriveClient &client, const std::string &file_id, const std
 }
 } // namespace
 
-std::vector<GDriveItem> GDriveFileSystem::ResolveItems(const string &path, optional_ptr<FileOpener> opener, bool rich,
-                                                       bool folder_as_item) {
+std::vector<GDriveItem> GDriveFileSystem::ResolveItems(const string &path_in, optional_ptr<FileOpener> opener,
+                                                       bool rich, bool folder_as_item) {
+	const string path = ToGDrivePath(path_in);
 	auto parsed = ParseGDriveUri(path);
 	if (!parsed.ok) {
 		throw InvalidInputException("gdrive: %s", parsed.error);

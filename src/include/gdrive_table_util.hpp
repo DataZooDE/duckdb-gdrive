@@ -66,14 +66,20 @@ inline Value SizeOrNull(int64_t size) {
 	return size < 0 ? Value(LogicalType::BIGINT) : Value::BIGINT(size);
 }
 
-//! A table function's path argument: NULL is refused, and a path without the
+//! A table function's path argument: NULL is refused, a path without the
 //! scheme is taken relative to the secret's root, as the sibling extension's
-//! functions do.
+//! functions do, and a browser address is taken as the file or folder it names
+//! (gdrive://id:<id>).
+std::string ToGDrivePath(const std::string &path);
+
 inline std::string PathArgument(const Value &value, const char *function) {
 	if (value.IsNull()) {
 		throw InvalidInputException("%s: the path must not be NULL", function);
 	}
 	auto arg = StringValue::Get(value);
+	if (arg.rfind("https://", 0) == 0 || arg.rfind("http://", 0) == 0) {
+		return ToGDrivePath(arg);
+	}
 	if (arg.rfind("gdrive://", 0) == 0) {
 		return arg;
 	}

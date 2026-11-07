@@ -65,6 +65,11 @@ std::string JoinGDrivePath(const std::string &parent_path, const std::string &na
 //! anyone means. `target` names it in the message.
 void RefuseReplacing(const DriveFileMeta &existing, const std::string &target);
 
+//! A browser address (gdrive_weburl.hpp) as its gdrive://id: path; any other
+//! path unchanged. Throws InvalidInputException for an address on a Drive host
+//! that names no file or folder, listing the forms that work.
+std::string ToGDrivePath(const std::string &path);
+
 //! Read an extension setting (gdrive_permanent_delete, gdrive_docs_export_mime)
 //! through the FileOpener, falling back to `default_value` when unset or when
 //! there is no opener at all (e.g. a handle-less internal call).
