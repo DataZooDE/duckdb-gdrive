@@ -169,6 +169,10 @@ check_cstdint:
 check_stamp: release
 	@./scripts/check_extension_stamp.sh
 
+.PHONY: check_plugin_version
+check_plugin_version:
+	@./scripts/check_plugin_version.sh
+
 .PHONY: smoke_loadable
 smoke_loadable: release
 	@./scripts/smoke_loadable.sh

@@ -1,0 +1,15 @@
+{
+  "name": "duckdb-gdrive",
+  "owner": {
+    "name": "DataZoo GmbH",
+    "url": "https://github.com/DataZooDE"
+  },
+  "plugins": [
+    {
+      "name": "duckdb-gdrive",
+      "source": "./plugins/duckdb-gdrive",
+      "description": "Skills for the gdrive DuckDB extension: Google Drive in SQL -- secrets and sign-in (gcloud ADC, service accounts, workload identity, OAuth), the gdrive:// filesystem (paths, id:, globs, browser addresses, COPY, DuckLake, native Sheets and Docs), and Drive's metadata as tables (files with owners and links, search, versions, change feeds, permissions).",
+      "keywords": ["duckdb", "google-drive", "gdrive", "google-sheets", "shared-drive", "sql", "claude-code"]
+    }
+  ]
+}

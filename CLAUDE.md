@@ -212,6 +212,12 @@ src/
   gdrive_errors.cpp           PURE: Drive error -> DuckDB exception classification
   gdrive_glob.cpp             PURE: local glob (Drive's API cannot glob)
   gdrive_service_account_pure.cpp  PURE: RFC 7523 assertion construction
+  gdrive_rows.cpp             PURE: Drive API JSON -> rows for the table functions
+  gdrive_change_scope.cpp     PURE: is a changed file under the folder, at what path
+  gdrive_weburl.cpp           PURE: drive.google.com / docs.google.com address -> id
+  gdrive_files_functions.cpp  read_gdrive_files, search_gdrive, gdrive_drives
+  gdrive_permissions_functions.cpp, gdrive_versions.cpp, gdrive_changes.cpp
+                              the other metadata table functions
   include/                    one header per module; the pure/DuckDB split
                               shares a header
 test/cpp/                     Catch2, pure logic only
@@ -220,9 +226,45 @@ test/sql/                     SQLLogicTest; *.test.template gets fixture ids
                               substituted at run time into test/sql/live/
 e2e/                          uv + pytest harness: fixture provisioning,
                               API-call-count assertions, write round trips
+examples/                     one SQL file each, run against live Drive
+plugins/duckdb-gdrive/        Claude Code plugin: skills documenting the SQL API
+                              (.claude-plugin/marketplace.json at the root)
 duckdb/                       submodule, v1.5.6 (latest stable)
 extension-ci-tools/           submodule, v1.5-variegata (rolling 1.5 branch)
 ```
+
+## SQL surface conventions (shared with duckdb-sharepoint)
+
+The two extensions are the same product over two APIs, and a user who knows
+one should be able to guess the other. New SQL follows these rules, which
+duckdb-sharepoint established first:
+
+- **Paths stay paths.** Anything that names a file is a path a *reader* can
+  take, not a named parameter: `?version=<id>` for an earlier version, a
+  browser address for a file. Then `read_parquet`, `read_csv`, `read_blob`
+  and every future reader inherit it for free. Only a trailing `?version=` is
+  special; `?` elsewhere stays a glob character.
+- **`read_<ext>_<thing>(path or glob)`** returns rows of a thing
+  (`read_gdrive_files`). **`<ext>_<noun>(path, opt := …)`** returns metadata
+  about a thing (`gdrive_versions`, `gdrive_changes`, `gdrive_permissions`,
+  `gdrive_drives`). **`search_<ext>(text)`** searches. Options are named
+  parameters, never positional beyond the first.
+- **Same column names for the same idea**: `path`, `name`, `size`,
+  `created`, `modified`, `modified_by`, `modified_by_email`, `web_url`, `id`;
+  `_change` / `token` with one final `checkpoint` row for change feeds;
+  `granted_by` = `direct` | `inherited` | `link` and `link_scope` =
+  `anonymous` | `organization` for permissions. Where the API genuinely
+  differs the column says so in its own words (Drive has one `role` per
+  permission, Graph a `roles` list) rather than faking the other's shape.
+- **Timestamps are UTC `TIMESTAMP`**, NULL when the API omits them; empty
+  API text is NULL, not `''`.
+- **A path a function returns reads back**: a search hit is a
+  `gdrive://id:` path, a version row's `path` carries its `?version=`.
+- **Table functions take no subqueries** (DuckDB's rule): documentation shows
+  `SET VARIABLE x = (...)` + `getvariable('x')`.
+- **Bind-time, materialised rows** (`gdrive_table_util.hpp`): metadata is
+  small and the column set never depends on scan time. Each function counts
+  its own calls in `gdrive_stats()`, and its live test asserts the cost.
 
 ## Pure vs DuckDB source split
 
@@ -248,12 +290,19 @@ So when verifying one track's work while another is mid-slice, compile that
 track standalone instead of waiting:
 
 ```bash
-CATCH_INC=$(ls -d build/release/vcpkg_installed/*/include | head -1)
-CATCH_LIB=$(ls -d build/release/vcpkg_installed/*/lib | head -1)
-g++ -std=c++17 -Isrc/include -I"$CATCH_INC" \
+L=$(ls -d build/release/vcpkg_installed/*/ | head -1)
+g++ -std=c++17 -DPICOJSON_USE_INT64 -Isrc/include -I"$L/include" \
     test/cpp/test_uri.cpp src/gdrive_uri.cpp \
-    -L"$CATCH_LIB" -lCatch2Main -lCatch2 -o /tmp/t && /tmp/t
+    "$L/lib/manual-link/libCatch2Main.a" "$L/lib/libCatch2.a" -o /tmp/t && /tmp/t
 ```
+
+vcpkg puts `Catch2Main` under `lib/manual-link/`, so `-lCatch2Main` on `lib/`
+does not find it. `-DPICOJSON_USE_INT64` for any source that parses JSON (see
+the pitfall below).
+
+The same trap bites **stacked branches**: an untracked `test_*.cpp` that
+belongs to a LATER branch is GLOBbed into this one's Catch2 binary and breaks
+its link. Park it outside the tree (or `git stash -u` it) while building.
 
 ## Common pitfalls
 
