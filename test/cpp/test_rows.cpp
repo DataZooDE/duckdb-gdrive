@@ -6,6 +6,7 @@
 // nothing here pretending to be Drive, only what Drive said.
 #include <catch2/catch_test_macros.hpp>
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
