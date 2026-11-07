@@ -95,6 +95,25 @@ jobs:
           submodules: recursive
       - run: ./scripts/check_duckdb_pin.sh
 
+  # Compiles the duckdb-compat headers (syntax only, no build) against the
+  # bundled DuckDB with stray headers from another DuckDB version on a later
+  # include path, as a system DuckDB package puts them
+  # (scripts/check_compat_stray_headers.sh, ported from anofox-forecast#312).
+  # CI runners have no system DuckDB, so without it a __has_include probe that
+  # finds the wrong tree only breaks on developer machines.
+  compat-stray-headers:
+    name: duckdb-compat headers with stray DuckDB headers
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+          submodules: false
+      - name: Fetch the bundled DuckDB and duckdb-compat headers
+        run: git submodule update --init --depth 1 duckdb duckdb-compat
+      - name: Compile the compat headers with stray headers on the include path
+        run: scripts/check_compat_stray_headers.sh
   # ---------------------------------------------------------------------------
   # musl. linux_amd64_musl is a DuckDB distribution target (opt-in on the
   # 1.5/2.0 matrices), and its headers do NOT pull in <cstdint> transitively the way glibc's do. A missing include is
