@@ -98,9 +98,9 @@ unique_ptr<FunctionData> ChangesBind(ClientContext &context, TableFunctionBindIn
 		const auto path = PathArgument(input.inputs[0], "gdrive_changes");
 		bool have_token = false;
 		std::string token;
-		auto it = input.named_parameters.find("token");
-		if (it != input.named_parameters.end() && !it->second.IsNull()) {
-			token = StringValue::Get(it->second);
+		auto v = duckdb_compat::FindNamedParameter(input.named_parameters, "token");
+		if (v && !v->IsNull()) {
+			token = StringValue::Get(*v);
 			have_token = true;
 			if (token.empty()) {
 				throw InvalidInputException("gdrive_changes: token must not be empty (leave it out to list "
@@ -246,7 +246,7 @@ unique_ptr<FunctionData> ChangesBind(ClientContext &context, TableFunctionBindIn
 void RegisterChangeFunctions(ExtensionLoader &loader) {
 	TableFunction fn("gdrive_changes", {LogicalType::VARCHAR}, RowsScan, ChangesBind, RowsCursorInit);
 	duckdb_compat::NameParameters(fn, {"path"});
-	fn.named_parameters["token"] = LogicalType::VARCHAR;
+	duckdb_compat::AddNamedParameter(fn, "token", LogicalType::VARCHAR);
 	CreateTableFunctionInfo info(fn);
 	FunctionDescription desc;
 	desc.description =
