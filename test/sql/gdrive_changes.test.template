@@ -1,0 +1,74 @@
+# name: test/sql/gdrive_changes.test.template
+# description: gdrive_changes -- the parts that do not wait for the feed, against REAL Google Drive
+# group: [live]
+#
+# Read-only, over /fixtures. Changes SINCE a token lag behind the write that
+# made them, so those are tested where a test can wait:
+# e2e/tests/test_changes.py (including the README's mirror pattern).
+
+require gdrive
+
+require-env GDRIVE_CI_DRIVE_ID
+
+require-env GDRIVE_CI_SA_KEY_FILE
+
+statement ok
+CREATE SECRET gdrive_test (
+    TYPE gdrive,
+    PROVIDER service_account,
+    KEY_FILE '${SA_KEY_FILE}',
+    ROOT_FOLDER_ID '${DRIVE_ID}',
+    DRIVE_SCOPE 'https://www.googleapis.com/auth/drive'
+);
+
+# Without a token: everything under the folder as upserts, then ONE checkpoint
+# row, last, carrying the token for next time. The token is asked for first.
+statement ok
+CALL gdrive_reset_stats();
+
+query IIII
+SELECT count(*) FILTER (WHERE _change = 'upsert'), count(*) FILTER (WHERE _change = 'checkpoint'),
+       count(*) FILTER (WHERE _change = 'checkpoint' AND token IS NOT NULL AND id IS NULL),
+       count(*) FILTER (WHERE _change = 'upsert' AND path LIKE 'gdrive://fixtures/parts/part-%.parquet'
+                        AND NOT is_folder AND size > 0 AND token IS NULL)
+FROM gdrive_changes('gdrive://fixtures/parts')
+----
+10	1	1	10
+
+query II
+SELECT (SELECT value FROM gdrive_stats() WHERE metric = 'changes_list'),
+       (SELECT value FROM gdrive_stats() WHERE metric = 'files_get')
+----
+1	0
+
+# Recursive: folders are rows too, and their contents follow.
+query I
+SELECT count(*) FILTER (WHERE is_folder AND path = 'gdrive://fixtures/dup') FROM gdrive_changes('gdrive://fixtures')
+----
+1
+
+# 'latest': only a token, no listing.
+query III
+SELECT count(*), any_value(_change), any_value(token) IS NOT NULL FROM gdrive_changes('gdrive://fixtures/parts', token := 'latest')
+----
+1	checkpoint	true
+
+statement error
+SELECT * FROM gdrive_changes('gdrive://fixtures/parts', token := 'not-a-token')
+----
+Drive does not accept the token 'not-a-token'
+
+statement error
+SELECT * FROM gdrive_changes('gdrive://fixtures/parts', token := '')
+----
+token must not be empty
+
+statement error
+SELECT * FROM gdrive_changes('gdrive://fixtures/small.csv')
+----
+gdrive_changes takes one folder
+
+statement error
+SELECT * FROM gdrive_changes('gdrive://fixtures/no-such-folder')
+----
+no such folder

@@ -552,6 +552,16 @@ direct detail (the owner: `[writer inherited, owner direct]`). Pinned in
 live: it would make a file public, so its mapping is covered by the captured
 bodies in `test/cpp/test_rows.cpp` only.
 
+**Drive's changes feed is per drive and lags (2026-11-07).** `changes.list`
+reports every file the identity can see, not a folder's, so `gdrive_changes`
+places each change by walking parents (`ChangeScope`, pure, one `files.get`
+per folder at most). A change outside the folder is emitted as a path-less
+`delete`, deliberately: it may be a move OUT, which a mirror must drop. And a
+file uploaded seconds ago is often not in the feed yet (3 s was not enough),
+so anything asserting on changes SINCE a token polls, in
+`e2e/tests/test_changes.py`, never in SQLLogicTest. An unknown token answers
+`400 Invalid Value` on `pageToken`.
+
 **Releasing:** follow `docs/RELEASE.md`. The community-extensions repo builds
 from a tagged commit and runs none of our live tests, so whatever is broken
 at tag time ships.

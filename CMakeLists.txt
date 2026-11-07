@@ -115,6 +115,7 @@ file(GLOB PURE_SOURCES CONFIGURE_DEPENDS
     src/gdrive_token_policy.cpp
     src/gdrive_upload_plan.cpp
     src/gdrive_rows.cpp
+    src/gdrive_change_scope.cpp
 )
 
 # ---------------------------------------------------------------------------
@@ -138,6 +139,7 @@ file(GLOB DUCKDB_SOURCES CONFIGURE_DEPENDS
     src/gdrive_files_functions.cpp
     src/gdrive_permissions_functions.cpp
     src/gdrive_versions.cpp
+    src/gdrive_changes.cpp
     # Not PURE despite having no DuckDB dependency: it opens a file and writes
     # to it, and the pure contract forbids I/O.
     src/gdrive_trace.cpp
