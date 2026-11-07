@@ -32,6 +32,7 @@ extension:
   excluded_platforms: "windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads"
   maintainers:
     - jrosskopf
+    - sipemu
 
 repo:
   github: DataZooDE/duckdb-gdrive
