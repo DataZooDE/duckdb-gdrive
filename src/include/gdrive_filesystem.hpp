@@ -236,7 +236,8 @@ public:
 	void AttachToDatabase(DatabaseInstance &db);
 
 	//! What a path argument names, for the table functions:
-	//!  - a glob: the files it matches, exactly as Glob() finds them;
+	//!  - a glob: the files it matches, exactly as Glob() finds them (and,
+	//!    when `folder_as_item`, the folders it matches too);
 	//!  - a literal file (or `id:`): that file;
 	//!  - a literal folder: the folder itself when `folder_as_item`, else the
 	//!    files directly in it.
@@ -327,8 +328,10 @@ private:
 	//! Glob's engine. `file_fields` non-empty asks every listing for those
 	//! fields too; `items`, when non-null, receives each match with its
 	//! metadata (and FileRow, from the same listing).
+	//! `include_folders` adds the folders a listing walks to `items` (never to
+	//! the returned paths): gdrive_permissions audits folders too.
 	vector<OpenFileInfo> GlobImpl(const string &path, optional_ptr<FileOpener> opener, const std::string &file_fields,
-	                              std::vector<GDriveItem> *items);
+	                              std::vector<GDriveItem> *items, bool include_folders = false);
 
 	DatabaseInstance *attached_db = nullptr;
 

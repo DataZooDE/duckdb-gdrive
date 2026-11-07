@@ -98,7 +98,8 @@ void RegisterPermissionFunctions(ExtensionLoader &loader) {
 	CreateTableFunctionInfo info(fn);
 	FunctionDescription desc;
 	desc.description =
-	    "Who can reach a Drive file or folder (or the files a glob matches): one row per permission -- role, "
+	    "Who can reach a Drive file or folder (or the files AND folders a glob matches): one row per permission, "
+	    "one permissions.list call per item -- role, "
 	    "granted_by (direct, inherited, link), the user, group or domain, and for general access its link_scope "
 	    "(anonymous = anyone with the link, organization = a domain), link_url, and whether it is discoverable in "
 	    "search.";

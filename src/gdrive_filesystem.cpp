@@ -1282,7 +1282,8 @@ vector<OpenFileInfo> GDriveFileSystem::Glob(const string &path, FileOpener *open
 }
 
 vector<OpenFileInfo> GDriveFileSystem::GlobImpl(const string &path, optional_ptr<FileOpener> op,
-                                                const std::string &file_fields, std::vector<GDriveItem> *items) {
+                                                const std::string &file_fields, std::vector<GDriveItem> *items,
+                                                bool include_folders) {
 	// Each match, recorded for ResolveItems as it is added to the result.
 	auto add_item = [items](const std::string &match_path, const DriveFileMeta &meta, const FileRow *row) {
 		if (!items) {
@@ -1514,6 +1515,18 @@ vector<OpenFileInfo> GDriveFileSystem::GlobImpl(const string &path, optional_ptr
 			// them) and still cached (path resolution needs them) -- only
 			// the result set excludes them.
 			if (meta.IsFolder()) {
+				// Not a glob result -- but an audit of "who can reach what"
+				// must see a folder shared with anyone, not only its files.
+				if (include_folders) {
+					bool ambiguous = false;
+					for (auto &other : listing) {
+						ambiguous = ambiguous || (&other != &entry && other.first == rel_path);
+					}
+					auto slash = full_rel_path.find_last_of('/');
+					add_item(DisambiguatePath(slash == std::string::npos ? "" : full_rel_path.substr(0, slash), meta,
+					                          ambiguous),
+					         meta, rich ? &listing_rows[&entry - listing.data()] : nullptr);
+				}
 				continue;
 			}
 
@@ -1591,7 +1604,7 @@ std::vector<GDriveItem> GDriveFileSystem::ResolveItems(const string &path, optio
 	std::vector<GDriveItem> items;
 	const bool literal = parsed.uri.kind == GDriveUriKind::FILE_ID || !HasGlobMetacharacters(path);
 	if (!literal) {
-		GlobImpl(path, opener, rich ? FileRowFields() : "", &items);
+		GlobImpl(path, opener, rich ? FileRowFields() : "", &items, /*include_folders=*/folder_as_item);
 		// Overlapping {a,b} expansions: Glob dedupes its paths, and so must
 		// this -- keeping a match that came with its row over one without.
 		std::unordered_map<std::string, size_t> at;
