@@ -55,7 +55,7 @@ def test_an_invalid_scope_names_drive_scope(sql):
 
 def test_a_bad_refresh_token_says_sign_in_again(sql):
     out = sql("""CREATE SECRET r (TYPE gdrive, PROVIDER config, CLIENT_ID getenv('GDRIVE_OAUTH_CLIENT_ID'),
-                 CLIENT_SECRET getenv('GDRIVE_OAUTH_CLIENT_SECRET'), REFRESH_TOKEN '1//garbage-refresh-token',
+                 CLIENT_SECRET getenv('GDRIVE_OAUTH_CLIENT_SECRET'), REFRESH_TOKEN 'not-a-refresh-token',
                  ROOT_FOLDER_ID getenv('GDRIVE_CI_DRIVE_ID'));
               SELECT count(*) FROM read_csv('gdrive://fixtures/small.csv');""", expect_error=True)
     assert "Sign in again" in out and "make oauth_consent" not in out, out
