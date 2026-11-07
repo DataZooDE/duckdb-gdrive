@@ -541,6 +541,17 @@ created -- with `USE_TMP_FILE false` that is the real target, so an
 overwrite that fails mid-stream deletes the old file exactly as on local
 disk; with the default tmp-file staging the old file survives.
 
+**Drive drops a file-level grant that does not exceed an inherited one
+(2026-11-07).** `permissions.create` of `reader` or `writer` on a file, for
+someone who already inherits `writer` from the folder, answers 200 -- and the
+permission's `permissionDetails` still list only the inherited writer. Nothing
+records the file-level grant, so `gdrive_permissions` says `inherited`, which is
+what Drive will act on. Only a grant ABOVE the inherited role shows up as a
+direct detail (the owner: `[writer inherited, owner direct]`). Pinned in
+`e2e/tests/test_permissions.py`. A `link` row (type `anyone`) is not tested
+live: it would make a file public, so its mapping is covered by the captured
+bodies in `test/cpp/test_rows.cpp` only.
+
 **Releasing:** follow `docs/RELEASE.md`. The community-extensions repo builds
 from a tagged commit and runs none of our live tests, so whatever is broken
 at tag time ships.
