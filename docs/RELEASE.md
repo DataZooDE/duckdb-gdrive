@@ -66,8 +66,8 @@ gh run list --repo DataZooDE/duckdb-gdrive --limit 4
 `Checks` covers hygiene, musl, the artifact, and the live suite.
 `Main Extension Distribution Pipeline` is the one that matters for
 publishing: it builds v1.5.6 (smoke-tested and deployed) and the DuckDB 2.0
-line (build and test only) across Linux amd64/arm64, Windows and both macOS
-architectures.
+line (build and test only) across Linux amd64/arm64, Windows and Apple Silicon
+macOS.
 
 ## Tagging
 
@@ -132,7 +132,7 @@ copy for a long time after a re-upload:
 
 ```bash
 T=vYYYY.MM.DD; N=gdrive; B=https://s3.eu-west-1.amazonaws.com/get.erpl.io
-for v in v1.5.6; do for a in linux_amd64 linux_arm64 osx_amd64 osx_arm64 windows_amd64; do
+for v in v1.5.6; do for a in linux_amd64 linux_arm64 osx_arm64 windows_amd64; do
   echo "$v $a: $(curl -sf $B/$N/$T/$v/$a/$N.duckdb_extension.gz | gunzip 2>/dev/null | tail -c 512 | strings -n 4 | grep -m1 -E '^v20')"
 done; done
 ```
@@ -238,7 +238,12 @@ still blocks is the decision below.
 
 ## Excluded platforms, and why
 
-`windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads`.
+`osx_amd64;windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads`.
+
+Intel macOS: community-extensions no longer builds it (since 2026-11, for any
+extension), so DuckDB's own channel has no Intel macOS binary of ours anyway;
+we no longer build, smoke-test or deploy it either. The same call as
+duckdb-sharepoint's.
 
 wasm is not a gap to close later: the extension is HTTPS calls to the Drive
 API plus a loopback redirect server for interactive OAuth, and neither works

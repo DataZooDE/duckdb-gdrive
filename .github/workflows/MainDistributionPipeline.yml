@@ -2,6 +2,8 @@
 # Build, test and (on main/tags) publish the extension binaries.
 #
 # Architectures we explicitly exclude:
+#   osx_amd64 -- Intel macOS: community-extensions stopped building it (2026-11),
+#     so we no longer build, smoke-test or deploy it either (as duckdb-sharepoint).
 #   windows_amd64_mingw -- vcpkg's OpenSSL port on MinGW is fragile; sibling
 #     extensions (erpl-web, quack-oauth, anofox-tabular) also skip it.
 #   wasm_* -- the extension's whole purpose is HTTPS calls to the Drive API,
@@ -46,7 +48,7 @@ jobs:
       duckdb_version: v1.5.6
       ci_tools_version: v1.5-variegata
       extension_name: gdrive
-      exclude_archs: 'windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'
+      exclude_archs: 'osx_amd64;windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'
 
   # DuckDB 2.0 (pre-release): the line community-extensions now builds
   # `repo.ref` against (DUCKDB_LATEST_STABLE in its build.yml, with
@@ -62,7 +64,7 @@ jobs:
       duckdb_version: b15358c371daf10dad799a43b6167f6ccdce84d8
       ci_tools_version: v2.0-cyanoptera
       extension_name: gdrive
-      exclude_archs: 'windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'
+      exclude_archs: 'osx_amd64;windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'
 
   # Publish the built binaries to the erpl.io distribution bucket, so users can
   #   INSTALL gdrive FROM 'http://get.erpl.io';   (DuckDB started with -unsigned,
@@ -86,7 +88,7 @@ jobs:
     with:
       duckdb_version: v1.5.6
       extension_name: gdrive
-      exclude_archs: 'windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'
+      exclude_archs: 'osx_amd64;windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'
 
   duckdb-stable-deploy:
     name: Deploy extension binaries (v1.5.6)
@@ -106,7 +108,7 @@ jobs:
       extension_name: gdrive
       duckdb_version: v1.5.6
       ci_tools_version: v1.5-variegata
-      exclude_archs: 'windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'
+      exclude_archs: 'osx_amd64;windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'
       deploy_latest: ${{ startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' }}
       # Versioned paths (<name>/vYYYY.MM.DD/...) come ONLY from the tag run. A main
       # push of the same commit builds before the tag exists (stamp vX-N-gSHA), and
