@@ -120,6 +120,14 @@ docs:
     drive, because Drive has no path addressing and each segment otherwise
     costs an API call.
 
+    Credentials come from Application Default Credentials by default, which
+    now includes **workload identity federation** — so a workload running in
+    Kubernetes or another federated environment authenticates with the
+    short-lived token its platform provides, and needs no downloaded
+    service-account key to store, mount or rotate. A key file
+    (`PROVIDER service_account`) and an interactive user credential
+    (`gcloud auth application-default login`) both still work.
+
     Two behaviours are deliberately strict. Drive permits two files with the
     same name in one folder, so a path is not a unique identifier: rather than
     pick one and make results depend on Drive's internal ordering, ambiguity
