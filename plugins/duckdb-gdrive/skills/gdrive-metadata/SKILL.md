@@ -11,13 +11,13 @@ description: >
   gdrive_permissions (who can reach what: direct, inherited, anyone-with-link,
   domain). Use when listing or inventorying Drive, finding a file, reading an
   old version, syncing a folder incrementally, or auditing sharing.
-version: 2026.10.18
+version: 2026.11.08
 user-invocable: false
 ---
 
 # gdrive extension — Drive's metadata as tables
 
-New after v2026.10.18 (in `main` and the next release). Every function takes a
+New in v2026.11.08 (not in v2026.10.18 or earlier). Every function takes a
 `gdrive://` path (the scheme may be left out), an `id:` path or a browser address -- of a
 file, not a `?version=`; a literal path that names nothing is an error, a glob may match
 nothing. Table functions take no subqueries: pass a value through

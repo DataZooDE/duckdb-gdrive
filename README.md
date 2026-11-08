@@ -320,8 +320,7 @@ never rewritten in place, which is what `gdrive_immutable_prefixes` is for.
 
 ## Drive's metadata as tables
 
-> New after v2026.10.18: these functions are on `main` and in the next
-> release, not in the community build of v2026.10.18.
+> New in v2026.11.08: not in the community build of v2026.10.18 or earlier.
 
 Every function takes a `gdrive://` path (the scheme may be left out), an `id:`
 path, or a browser address -- naming a file, not one of its versions. A
