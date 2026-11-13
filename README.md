@@ -514,7 +514,9 @@ default neither is reported; `outside := true` reports both as path-less
 row and a walk for every change elsewhere in the drive. A permanent deletion
 cannot be placed at all and is always reported -- after one `files.get` on its
 id, which turns it into an `upsert` if Drive still shows the file under the
-folder (the same check, and cost, for a change that arrives without parents). A path that would not read
+folder. Cost: one `files_get` per removed entry in the window, and, with
+`outside := true` only, one per change that arrives without parents (such as a
+file shared with you). A path that would not read
 back (a name shared by siblings, a `/` in a name) is a `gdrive://id:` path.
 An expired token says so; start over without one. A very old token replays
 everything since, which on a busy drive is a long, sequential walk. The feed

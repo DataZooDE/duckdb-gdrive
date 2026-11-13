@@ -80,6 +80,12 @@ ChangeVerdict DecideChange(ChangeEntryKind kind, const ChangeLookup *lookup, boo
 	if (kind == ChangeEntryKind::TRASHED || kind == ChangeEntryKind::PLACEABLE) {
 		return ChangeVerdict::KEEP_AS_IS;
 	}
+	// A file record without parents emits nothing without outside := true, and
+	// is NOT looked up then: such entries are typically shared-with-me items
+	// (no parent visible to this identity) and must not cost a call per change.
+	if (kind == ChangeEntryKind::NO_PARENTS && !outside) {
+		return ChangeVerdict::NOTHING;
+	}
 	if (!lookup) {
 		return ChangeVerdict::LOOK_UP;
 	}
@@ -90,11 +96,9 @@ ChangeVerdict DecideChange(ChangeEntryKind kind, const ChangeLookup *lookup, boo
 	}
 	// Gone, or alive (or trashed) but NOT under the folder.
 	//
-	// A file record without parents is placed nowhere, as before: a delete
-	// only when outside := true asks for what is not under the folder.
-	if (kind == ChangeEntryKind::NO_PARENTS) {
-		return outside ? ChangeVerdict::DELETE : ChangeVerdict::NOTHING;
-	}
+	// A file record without parents (only looked up with outside := true) is
+	// placed nowhere, as before: a delete, since outside asks for what is not
+	// under the folder. A removed entry is a delete in both modes.
 	// A removed entry stays a delete even when files.get finds the file alive
 	// elsewhere, with or without outside := true: alive-and-outside is exactly
 	// what a file moved OUT looks like, and a mirror holding the id must drop

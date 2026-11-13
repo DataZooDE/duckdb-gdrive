@@ -23,6 +23,8 @@ pytestmark = pytest.mark.live
 #: How long to wait for Drive's changes feed to show a change.
 FEED_DEADLINE_S = 420
 DRIVE_V3 = "https://www.googleapis.com/drive/v3"
+#: _feed_parents' value for a removed entry or one without a file record.
+REMOVED: list[str] = []
 
 
 def _rows(out: str) -> list[list[str]]:
@@ -195,8 +197,9 @@ def test_a_folder_moved_out_takes_its_subtree(writer, scratch, sql, gdrive_secre
 def _feed_parents(drive, token: str) -> dict[str, list[str]]:
     """file id -> parents, for every change since `token`: what changes.list
     returns for this identity, read raw. A removed entry, or one with no file
-    record, maps to [] -- like a file without parents, gdrive_changes confirms
-    it with one files.get before it may become a delete."""
+    record, maps to the REMOVED sentinel (test with `is`): gdrive_changes
+    confirms each with one files.get before it may become a delete. A file
+    without parents maps to a plain [] -- confirmed only with outside := true."""
     out: dict[str, list[str]] = {}
     page = token
     while page:
@@ -209,7 +212,7 @@ def _feed_parents(drive, token: str) -> dict[str, list[str]]:
             if not c.get("removed") and "file" in c:
                 out[c["fileId"]] = c["file"].get("parents", [])
             else:
-                out[c["fileId"]] = []
+                out[c["fileId"]] = REMOVED
         page = data.get("nextPageToken")
     return out
 
@@ -285,9 +288,10 @@ def test_since_token_cost_is_bounded_by_folders_not_files(writer, scratch, sql, 
     ours = set(ids) | {sub, scratch}
     _ancestor_folders(writer, {p for fid, ps in feed.items() if fid not in ours for p in ps}, scratch, foreign)
     foreign.discard(sub)
-    # Plus one confirming files.get per entry the walk cannot place (removed,
-    # or no parents) -- in EITHER read, since the call may have seen either.
-    confirms = {fid for fid, ps in [*before.items(), *after.items()] if not ps and fid not in ours}
+    # Plus one confirming files.get per removed (or file-less) entry -- in
+    # EITHER read, since the call may have seen either. Entries without parents
+    # cost nothing here: they are confirmed only with outside := true.
+    confirms = {fid for fid, ps in [*before.items(), *after.items()] if ps is REMOVED and fid not in ours}
     bound = 1 + len(foreign) + len(confirms)
     # +2 for what the merged reads can still miss (a foreign folder created and
     # deleted inside the call). Measured 2026-11-13 with a release live suite

@@ -167,12 +167,14 @@ TEST_CASE("DecideChange: the whole table for entries that cannot be placed", "[c
 		V want;
 	};
 	const Row table[] = {
-	    // No lookup yet: every unplaceable kind asks for one.
+	    // No lookup yet: removed / file-less entries always ask for one; an
+	    // entry without parents only with outside -- without it, it emits
+	    // nothing and costs nothing (typically shared-with-me items).
 	    {K::REMOVED, nullptr, false, V::LOOK_UP},
 	    {K::REMOVED, nullptr, true, V::LOOK_UP},
 	    {K::NO_FILE, nullptr, false, V::LOOK_UP},
 	    {K::NO_FILE, nullptr, true, V::LOOK_UP},
-	    {K::NO_PARENTS, nullptr, false, V::LOOK_UP},
+	    {K::NO_PARENTS, nullptr, false, V::NOTHING},
 	    {K::NO_PARENTS, nullptr, true, V::LOOK_UP},
 	    // Removed / no file record: a delete unless Drive places it under the folder.
 	    {K::REMOVED, &gone, false, V::DELETE},
@@ -195,17 +197,19 @@ TEST_CASE("DecideChange: the whole table for entries that cannot be placed", "[c
 	    {K::NO_FILE, &trashed_in, true, V::DELETE_AT_PATH},
 	    {K::NO_FILE, &trashed_out, false, V::DELETE},
 	    {K::NO_FILE, &trashed_out, true, V::DELETE},
-	    // No parents: placed nowhere stays as before -- a delete only with outside.
-	    {K::NO_PARENTS, &gone, false, V::NOTHING},
+	    // No parents, with outside (the only mode that looks it up): placed
+	    // nowhere stays a delete; placed under the folder is believed.
 	    {K::NO_PARENTS, &gone, true, V::DELETE},
-	    {K::NO_PARENTS, &alive_in, false, V::UPSERT_FROM_LOOKUP},
 	    {K::NO_PARENTS, &alive_in, true, V::UPSERT_FROM_LOOKUP},
-	    {K::NO_PARENTS, &alive_out, false, V::NOTHING},
 	    {K::NO_PARENTS, &alive_out, true, V::DELETE},
-	    {K::NO_PARENTS, &trashed_in, false, V::DELETE_AT_PATH},
 	    {K::NO_PARENTS, &trashed_in, true, V::DELETE_AT_PATH},
-	    {K::NO_PARENTS, &trashed_out, false, V::NOTHING},
 	    {K::NO_PARENTS, &trashed_out, true, V::DELETE},
+	    // ...and without outside it is NOTHING whatever a lookup would say.
+	    {K::NO_PARENTS, &gone, false, V::NOTHING},
+	    {K::NO_PARENTS, &alive_in, false, V::NOTHING},
+	    {K::NO_PARENTS, &alive_out, false, V::NOTHING},
+	    {K::NO_PARENTS, &trashed_in, false, V::NOTHING},
+	    {K::NO_PARENTS, &trashed_out, false, V::NOTHING},
 	};
 	for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++) {
 		INFO("row " << i);

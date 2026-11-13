@@ -724,15 +724,20 @@ day. Fix: such an entry gets ONE `files.get` (FileRowFields, counted as
 `files_get`) before it may become a delete; Drive placing it under the folder
 makes it an upsert (a folder brings its subtree), a 404 keeps the delete. The
 decision is pure (`DecideChange` in `gdrive_change_scope.cpp`, whole table in
-Catch2); entries WITH parents are placed as before at no extra cost.
-`e2e/tests/test_changes_cost.py` pins that between a floor (one `files_get` per
-path-less delete row, which only a confirm produces without `outside`) and a
-ceiling computed from the raw feed (one per unplaceable entry + foreign
-folders), with 8 permanent deletes and 8 uploads in the window. An exact "+1
+Catch2). **Cost rule, exactly: +1 `files_get` per removed / no-file entry in
+the window, in both modes; +1 per parents-less entry ONLY with `outside :=
+true`.** Without `outside`, a parents-less entry emits nothing and is not
+looked up (user decision): those are typically shared-with-me items and must
+not cost a call per change. Entries WITH parents are placed as before at no
+extra cost. `e2e/tests/test_changes_cost.py` pins that between a floor (one
+`files_get` per path-less delete row, which only a confirm produces without
+`outside`) and a ceiling computed from the raw feed (one per removed entry +
+foreign folders), with 8 permanent deletes and 8 uploads in the window. An exact "+1
 per delete" read off a token split was tried first and does not work: in 24
 samples (4 splits) our entries never sat between the tokens taken just
 before and just after the writes -- a feed position is not ordered with the
-write's reply. Do not build a cost test on token splits. A `removed` entry that `files.get` shows alive OUTSIDE the
+write's reply. Do not build a cost test on token splits. A `removed` entry
+that `files.get` shows alive OUTSIDE the
 folder stays a delete even without `outside := true` -- that is what a move
 out looks like. This narrows the window, it does not close it: a lagging
 `files.get` can be wrong too (and could even keep a ghost of a just-deleted

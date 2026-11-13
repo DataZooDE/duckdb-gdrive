@@ -9,9 +9,10 @@
 // the file may have been moved OUT, and a mirror must drop it -- deleting an
 // id the mirror never had is harmless, missing a move-out is not.
 //
-// An entry the walk cannot place at all (removed, no file record, no parents)
-// is confirmed with one files.get before it may become a delete: the feed
-// lags, and a live file can arrive in that shape (DecideChange, pure).
+// A removed entry (or one with no file record) is confirmed with one files.get
+// before it may become a delete: the feed lags, and a live file can arrive in
+// that shape. An entry without parents is confirmed only with outside := true;
+// without it, it emits nothing and costs nothing (DecideChange, pure).
 #include "gdrive_changes.hpp"
 #include "gdrive_banner.hpp"
 #include "gdrive_change_scope.hpp"
@@ -284,7 +285,8 @@ unique_ptr<FunctionData> ChangesBind(ClientContext &context, TableFunctionBindIn
 				}
 			};
 			// Confirm before delete: an entry the feed gives no way to place
-			// (removed, no file record, no parents) is asked about ONCE, by id,
+			// (removed or no file record; no parents only with outside := true)
+			// is asked about ONCE, by id,
 			// before it may become a delete. Drive's feed is served by replicas
 			// that lag each other, and a live file of the folder can arrive in
 			// that shape; dropped by a mirror, it is never seen again once the
@@ -362,8 +364,12 @@ unique_ptr<FunctionData> ChangesBind(ClientContext &context, TableFunctionBindIn
 					}
 					const auto kind =
 					    ClassifyChangeEntry(c.removed, c.has_file, !c.file.parents.empty(), c.file.trashed);
-					if (DecideChange(kind, nullptr, outside) == ChangeVerdict::LOOK_UP) {
+					const auto verdict = DecideChange(kind, nullptr, outside);
+					if (verdict == ChangeVerdict::LOOK_UP) {
 						confirm(c, kind);
+						continue;
+					}
+					if (verdict == ChangeVerdict::NOTHING) {
 						continue;
 					}
 					std::string relative;

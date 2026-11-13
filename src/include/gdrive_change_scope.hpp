@@ -79,8 +79,11 @@ private:
 // feed's word alone. Drive's feed is read from replicas that lag each other,
 // so a LIVE file of the folder can arrive in exactly that shape, and a mirror
 // that drops it never sees it again once it has moved past the token. So such
-// an entry is checked with ONE files.get first, and the answer decides.
-// Entries with parents are placed as before, at no extra cost.
+// an entry is checked with ONE files.get first, and the answer decides --
+// always for removed / file-less entries (deletes in both modes), for
+// parents-less ones only with outside := true (without it they emit nothing,
+// and they are typically shared-with-me items: no call per change). Entries
+// with parents are placed as before, at no extra cost.
 // ---------------------------------------------------------------------------
 
 //! What a change entry says about its file, in the order the checks apply.
@@ -111,7 +114,8 @@ enum class ChangeVerdict {
 };
 
 //! The whole decision. Without `lookup`, says whether one is needed
-//! (LOOK_UP) or the entry keeps today's placement (KEEP_AS_IS); with it, the
+//! (LOOK_UP), the entry keeps today's placement (KEEP_AS_IS), or it emits
+//! nothing at no cost (NOTHING: parents-less without outside); with it, the
 //! row to emit. `outside` is gdrive_changes' `outside := true`.
 ChangeVerdict DecideChange(ChangeEntryKind kind, const ChangeLookup *lookup, bool outside);
 

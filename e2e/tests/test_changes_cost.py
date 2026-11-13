@@ -1,9 +1,9 @@
 """gdrive_changes' confirm-before-delete: what it costs, per entry.
 
-An entry the feed gives no way to place -- `removed`, no file record, no
-parents -- is checked with ONE files.get before it may become a delete
-(Drive's feed lags; a live file can arrive in that shape). An entry with
-parents is placed as before, at no extra cost. This pins both numbers.
+A `removed` entry (or one with no file record) is checked with ONE files.get
+before it may become a delete (Drive's feed lags; a live file can arrive in
+that shape); an entry without parents is checked only with outside := true.
+An entry with parents is placed as before, at no extra cost. This pins both.
 
 Its own file because it is a cost assertion (CLAUDE.md), and in the e2e layer
 because it asserts on changes SINCE a token, which means polling a lagging
@@ -21,9 +21,10 @@ So both sides are bounded instead, from the call's own rows and the raw feed:
   confirm (Drive said 404, or the file is not under the folder), so the call
   spent at least one files.get per such row -- ours among them. The code
   before the confirm emitted the same rows for free.
-- CEILING. One files.get per entry the walk cannot place (removed or without
-  parents, in either raw read), plus one per foreign folder above anything
-  else in the window, plus our own subtree's one. Our uploads add nothing:
+- CEILING. One files.get per removed (or file-less) entry, in either raw
+  read, plus one per foreign folder above anything else in the window, plus
+  our own subtree's one. Entries without parents add nothing: without
+  outside := true they are not looked up (typically shared-with-me items). Our uploads add nothing:
   a confirm per placed entry would overshoot by N_NEW whatever anyone else
   is doing.
 """
@@ -32,7 +33,7 @@ from __future__ import annotations
 
 import pytest
 
-from .test_changes import _ancestor_folders, _by_id, _changes, _feed_parents_with, _poll, _rows, _token
+from .test_changes import REMOVED, _ancestor_folders, _by_id, _changes, _feed_parents_with, _poll, _rows, _token
 
 pytestmark = pytest.mark.live
 
@@ -77,8 +78,8 @@ def test_a_confirm_costs_one_files_get_and_a_placed_entry_none(writer, scratch, 
     pathless = [fid for fid, (kind, path) in rows.items() if kind == "delete" and not path]
     assert files_get >= len(pathless) >= N_GONE, (files_get, len(pathless))
 
-    # CEILING: one per unplaceable entry, one per foreign folder, one for `w`.
-    confirms = {fid for fid, ps in [*before.items(), *after.items()] if not ps}
+    # CEILING: one per removed entry, one per foreign folder, one for `w`.
+    confirms = {fid for fid, ps in [*before.items(), *after.items()] if ps is REMOVED}
     feed = {**before, **after}
     foreign: set[str] = set()
     _ancestor_folders(writer, {p for fid, ps in feed.items() if fid not in ours | {sub, scratch} for p in ps},
