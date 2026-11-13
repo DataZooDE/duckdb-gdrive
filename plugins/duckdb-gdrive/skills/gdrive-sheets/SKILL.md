@@ -14,7 +14,7 @@ description: >
   range of a Sheet, writing query results or a forecast into a Sheet, or
   appending rows to one. (The separate gsheets community extension is a
   different product with its own functions.)
-version: 2026.11.13
+version: 2026.11.14
 user-invocable: false
 ---
 
@@ -39,7 +39,7 @@ Paths: `gdrive://…` (scheme optional for `read_sheet_range`), `gdrive://id:<id
 browser address. An existing target must be a **native Google Sheet** (a CSV/xlsx in Drive is
 refused, never replaced).
 
-## Creating a Sheet (not in v2026.11.13 or earlier)
+## Creating a Sheet (new in v2026.11.14; not in v2026.11.13 or earlier)
 - A `gdrive://` **path that names nothing** gets a new native Sheet (missing folders too);
   its one tab is renamed to the RANGE's tab, written in the same atomic request. `OVERWRITE` /
   `APPEND` into a new Sheet = a block at the anchor, header included. `CREATE false` opts out

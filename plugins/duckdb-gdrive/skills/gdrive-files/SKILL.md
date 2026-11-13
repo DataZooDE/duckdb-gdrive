@@ -12,7 +12,7 @@ description: >
   concurrency limits (no atomic create: concurrent writers duplicate). Use
   when reading or writing files in Google Drive from SQL, querying a Sheet,
   putting a lakehouse on Drive, or when the user pastes a Drive or Sheets link.
-version: 2026.11.13
+version: 2026.11.14
 user-invocable: false
 ---
 

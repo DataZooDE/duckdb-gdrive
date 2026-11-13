@@ -18,7 +18,7 @@
 
 extension:
   name: gdrive
-  version: 2026.11.13
+  version: 2026.11.14
   description: Google Drive in SQL -- files and Sheets (gdrive://, browser links; read and write a Sheet by tab or range), Drive's metadata, locks, versions, change feeds and permissions
   language: C++
   build: cmake
@@ -118,7 +118,8 @@ docs:
     Native Sheets read through the ordinary readers as CSV, and
     `read_sheet_range` reads any tab or A1 range with typed columns.
     `COPY ... (FORMAT sheet_range, RANGE 'Tab!A1')` writes into a tab in place
-    through the Sheets API (`OVERWRITE` / `APPEND`; a missing tab is created),
+    through the Sheets API (`OVERWRITE` / `APPEND`; a missing tab, or a missing
+    Sheet at a `gdrive://` path, is created),
     never replacing the spreadsheet. Every write is retry-safe: a lost reply
     never leaves a duplicate file or folder behind.
 
