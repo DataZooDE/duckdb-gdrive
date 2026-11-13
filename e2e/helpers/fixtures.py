@@ -29,6 +29,13 @@ SCRATCH_ROOT = "scratch"
 #: own modifiedTime is the thing that actually moves.
 HEARTBEAT_NAME = ".heartbeat"
 
+#: The per-run LOCKED file (a content restriction) gdrive_locks.test reads.
+#: Lives in scratch, not /fixtures: a lock is state, and a permanent locked
+#: fixture would refuse the re-upload `make seed_fixtures` does.
+LOCKED_NAME = "locked.csv"
+LOCKED_CONTENT = b"a,b\n1,2\n"
+LOCK_REASON = "Quarter closed"
+
 SHEET_MIME = "application/vnd.google-apps.spreadsheet"
 DOC_MIME = "application/vnd.google-apps.document"
 

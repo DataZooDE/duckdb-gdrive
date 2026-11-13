@@ -555,6 +555,27 @@ class Drive:
         )
         return self._ok(resp, "upload_native")["id"]
 
+    def set_lock(self, file_id: str, locked: bool, reason: str = "",
+                 copy_requires_writer_permission: bool | None = None) -> dict:
+        """Lock or unlock a file: Drive's content restriction (readOnly).
+
+        Drive drops the whole contentRestrictions array on unlock rather than
+        reporting readOnly=false, and a locked file refuses content writes
+        with 403 contentRestrictionViolation (verified 2026-11-13). The
+        extension only READS locks -- this exists so a live test can make one.
+        """
+        restriction = {"readOnly": locked}
+        if locked and reason:
+            restriction["reason"] = reason
+        body = {"contentRestrictions": [restriction]}
+        if copy_requires_writer_permission is not None:
+            body["copyRequiresWriterPermission"] = copy_requires_writer_permission
+        return self._ok(
+            self._request("PATCH", f"{DRIVE_V3}/files/{file_id}", "files.update", json=body,
+                          params={"fields": "id,contentRestrictions,copyRequiresWriterPermission"}),
+            "set_lock",
+        )
+
     def delete(self, file_id: str, permanent: bool = True) -> None:
         if permanent:
             resp = self._request("DELETE", f"{DRIVE_V3}/files/{file_id}", "files.delete")

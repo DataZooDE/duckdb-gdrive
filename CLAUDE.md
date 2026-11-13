@@ -639,6 +639,19 @@ lessons:
   permissions audit with a typo reports "nothing shared".
 - Native Docs/Sheets report `size: 1024` whatever their content.
 
+**Drive locks guard bytes, not names (2026-11-13).** A content restriction
+(`contentRestrictions: [{readOnly: true, reason}]` via files.update -- the
+UI's *Lock*) makes Drive refuse a content write with `403
+contentRestrictionViolation`, but NOT the move-and-trash that COPY's default
+tmp-file staging ends in: a COPY over a locked file reported success. So the
+metadata mask (`FileFieldsMask`) asks for `contentRestrictions(readOnly)` and
+`RefuseReplacing` refuses a locked target. Drive drops the whole array on
+unlock rather than sending `readOnly: false`. A service account sees the
+restricting user's display name only ("jr", not the full name), no address.
+The live test's locked file is made by `materialise.py` in the run's scratch
+folder (the extension cannot set a lock); a lock does not stop deleting the
+folder.
+
 `.crew/` holds the crew runs (git-ignored). `helpers.drop_scratch` only
 accepts `run-*` names -- exploratory testers need their own cleanup.
 

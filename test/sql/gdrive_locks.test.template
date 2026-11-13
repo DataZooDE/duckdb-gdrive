@@ -1,0 +1,121 @@
+# name: test/sql/gdrive_locks.test.template
+# description: read_gdrive_files' lock columns (Drive content restrictions) -- against REAL Google Drive
+# group: [live]
+#
+# The extension reads locks; it cannot set one. So the locked file is made by
+# e2e/helpers/materialise.py, as the delegated user, in this run's scratch
+# folder: /scratch/${SCRATCH}/locked.csv, readOnly with reason
+# 'Quarter closed', and copyRequiresWriterPermission set. The run's heartbeat
+# file beside it is the never-locked control. Teardown deletes the folder.
+
+require gdrive
+
+require-env GDRIVE_CI_DRIVE_ID
+
+require-env GDRIVE_CI_SA_KEY_FILE
+
+require-env GDRIVE_OAUTH_CLIENT_ID
+
+require-env GDRIVE_OAUTH_CLIENT_SECRET
+
+require-env GDRIVE_USER_REFRESH_TOKEN
+
+# ---------------------------------------------------------------------------
+# As the service account, the identity reads normally run as.
+# ---------------------------------------------------------------------------
+statement ok
+CREATE SECRET gdrive_sa (
+    TYPE gdrive,
+    PROVIDER service_account,
+    KEY_FILE '${SA_KEY_FILE}',
+    ROOT_FOLDER_ID '${DRIVE_ID}',
+    DRIVE_SCOPE 'https://www.googleapis.com/auth/drive'
+);
+
+statement ok
+CALL gdrive_reset_stats();
+
+# The lock rides on the listing the glob makes anyway: no extra call. Drive
+# shows a service account who locked the file by display name only -- no
+# address (captured 2026-11-13), so locked_by_email is NULL here.
+query IIIIIII
+SELECT name, locked, locked_by IS NOT NULL, locked_by_email IS NULL, lock_reason,
+       locked_at BETWEEN now()::TIMESTAMP - INTERVAL 1 DAY AND now()::TIMESTAMP + INTERVAL 1 HOUR,
+       copy_requires_writer_permission
+FROM read_gdrive_files('gdrive://scratch/${SCRATCH}/*') WHERE name IN ('.heartbeat', 'locked.csv') ORDER BY name
+----
+.heartbeat	false	false	true	NULL	NULL	false
+locked.csv	true	true	true	Quarter closed	true	true
+
+query II
+SELECT (SELECT value FROM gdrive_stats() WHERE metric = 'files_get'),
+       (SELECT value FROM gdrive_stats() WHERE metric = 'files_list') <= 3
+----
+0	true
+
+# A literal path: one files.get, with the same columns.
+query III
+SELECT locked, lock_reason, typeof(locked_at) FROM read_gdrive_files('gdrive://scratch/${SCRATCH}/locked.csv')
+----
+true	Quarter closed	TIMESTAMP
+
+# Appended, not inserted: SELECT * keeps the earlier columns where they were.
+query II
+SELECT column_name, column_index FROM (
+    SELECT column_name, row_number() OVER () AS column_index
+    FROM (DESCRIBE SELECT * FROM read_gdrive_files('gdrive://scratch/${SCRATCH}/locked.csv'))
+) WHERE column_index >= 19 ORDER BY column_index
+----
+properties	19
+locked	20
+locked_by	21
+locked_by_email	22
+locked_at	23
+lock_reason	24
+copy_requires_writer_permission	25
+
+# (search_gdrive builds its rows with the same code, but Drive's search index
+# lags a fresh upload by an unbounded time, so it is not asserted here.)
+
+statement ok
+DROP SECRET gdrive_sa;
+
+# ---------------------------------------------------------------------------
+# As the delegated user who locked it: the address is visible.
+# ---------------------------------------------------------------------------
+statement ok
+CREATE SECRET gdrive_user (
+    TYPE gdrive,
+    PROVIDER config,
+    CLIENT_ID '${OAUTH_CLIENT_ID}',
+    CLIENT_SECRET '${OAUTH_CLIENT_SECRET}',
+    REFRESH_TOKEN '${USER_REFRESH_TOKEN}',
+    ROOT_FOLDER_ID '${DRIVE_ID}',
+    DRIVE_SCOPE 'https://www.googleapis.com/auth/drive'
+);
+
+query II
+SELECT locked_by_email LIKE '%@%', locked_by_email = owner_email
+FROM read_gdrive_files('gdrive://scratch/${SCRATCH}/locked.csv')
+----
+true	true
+
+# A lock is a real lock: writing the file is refused -- direct, and through
+# COPY's staged tmp-file-then-move. Drive guards only the BYTES of a locked
+# file; the move-and-trash COPY ends in is not refused by Drive, and before
+# RefuseReplacing checked the lock this COPY reported success (2026-11-13).
+statement error
+SELECT write_blob('gdrive://scratch/${SCRATCH}/locked.csv', encode(E'x\n'))
+----
+content restriction
+
+statement error
+COPY (SELECT 1 AS x) TO 'gdrive://scratch/${SCRATCH}/locked.csv' (FORMAT csv)
+----
+content restriction
+
+# ...and neither attempt replaced it or dropped the lock.
+query III
+SELECT id = '${LOCKED_ID}', locked, size FROM read_gdrive_files('gdrive://scratch/${SCRATCH}/locked.csv')
+----
+true	true	8

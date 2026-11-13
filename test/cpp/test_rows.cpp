@@ -86,6 +86,73 @@ const char *kChanges = R"({
  "newStartPageToken": "86974"
 })";
 
+// A locked file (contentRestrictions readOnly), captured 2026-11-13 in a
+// scratch folder: files.get as the delegated user who locked it, and the same
+// file listed by the service account -- which Drive shows only a display name
+// and no address for the restricting user.
+const char *kLockedGet = R"({
+  "id": "1etXYhzfAk2Azh0neD45f82U6oyeHTi-7",
+  "name": "locked.csv",
+  "capabilities": {
+    "canModifyContentRestriction": true,
+    "canModifyEditorContentRestriction": true,
+    "canModifyOwnerContentRestriction": true,
+    "canModifyLabels": false,
+    "canReadLabels": false,
+    "canRemoveContentRestriction": true
+  },
+  "copyRequiresWriterPermission": true,
+  "contentRestrictions": [
+    {
+      "readOnly": true,
+      "reason": "Quarter closed",
+      "restrictingUser": {
+        "displayName": "owner",
+        "emailAddress": "owner@example.com"
+      },
+      "restrictionTime": "2026-11-13T03:38:35.503Z",
+      "type": "globalContentRestriction"
+    }
+  ]
+})";
+
+const char *kLockedListedBySa = R"({
+  "files": [
+    {
+      "copyRequiresWriterPermission": true,
+      "id": "1etXYhzfAk2Azh0neD45f82U6oyeHTi-7",
+      "name": "locked.csv",
+      "contentRestrictions": [
+        {
+          "readOnly": true,
+          "reason": "Quarter closed",
+          "type": "globalContentRestriction",
+          "restrictingUser": {
+            "displayName": "owner"
+          },
+          "restrictionTime": "2026-11-13T03:38:35.503Z"
+        }
+      ]
+    }
+  ]
+})";
+
+// The same file after files.update {contentRestrictions: [{readOnly: false}]}:
+// Drive drops the array altogether rather than reporting readOnly=false.
+const char *kUnlockedGet = R"({
+  "id": "1etXYhzfAk2Azh0neD45f82U6oyeHTi-7",
+  "name": "locked.csv",
+  "capabilities": {
+    "canModifyContentRestriction": true,
+    "canModifyEditorContentRestriction": true,
+    "canModifyOwnerContentRestriction": true,
+    "canModifyLabels": false,
+    "canReadLabels": false,
+    "canRemoveContentRestriction": false
+  },
+  "copyRequiresWriterPermission": false
+})";
+
 } // namespace
 
 TEST_CASE("ParseRfc3339Micros: Drive's UTC form, fractions and offsets", "[rows][time]") {
@@ -267,4 +334,45 @@ TEST_CASE("ParseStartPageToken", "[rows][changes]") {
 	REQUIRE(ParseStartPageToken(R"({"kind": "drive#startPageToken", "startPageToken": "86974"})", token, error));
 	CHECK(token == "86974");
 	CHECK_FALSE(ParseStartPageToken(R"({"kind": "drive#startPageToken"})", token, error));
+}
+
+TEST_CASE("ParseFileRow: a content restriction is the lock", "[rows][files][locks]") {
+	FileRow row;
+	std::string error;
+	REQUIRE(ParseFileRow(kLockedGet, row, error));
+	CHECK(row.locked);
+	CHECK(row.locked_by.name == "owner");
+	CHECK(row.locked_by.email == "owner@example.com");
+	CHECK(row.locked_at == "2026-11-13T03:38:35.503Z");
+	CHECK(row.lock_reason == "Quarter closed");
+	CHECK(row.has_copy_requires_writer_permission);
+	CHECK(row.copy_requires_writer_permission);
+}
+
+TEST_CASE("ParseFileRowList: a service account sees who locked a file, not their address", "[rows][files][locks]") {
+	std::vector<FileRow> rows;
+	std::string next, error;
+	REQUIRE(ParseFileRowList(kLockedListedBySa, rows, next, error));
+	REQUIRE(rows.size() == 1);
+	CHECK(rows[0].locked);
+	CHECK(rows[0].locked_by.name == "owner");
+	CHECK(rows[0].locked_by.email.empty());
+	CHECK(rows[0].lock_reason == "Quarter closed");
+}
+
+TEST_CASE("ParseFileRow: unlocked, and never asked", "[rows][files][locks]") {
+	FileRow row;
+	std::string error;
+	REQUIRE(ParseFileRow(kUnlockedGet, row, error));
+	CHECK_FALSE(row.locked);
+	CHECK(row.locked_by.name.empty());
+	CHECK(row.locked_at.empty());
+	CHECK(row.lock_reason.empty());
+	CHECK(row.has_copy_requires_writer_permission);
+	CHECK_FALSE(row.copy_requires_writer_permission);
+	// A body from before the mask asked for either field: unlocked, and the
+	// copy flag unknown (NULL), not false.
+	REQUIRE(ParseFileRow(kFilesGet, row, error));
+	CHECK_FALSE(row.locked);
+	CHECK_FALSE(row.has_copy_requires_writer_permission);
 }

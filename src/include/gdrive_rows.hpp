@@ -55,6 +55,19 @@ struct FileRow {
 	bool starred = false;
 	bool shared = false;
 	bool trashed = false;
+	//! A content restriction ("lock"): Drive's contentRestrictions entry with
+	//! readOnly=true. Drive drops the whole array when a file is unlocked, so
+	//! no entry and a readOnly=false entry both read as unlocked. The other
+	//! fields are that entry's; restricting_user's email is empty when Drive
+	//! hides it (it does from a service account).
+	bool locked = false;
+	DrivePerson locked_by;
+	std::string locked_at;
+	std::string lock_reason;
+	//! copyRequiresWriterPermission: readers and commenters may not download,
+	//! print or copy. has_ is false when Drive omitted it (some folders).
+	bool copy_requires_writer_permission = false;
+	bool has_copy_requires_writer_permission = false;
 
 	bool IsFolder() const;
 };
