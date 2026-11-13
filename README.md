@@ -348,6 +348,27 @@ file's custom `properties` as a MAP. A glob costs exactly the listings `glob()`
 makes, with no call per file. Native Docs and Sheets have no `size`, `md5` or
 `version` of their own (NULL): their bytes exist only as an export.
 
+Then the file's **lock** -- Drive's content restriction, set with *Lock* in
+the Drive UI (*File information → Lock*) or `contentRestrictions` in the API:
+
+| Column | Type | |
+|---|---|---|
+| `locked` | BOOLEAN | the file is read-only for everyone until unlocked |
+| `locked_by`, `locked_by_email` | VARCHAR | who locked it. Drive hides the address from a service account, so `locked_by_email` is NULL there |
+| `locked_at` | TIMESTAMP | when (UTC) |
+| `lock_reason` | VARCHAR | the reason given, NULL when none |
+| `copy_requires_writer_permission` | BOOLEAN | readers and commenters may not download, print or copy it |
+
+They come in the same listing, so they cost nothing extra. A write to a locked
+file -- `COPY`, `write_blob` -- is refused by Drive ("would violate a content
+restriction") and leaves the file as it was. These columns were appended after
+`properties`, so a `SELECT *` keeps its earlier positions.
+
+```sql
+SELECT path, locked_by, locked_at, lock_reason
+FROM read_gdrive_files('gdrive://Finance/**') WHERE locked;
+```
+
 ### Search: `search_gdrive`
 
 ```sql

@@ -54,6 +54,15 @@ std::string EscapeDriveQueryLiteral(const std::string &value) {
 }
 
 void RefuseReplacing(const DriveFileMeta &existing, const std::string &target) {
+	if (existing.locked) {
+		// Drive refuses a content write to a locked file, but not the trash
+		// and move that COPY's tmp-file staging ends in: without this the
+		// lock would be silently bypassed (found live 2026-11-13).
+		throw PermissionException(
+		    "gdrive: cannot write to '%s': it is locked (a Drive content restriction makes it read-only). "
+		    "Unlock it in Drive first, or write under another name.",
+		    target);
+	}
 	if (existing.IsFolder()) {
 		throw IOException("gdrive: cannot write to '%s': it is a folder, not a file", target);
 	}
