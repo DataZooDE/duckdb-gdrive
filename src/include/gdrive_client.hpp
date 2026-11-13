@@ -39,6 +39,9 @@ struct DriveFileMeta {
 	//! In the trash. Listings exclude trashed files in their query; an id:
 	//! path does not, and a trashed id must read as gone, not as a file.
 	bool trashed = false;
+	//! Locked: a content restriction with readOnly=true. Nothing may replace
+	//! it (RefuseReplacing): Drive itself guards only its bytes.
+	bool locked = false;
 
 	bool IsFolder() const;
 	//! application/vnd.google-apps.* -- has no bytes; must be read via

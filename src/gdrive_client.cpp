@@ -105,7 +105,11 @@ std::string UrlEncode(const std::string &value) {
 //! The exact field mask REQ-NF-01 requires for a single file resource: no
 //! more, no less than what the extension actually consumes.
 std::string FileFieldsMask() {
-	return "id,name,mimeType,size,modifiedTime,headRevisionId,trashed";
+	// contentRestrictions(readOnly): a LOCKED file must not be replaced --
+	// COPY's tmp-file-then-move would otherwise trash it and move the new
+	// bytes in, which Drive allows (found live 2026-11-13). Drive omits the
+	// field for an unlocked file, so it costs nothing on the common path.
+	return "id,name,mimeType,size,modifiedTime,headRevisionId,trashed,contentRestrictions(readOnly)";
 }
 
 //! Same fields, nested under a files.list response's `files` array, plus
@@ -200,6 +204,22 @@ bool ParseFileMetaObject(const picojson::object &obj, DriveFileMeta &out) {
 	{
 		auto it = obj.find("trashed");
 		out.trashed = it != obj.end() && it->second.is<bool>() && it->second.get<bool>();
+	}
+	out.locked = false;
+	{
+		auto it = obj.find("contentRestrictions");
+		if (it != obj.end() && it->second.is<picojson::array>()) {
+			for (auto &r : it->second.get<picojson::array>()) {
+				if (!r.is<picojson::object>()) {
+					continue;
+				}
+				const auto &ro = r.get<picojson::object>();
+				auto f = ro.find("readOnly");
+				if (f != ro.end() && f->second.is<bool>() && f->second.get<bool>()) {
+					out.locked = true;
+				}
+			}
+		}
 	}
 	int64_t size = -1;
 	if (GetInt64FromString(obj, "size", size)) {
