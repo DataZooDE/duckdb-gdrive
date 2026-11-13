@@ -16,7 +16,7 @@ the code that cites it.
 | # | Decision | Consequence |
 |---|---|---|
 | **D-1** | **Real Google Drive is the only integration target. No fake Drive server, no HTTP replay, no test doubles.** Supersedes HLD §10's "integration against a fake". | The merge gate needs the CI service-account secret. Fork PRs cannot run the live suite; they run build + pure-logic tests only. Accepted knowingly. |
-| **D-2** | `datazoo-oauth2` is built first and consumed here immediately; the `erpl-web` migration is deferred. | Time-boxed debt against REQ-A-02. Until it lands, no logic change is made to the extracted code that `erpl-web` would need to absorb. |
+| **D-2** | `datazoo-oauth2` is built first and consumed here immediately; the `erpl-web` migration is deferred. | Time-boxed debt against REQ-A-02. Until it lands, no logic change is made to the extracted code that `erpl-web` would need to absorb. **Status 2026-11-13: migration done structurally** (erpl-web is now `erpl-odata`, submodule at the same pin, no copy left), **D-12 live gate not yet run**, so the freeze still holds. |
 | **D-3** | No FUSE/rclone benchmark, no go/no-go gate. | BRD §9's strongest alternative stays formally unanswered, so the README answers it in prose ("When you should NOT use this"). The GCS comparison still ships — REQ-NF-01 requires it. |
 | **D-4** | Public `github.com/DataZooDE/duckdb-gdrive`, target name `gdrive`, scheme `gdrive://`. | `INSTALL gdrive; LOAD gdrive;` after community acceptance. |
 | **D-5** | **Shared Drives are in v1.** Not a preference: a service account has no personal Drive storage quota and cannot own files in a My Drive, so CI fixtures *must* live in a Shared Drive. | The secret carries an optional `drive_id` root binding. Personal Drive works for user-OAuth secrets. |
@@ -641,6 +641,18 @@ lessons:
 
 `.crew/` holds the crew runs (git-ignored). `helpers.drop_scratch` only
 accepts `run-*` names -- exploratory testers need their own cleanup.
+
+**The community v1.5.6 binary lagged a whole release and every check said
+fine (found 2026-11-08).** community-extensions builds only DuckDB 2.0 on
+merge; v1.5.6 needs a maintainer to dispatch `build.yml`. Nobody did for
+v2026.10.18, so `INSTALL gdrive` on stable DuckDB served v2026.09.26 for three
+weeks, while RELEASE.md's "done" check, an HTTP 200 on the file, passed,
+because a stale binary is still a file. Check the STAMP of both lines after a
+bump. Asking for the v1.5.6 build in the bump PR's description got it run at
+merge for v2026.11.08. Same release, second trap: the upstream descriptor
+had been edited upstream (a workload-identity paragraph), and copying our
+staged file over would have silently reverted it. Diff against upstream
+before copying.
 
 **Releasing:** follow `docs/RELEASE.md`. The community-extensions repo builds
 from a tagged commit and runs none of our live tests, so whatever is broken
