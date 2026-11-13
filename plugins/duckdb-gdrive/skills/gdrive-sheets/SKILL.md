@@ -13,11 +13,13 @@ description: >
   range of a Sheet, writing query results or a forecast into a Sheet, or
   appending rows to one. (The separate gsheets community extension is a
   different product with its own functions.)
-version: 2026.11.08
+version: 2026.11.13
 user-invocable: false
 ---
 
 # gdrive extension — Sheets by tab and range
+
+New in v2026.11.13 (not in v2026.11.08 or earlier).
 
 `read_csv` on a Sheet exports its **first tab** as text. For any tab, a range,
 typed columns, or **writing into** a Sheet, use the Sheets-API surface:
