@@ -227,3 +227,64 @@ def test_a_repeated_trash_answers_with_the_same_state(writer, scratch):
         r = writer._request("PATCH", f"{DRIVE_V3}/files/{file_id}", "files.update.trash",
                             params={"fields": "id,trashed"}, json={"trashed": True})
         assert r.status_code == 200 and r.json()["trashed"] is True, r.text[:300]
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-13: a native Sheet cannot reserve an id, so FORMAT sheet_range's
+# create carries a nonce instead (GDriveClient::CreateNative, NonceLookupQuery
+# in src/gdrive_upload_plan.cpp). These pin both halves against Drive.
+# ---------------------------------------------------------------------------
+
+SHEET_MIME = "application/vnd.google-apps.spreadsheet"
+
+
+def _create_sheet(drive, parent_id: str, name: str, nonce: str | None = None, file_id: str | None = None):
+    """The exact request the extension sends: a metadata-only files.create."""
+    body = {"name": name, "parents": [parent_id], "mimeType": SHEET_MIME}
+    if nonce:
+        body["appProperties"] = {"gdrive_create": nonce}
+    if file_id:
+        body["id"] = file_id
+    return drive._request("POST", f"{DRIVE_V3}/files", "create.sheet",
+                          params={"fields": "id,name,mimeType"}, json=body)
+
+
+def _nonce_lookup(drive, parent_id: str, nonce: str) -> list[dict]:
+    # The same q as NonceLookupQuery.
+    q = (f"'{parent_id}' in parents and appProperties has {{ key='gdrive_create' and "
+         f"value='{nonce}' }} and trashed=false")
+    resp = drive._request("GET", f"{DRIVE_V3}/files", "files.list",
+                          params={"q": q, "fields": "files(id,name)", "includeItemsFromAllDrives": "true"})
+    resp.raise_for_status()
+    return resp.json()["files"]
+
+
+def test_drive_refuses_a_reserved_id_for_a_native_sheet(writer, scratch):
+    """Why a Sheet's create is NOT retry-safe by reserved id: Drive answers
+    403 generatedIdNotSupported even for a metadata-only create (no media
+    part). If this starts passing with a 200, the nonce path can be replaced
+    by the reserved-id one every other create uses."""
+    (reserved,) = _reserve(writer)
+    resp = _create_sheet(writer, scratch, "reserved-sheet", file_id=reserved)
+    assert resp.status_code == 403, resp.text[:300]
+    assert _reason(resp) == "generatedIdNotSupported", resp.text[:300]
+    assert [c for c in writer.list_children(scratch) if c["name"] == "reserved-sheet"] == []
+
+
+def test_the_nonce_lookup_finds_exactly_the_created_sheet(writer, scratch):
+    """What a create with a lost answer is recovered by: the nonce finds the
+    Sheet it was sent with, and nothing else -- not a same-named Sheet made
+    by another create, not one without a nonce."""
+    nonce, other = "a" * 32, "b" * 32
+    made = _create_sheet(writer, scratch, "nonce-sheet", nonce=nonce)
+    assert made.status_code == 200, made.text[:300]
+    decoy = _create_sheet(writer, scratch, "nonce-sheet", nonce=other)
+    assert decoy.status_code == 200, decoy.text[:300]
+    plain = _create_sheet(writer, scratch, "nonce-sheet")
+    assert plain.status_code == 200, plain.text[:300]
+
+    assert [f["id"] for f in _nonce_lookup(writer, scratch, nonce)] == [made.json()["id"]]
+    assert [f["id"] for f in _nonce_lookup(writer, scratch, other)] == [decoy.json()["id"]]
+    # Scoped to the parent: the same nonce under another folder is not found.
+    elsewhere = writer.create_folder("elsewhere", scratch)
+    assert _nonce_lookup(writer, elsewhere, nonce) == []

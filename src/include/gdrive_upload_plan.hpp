@@ -205,6 +205,38 @@ enum class CreateOutcome {
 CreateOutcome InterpretCreateReply(bool transport_ok, int status, const std::string &reason,
                                    bool has_reserved_id, bool had_ambiguous_attempt);
 
+// ---------------------------------------------------------------------------
+// Creating a NATIVE Google file (a Sheet) cannot reserve an id: Drive answers
+// 403 generatedIdNotSupported, "Generated IDs are not supported for Docs
+// Editors formats", even for a metadata-only files.create, and
+// spreadsheets.create rejects a supplied id too (verified live 2026-11-13).
+// So such a create is sent ONCE, never re-sent, and carries a random nonce in
+// appProperties. When its reply is unusable, one files.list for the nonce
+// says what happened. Fail closed: a miss is "may not have been created,
+// nothing was retried", never a re-send -- a listing that lags a create which
+// DID land would turn a re-send into a duplicate (R-4).
+// ---------------------------------------------------------------------------
+
+//! The appProperties key carrying a native create's nonce.
+constexpr const char *kCreateNonceKey = "gdrive_create";
+
+enum class NonceCreateOutcome {
+	DONE,       //!< 2xx: created, the body is the new object
+	FAIL_CLEAN, //!< Drive answered with a refusal (4xx): nothing was created
+	LOOK_UP     //!< no usable answer (transport / 5xx): look the nonce up
+};
+NonceCreateOutcome InterpretNonceCreateReply(bool transport_ok, int status);
+
+enum class NonceLookupOutcome {
+	ADOPT,       //!< exactly one object carries the nonce: the create landed
+	NOT_CREATED, //!< none: as far as Drive's listing knows, nothing was created
+	DUPLICATED   //!< more than one -- impossible for a create sent once; a bug, named loudly
+};
+NonceLookupOutcome DecideNonceLookup(size_t matches);
+
+//! The files.list `q` finding a create's nonce among `parent_id`'s children.
+std::string NonceLookupQuery(const std::string &parent_id, const std::string &nonce);
+
 //! Did a move whose reply was lost land? From the file's own state, read back
 //! by id: it carries the target name and sits under the target parent (and,
 //! when the move changed parents, no longer under the old one).

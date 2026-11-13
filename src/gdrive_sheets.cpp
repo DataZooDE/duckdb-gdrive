@@ -648,6 +648,41 @@ std::string SheetResizeGridRequest(int64_t sheet_id, int64_t rows, int64_t cols)
 	       "}},\"fields\":\"gridProperties.rowCount,gridProperties.columnCount\"}}";
 }
 
+std::string SheetSetTabRequest(int64_t sheet_id, const std::string &title, int64_t rows, int64_t cols) {
+	return "{\"updateSheetProperties\":{\"properties\":{\"sheetId\":" + I64(sheet_id) + ",\"title\":" +
+	       JsonQuote(title) + ",\"gridProperties\":{\"rowCount\":" + I64(rows) + ",\"columnCount\":" + I64(cols) +
+	       "}},\"fields\":\"title,gridProperties.rowCount,gridProperties.columnCount\"}}";
+}
+
+bool HasDataFileExtension(const std::string &name) {
+	static const char *const kExtensions[] = {".csv",   ".tsv",  ".parquet", ".json", ".jsonl",
+	                                          ".ndjson", ".xlsx", ".xls",     ".txt"};
+	std::string lower(name);
+	std::transform(lower.begin(), lower.end(), lower.begin(),
+	               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	for (const char *ext : kExtensions) {
+		const std::string e(ext);
+		if (lower.size() > e.size() && lower.compare(lower.size() - e.size(), e.size(), e) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+SheetTargetAction DecideSheetTarget(bool found, const std::string &mime_type, SheetTargetForm form,
+                                    bool create_allowed, const std::string &name) {
+	if (found) {
+		return mime_type == "application/vnd.google-apps.spreadsheet" ? SheetTargetAction::OPEN
+		                                                               : SheetTargetAction::REFUSE_NOT_SHEET;
+	}
+	// An id or an address names an object that should exist; there is no
+	// folder or name to create one under.
+	if (form != SheetTargetForm::PATH || !create_allowed || name.empty()) {
+		return SheetTargetAction::NO_SUCH;
+	}
+	return HasDataFileExtension(name) ? SheetTargetAction::REFUSE_DATA_EXTENSION : SheetTargetAction::CREATE;
+}
+
 std::string SheetBatchUpdateBody(const std::vector<std::string> &requests) {
 	std::string out = "{\"requests\":[";
 	for (size_t i = 0; i < requests.size(); i++) {

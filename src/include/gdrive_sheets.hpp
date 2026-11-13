@@ -163,8 +163,39 @@ std::string SheetAddSheetRequest(int64_t sheet_id, const std::string &title, int
 //! updateSheetProperties setting the grid to rows x cols. Idempotent, unlike
 //! appendDimension: a retried request cannot grow the grid twice.
 std::string SheetResizeGridRequest(int64_t sheet_id, int64_t rows, int64_t cols);
+//! updateSheetProperties setting a tab's title AND its grid: the first request
+//! for a Sheet this COPY just created, whose one tab is sheetId 0 under a
+//! locale-dependent title ("Sheet1", "Tabelle1", ...) that is never relied on.
+//! Idempotent, so the batch carrying it can be retried.
+std::string SheetSetTabRequest(int64_t sheet_id, const std::string &title, int64_t rows, int64_t cols);
 //! {"requests":[...]}.
 std::string SheetBatchUpdateBody(const std::vector<std::string> &requests);
+
+// --- What a COPY ... (FORMAT sheet_range) target is ---------------------------
+
+//! How the target was written: a gdrive:// path, gdrive://id:<id>, or a
+//! browser address. Only a PATH says where a new Sheet would go.
+enum class SheetTargetForm { PATH, ID, ADDRESS };
+
+enum class SheetTargetAction {
+	OPEN,                  //!< an existing native Sheet: write into it
+	CREATE,                //!< nothing there: create a native Sheet
+	REFUSE_NOT_SHEET,      //!< something else is there (a folder, a CSV, ...)
+	REFUSE_DATA_EXTENSION, //!< nothing there, but the name reads as a data file
+	NO_SUCH                //!< nothing there, and creating is not possible or not wanted
+};
+
+//! `found` and `mime_type` are what the target resolves to; `name` is its
+//! last path segment. CREATE only for a PATH that names nothing, when
+//! `create_allowed` (COPY's CREATE, default true), and when the name does not
+//! end in a data-file extension: COPY ... TO 'out.csv' (FORMAT sheet_range)
+//! is far likelier a mistyped FORMAT than a wish for a Sheet called
+//! "out.csv". An EXISTING Sheet with such a name is written into as usual.
+SheetTargetAction DecideSheetTarget(bool found, const std::string &mime_type, SheetTargetForm form,
+                                    bool create_allowed, const std::string &name);
+
+//! Ends in .csv .tsv .parquet .json .jsonl .ndjson .xlsx .xls .txt, any case.
+bool HasDataFileExtension(const std::string &name);
 
 // --- Reading responses --------------------------------------------------------
 

@@ -14,9 +14,11 @@
 #include <cstdint>
 #include <unordered_map>
 #include <unordered_set>
+#include <cstdio>
 #include <cstring>
 #include <functional>
 #include <limits>
+#include <random>
 #include <utility>
 #include "gdrive_banner.hpp"
 #include "duckdb_compat.hpp"
@@ -529,6 +531,166 @@ std::string GDriveFileSystem::DisambiguatePath(const std::string &parent_path, c
 	return JoinGDrivePath(parent_path, meta.name);
 }
 
+GDriveWriteTarget GDriveFileSystem::PrepareWriteTarget(GDriveClient &client, const GDriveAuthContext &auth,
+                                                       const GDriveUri &uri, const std::string &path,
+                                                       bool reserve_leaf) {
+	GDriveWriteTarget t;
+	// Ids reserved for the missing part of the parent chain (AND the leaf,
+	// when `reserve_leaf`) in one files.generateIds, so every folder create
+	// below is retry-safe.
+	std::vector<std::string> chain_ids;
+	size_t next_chain_id = 0;
+	t.name = uri.FileName();
+	if (t.name.empty()) {
+		throw IOException("gdrive: '%s' does not name a file to write", path);
+	}
+
+	// Walk the parent chain, creating any missing intermediate
+	// folder along the way (mkdir -p semantics for the write path --
+	// COPY TO a nested scratch path should not require a separate
+	// CreateDirectory call first). Read-side resolution never does
+	// this; only writing does.
+	t.parent_id = RootFolderFor(auth);
+	std::string parent_path_accum;
+	// O-2: once a segment turns out to be missing, we CREATE it -- and
+	// nothing inside a folder that did not exist a moment ago can
+	// exist either. Every deeper existence probe is then answerable
+	// without asking Drive. Measured on a DuckLake CTAS: five listings
+	// where one is needed, each ~330 ms on the critical path.
+	bool parent_is_new = false;
+	for (size_t i = 0; i + 1 < uri.segments.size(); i++) {
+		const auto &segment = uri.segments[i];
+		parent_path_accum += (parent_path_accum.empty() ? "" : "/") + segment;
+
+		CacheKey key {auth.identity, auth.drive_id, auth.root_folder_id, parent_path_accum};
+		if (!parent_is_new) {
+			DriveFileMeta cached;
+			if (cache.TryGet(key, cached)) {
+				// A cache hit says "this path resolves", not "this path
+				// is a folder". The path cache is shared with the READ
+				// side, so a file written earlier in the session is in
+				// here too -- and using it as a parent sends Drive a
+				// file id, which it rejects with "The specified parent
+				// is not a folder": loud, but Drive's phrasing, and it
+				// names neither the offending segment nor the fix.
+				//
+				// Do NOT throw straight from the cached value: the entry
+				// may predate someone replacing that file with a folder,
+				// and refusing a write on stale evidence is its own bug.
+				// Drop the entry and fall through to the live check
+				// below, which re-lists and reaches the right answer
+				// either way. Only ever taken on the collision path, so
+				// the extra round trip is not on any hot path.
+				if (!cached.IsFolder()) {
+					cache.InvalidatePrefix(key);
+				} else {
+					t.parent_id = cached.id;
+					continue;
+				}
+			}
+			auto matches = ListByName(client, t.parent_id, segment, /*require_folder=*/true, path);
+			if (matches.size() > 1) {
+				ThrowAmbiguous(matches, path);
+			}
+			if (!matches.empty()) {
+				cache.Put(key, matches[0]);
+				t.parent_id = matches[0].id;
+				continue;
+			}
+			// No FOLDER of that name. Before creating one, check there
+			// is no FILE of that name either.
+			//
+			// ListByName above filters to folders, so a same-named file
+			// is invisible to it -- and Drive happily holds both. Left
+			// alone, this creates the folder beside the file and both
+			// become unaddressable by path: the R-4 ambiguity the rest
+			// of the extension refuses to manufacture. write_blob got
+			// this guard first; review pointed out COPY TO comes
+			// through here instead and was still poisoning paths.
+			//
+			// The extra listing is paid only for the FIRST missing
+			// segment: once one is created, parent_is_new short-
+			// circuits the rest of the chain (O-2).
+			auto any_kind = ListByName(client, t.parent_id, segment, /*require_folder=*/false, path);
+			// This listing is unfiltered, so it can also turn up a
+			// FOLDER that another writer created between the two calls.
+			// Adopt it: that is the outcome we wanted anyway, and
+			// reporting "a file of that name already exists" for a
+			// folder would be simply untrue.
+			const DriveFileMeta *existing_folder = nullptr;
+			const DriveFileMeta *existing_file = nullptr;
+			for (const auto &m : any_kind) {
+				(m.IsFolder() ? existing_folder : existing_file) = &m;
+			}
+			if (existing_file) {
+				throw IOException(
+				    "gdrive: cannot create directory '%s' under '%s': a file of that name already "
+				    "exists. Creating a folder beside it would leave two entries with one name, "
+				    "which Drive allows and which would make both unaddressable by path.",
+				    segment, path);
+			}
+			if (existing_folder) {
+				cache.Put(key, *existing_folder);
+				t.parent_id = existing_folder->id;
+				continue;
+			}
+			// Missing entirely. Fall through and create -- and remember,
+			// so the rest of the chain skips its probes.
+		}
+
+		if (chain_ids.empty()) {
+			// The first missing segment. Everything below it is missing
+			// too (O-2), so ONE reservation covers the rest of the chain
+			// plus the file itself. Fails closed: no ids, no create.
+			const auto missing_folders = uri.segments.size() - 1 - i;
+			chain_ids = ReserveFileIds(client, static_cast<int>(missing_folders + (reserve_leaf ? 1 : 0)), path);
+		}
+		auto resp = client.Upload("", t.parent_id, segment, "application/vnd.google-apps.folder", "",
+		                           chain_ids[next_chain_id++]);
+		if (!resp.ok) {
+			ThrowGDriveError(resp.error, path);
+		}
+		DriveFileMeta created;
+		if (!ParseFileMeta(resp.body, created)) {
+			throw IOException("gdrive: malformed metadata response creating folder for '%s'", path);
+		}
+		// O-3: cache the folder we just made, so a second write into
+		// the same directory re-walks nothing.
+		cache.Put(key, created);
+		t.parent_id = created.id;
+		parent_is_new = true;
+		t.folders_created++;
+	}
+
+	// Overwrite semantics (S-3.9): if a file with this name already
+	// exists in the (now-resolved) parent folder, remember its id so
+	// Close() updates it via files.update rather than creating a
+	// second file with the same name -- which would manufacture an
+	// R-4 collision.
+	//
+	// Skipped when the parent folder was created moments ago by the
+	// walk above: an empty folder cannot already contain this name, so
+	// the probe has exactly one possible answer. This is the same
+	// evidence O-2 uses, applied one level further down. It must NOT
+	// be skipped on any other basis -- getting it wrong manufactures
+	// the R-4 duplicate the probe exists to prevent.
+	if (!parent_is_new) {
+		auto existing_matches = ListByName(client, t.parent_id, t.name, /*require_folder=*/false, path);
+		if (existing_matches.size() > 1) {
+			ThrowAmbiguous(existing_matches, path);
+		} else if (existing_matches.size() == 1) {
+			t.exists = true;
+			t.existing = existing_matches[0];
+		}
+	}
+	if (reserve_leaf && !chain_ids.empty()) {
+		// The leaf is new (its parent was just created): the last reserved
+		// id is the file's.
+		t.leaf_reserved_id = chain_ids.back();
+	}
+	return t;
+}
+
 unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path_in, FileOpenFlags flags,
                                                   optional_ptr<FileOpener> opener) {
 	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, {
@@ -576,10 +738,9 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path_in, FileOpe
 		std::string parent_id;
 		std::string name;
 		std::string existing_id;
-		// Ids reserved for the missing part of the parent chain AND the file
-		// (one files.generateIds), so every create below is retry-safe.
-		std::vector<std::string> chain_ids;
-		size_t next_chain_id = 0;
+		// The file's id, when PrepareWriteTarget reserved it together with
+		// the parent folders it created (one files.generateIds).
+		std::string leaf_reserved_id;
 
 		if (parsed.uri.kind == GDriveUriKind::FILE_ID) {
 			// One files.get: an id names an EXISTING file, and the write must
@@ -598,148 +759,14 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path_in, FileOpe
 			RefuseReplacing(existing, path);
 			existing_id = parsed.uri.file_id;
 		} else {
-			name = parsed.uri.FileName();
-			if (name.empty()) {
-				throw IOException("gdrive: '%s' does not name a file to write", path);
+			auto target = PrepareWriteTarget(*client, auth, parsed.uri, path, /*reserve_leaf=*/true);
+			parent_id = target.parent_id;
+			name = target.name;
+			if (target.exists) {
+				RefuseReplacing(target.existing, path);
+				existing_id = target.existing.id;
 			}
-
-			// Walk the parent chain, creating any missing intermediate
-			// folder along the way (mkdir -p semantics for the write path --
-			// COPY TO a nested scratch path should not require a separate
-			// CreateDirectory call first). Read-side resolution never does
-			// this; only writing does.
-			parent_id = RootFolderFor(auth);
-			std::string parent_path_accum;
-			// O-2: once a segment turns out to be missing, we CREATE it -- and
-			// nothing inside a folder that did not exist a moment ago can
-			// exist either. Every deeper existence probe is then answerable
-			// without asking Drive. Measured on a DuckLake CTAS: five listings
-			// where one is needed, each ~330 ms on the critical path.
-			bool parent_is_new = false;
-			for (size_t i = 0; i + 1 < parsed.uri.segments.size(); i++) {
-				const auto &segment = parsed.uri.segments[i];
-				parent_path_accum += (parent_path_accum.empty() ? "" : "/") + segment;
-
-				CacheKey key {auth.identity, auth.drive_id, auth.root_folder_id, parent_path_accum};
-				if (!parent_is_new) {
-					DriveFileMeta cached;
-					if (cache.TryGet(key, cached)) {
-						// A cache hit says "this path resolves", not "this path
-						// is a folder". The path cache is shared with the READ
-						// side, so a file written earlier in the session is in
-						// here too -- and using it as a parent sends Drive a
-						// file id, which it rejects with "The specified parent
-						// is not a folder": loud, but Drive's phrasing, and it
-						// names neither the offending segment nor the fix.
-						//
-						// Do NOT throw straight from the cached value: the entry
-						// may predate someone replacing that file with a folder,
-						// and refusing a write on stale evidence is its own bug.
-						// Drop the entry and fall through to the live check
-						// below, which re-lists and reaches the right answer
-						// either way. Only ever taken on the collision path, so
-						// the extra round trip is not on any hot path.
-						if (!cached.IsFolder()) {
-							cache.InvalidatePrefix(key);
-						} else {
-							parent_id = cached.id;
-							continue;
-						}
-					}
-					auto matches = ListByName(*client, parent_id, segment, /*require_folder=*/true, path);
-					if (matches.size() > 1) {
-						ThrowAmbiguous(matches, path);
-					}
-					if (!matches.empty()) {
-						cache.Put(key, matches[0]);
-						parent_id = matches[0].id;
-						continue;
-					}
-					// No FOLDER of that name. Before creating one, check there
-					// is no FILE of that name either.
-					//
-					// ListByName above filters to folders, so a same-named file
-					// is invisible to it -- and Drive happily holds both. Left
-					// alone, this creates the folder beside the file and both
-					// become unaddressable by path: the R-4 ambiguity the rest
-					// of the extension refuses to manufacture. write_blob got
-					// this guard first; review pointed out COPY TO comes
-					// through here instead and was still poisoning paths.
-					//
-					// The extra listing is paid only for the FIRST missing
-					// segment: once one is created, parent_is_new short-
-					// circuits the rest of the chain (O-2).
-					auto any_kind = ListByName(*client, parent_id, segment, /*require_folder=*/false, path);
-					// This listing is unfiltered, so it can also turn up a
-					// FOLDER that another writer created between the two calls.
-					// Adopt it: that is the outcome we wanted anyway, and
-					// reporting "a file of that name already exists" for a
-					// folder would be simply untrue.
-					const DriveFileMeta *existing_folder = nullptr;
-					const DriveFileMeta *existing_file = nullptr;
-					for (const auto &m : any_kind) {
-						(m.IsFolder() ? existing_folder : existing_file) = &m;
-					}
-					if (existing_file) {
-						throw IOException(
-						    "gdrive: cannot create directory '%s' under '%s': a file of that name already "
-						    "exists. Creating a folder beside it would leave two entries with one name, "
-						    "which Drive allows and which would make both unaddressable by path.",
-						    segment, path);
-					}
-					if (existing_folder) {
-						cache.Put(key, *existing_folder);
-						parent_id = existing_folder->id;
-						continue;
-					}
-					// Missing entirely. Fall through and create -- and remember,
-					// so the rest of the chain skips its probes.
-				}
-
-				if (chain_ids.empty()) {
-					// The first missing segment. Everything below it is missing
-					// too (O-2), so ONE reservation covers the rest of the chain
-					// plus the file itself. Fails closed: no ids, no create.
-					const auto missing_folders = parsed.uri.segments.size() - 1 - i;
-					chain_ids = ReserveFileIds(*client, static_cast<int>(missing_folders + 1), path);
-				}
-				auto resp = client->Upload("", parent_id, segment, "application/vnd.google-apps.folder", "",
-				                           chain_ids[next_chain_id++]);
-				if (!resp.ok) {
-					ThrowGDriveError(resp.error, path);
-				}
-				DriveFileMeta created;
-				if (!ParseFileMeta(resp.body, created)) {
-					throw IOException("gdrive: malformed metadata response creating folder for '%s'", path);
-				}
-				// O-3: cache the folder we just made, so a second write into
-				// the same directory re-walks nothing.
-				cache.Put(key, created);
-				parent_id = created.id;
-				parent_is_new = true;
-			}
-
-			// Overwrite semantics (S-3.9): if a file with this name already
-			// exists in the (now-resolved) parent folder, remember its id so
-			// Close() updates it via files.update rather than creating a
-			// second file with the same name -- which would manufacture an
-			// R-4 collision.
-			//
-			// Skipped when the parent folder was created moments ago by the
-			// walk above: an empty folder cannot already contain this name, so
-			// the probe has exactly one possible answer. This is the same
-			// evidence O-2 uses, applied one level further down. It must NOT
-			// be skipped on any other basis -- getting it wrong manufactures
-			// the R-4 duplicate the probe exists to prevent.
-			if (!parent_is_new) {
-				auto existing_matches = ListByName(*client, parent_id, name, /*require_folder=*/false, path);
-				if (existing_matches.size() > 1) {
-					ThrowAmbiguous(existing_matches, path);
-				} else if (existing_matches.size() == 1) {
-					RefuseReplacing(existing_matches[0], path);
-					existing_id = existing_matches[0].id;
-				}
-			}
+			leaf_reserved_id = target.leaf_reserved_id;
 		}
 
 		DriveFileMeta placeholder;
@@ -749,11 +776,9 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path_in, FileOpe
 		handle->is_write = true;
 		handle->write_parent_id = parent_id;
 		handle->write_name = name;
-		if (!chain_ids.empty()) {
-			// The leaf is new (its parent was just created): the last
-			// reserved id is the file's.
-			handle->reserved_id = chain_ids.back();
-		}
+		// The leaf is new (its parent was just created): its id was reserved
+		// with the chain. Otherwise it is reserved on first use.
+		handle->reserved_id = leaf_reserved_id;
 		handle->upload = make_uniq<ChunkedUploadBuffer>(
 		    GetUBigIntSetting(opener, "gdrive_upload_chunk_bytes", 16ULL * 1024 * 1024));
 		return std::move(handle);
@@ -1466,10 +1491,13 @@ bool GDriveFileSystem::TryRemoveFile(const string &filename, optional_ptr<FileOp
 	// Never a native Google file (a Sheet, a Doc). TryRemoveFile is DuckDB's
 	// cleanup primitive -- a failed COPY calls it on every file it "created"
 	// (v1.5.6: the global state's destructor), and for FORMAT sheet_range that
-	// is the Sheet the COPY was writing INTO. Nothing this filesystem writes can
-	// create a native file (RefuseReplacing refuses to write one, and an upload
-	// is never converted), so no cleanup has a native file to remove. Removing
-	// one on purpose stays possible through RemoveFile / remove_file().
+	// is the Sheet the COPY was writing INTO. A file WRITE never makes a native
+	// file (RefuseReplacing refuses to write one, and an upload is never
+	// converted); the one thing that does is FORMAT sheet_range creating a
+	// missing Sheet (CreateNativeFile), and a Sheet it created is LEFT in place
+	// on a later failure, named in the error, so a re-run writes into it (user
+	// decision 2026-11-13). Either way no cleanup removes a native file.
+	// Removing one on purpose stays possible through RemoveFile / remove_file().
 	if (FileExists(filename, opener)) {
 		auto context = RequireOpener(opener, filename);
 		const string path = ToGDrivePath(filename);
@@ -1926,6 +1954,70 @@ std::vector<GDriveItem> GDriveFileSystem::ResolveItems(const string &path_in, op
 	}
 	items.push_back(std::move(item));
 	return items;
+}
+
+bool GDriveFileSystem::TryResolveLiteral(const string &path_in, optional_ptr<FileOpener> opener, DriveFileMeta &out) {
+	const string path = ToGDrivePath(path_in);
+	auto parsed = ParseGDriveUri(path);
+	if (!parsed.ok) {
+		throw InvalidInputException("gdrive: %s", parsed.error);
+	}
+	auto context = RequireOpener(opener, path);
+	if (!HasAnyGDriveSecret(context)) {
+		throw IOException("gdrive: no gdrive secret configured for '%s' -- %s", path, kNoSecretAdvice);
+	}
+	{
+		auto ctx = FileOpener::TryGetClientContext(opener);
+		cache.BeginQuery(ctx ? ctx->transaction.GetActiveQuery() : 0);
+	}
+	cache.SetMaxEntries(static_cast<idx_t>(GetUBigIntSetting(opener, "gdrive_path_cache_entries", 4096)));
+	auto auth = GetAuthContext(context, path);
+	auto client = CreateGDriveClient(auth);
+	return TryResolvePath(cache, *client, auth, parsed.uri, out);
+}
+
+GDriveNativeCreate GDriveFileSystem::CreateNativeFile(const string &path, optional_ptr<FileOpener> opener,
+                                                      const std::string &mime_type) {
+	auto parsed = ParseGDriveUri(path);
+	if (!parsed.ok) {
+		throw InvalidInputException("gdrive: %s", parsed.error);
+	}
+	if (parsed.uri.kind == GDriveUriKind::FILE_ID || !parsed.uri.version.empty()) {
+		// DecideSheetTarget creates only for a path; an id names no folder.
+		throw InternalException("gdrive: CreateNativeFile needs a gdrive:// path, got '%s'", path);
+	}
+	auto context = RequireOpener(opener, path);
+	if (!HasAnyGDriveSecret(context)) {
+		throw IOException("gdrive: no gdrive secret configured for '%s' -- %s", path, kNoSecretAdvice);
+	}
+	auto auth = GetAuthContext(context, path);
+	auto client = CreateGDriveClient(auth);
+	// Missing folders are created (mkdir -p, reserved ids, retry-safe); the
+	// native file itself cannot reserve one, so no id is asked for it.
+	auto target = PrepareWriteTarget(*client, auth, parsed.uri, path, /*reserve_leaf=*/false);
+	GDriveNativeCreate out;
+	if (target.exists) {
+		out.appeared = true;
+		out.meta = target.existing;
+		return out;
+	}
+	std::random_device rd;
+	std::mt19937_64 gen((static_cast<uint64_t>(rd()) << 32) ^ rd());
+	char nonce[33];
+	snprintf(nonce, sizeof(nonce), "%016llx%016llx", static_cast<unsigned long long>(gen()),
+	         static_cast<unsigned long long>(gen()));
+	auto resp = client->CreateNative(target.parent_id, target.name, mime_type, nonce);
+	if (!resp.ok) {
+		ThrowGDriveError(resp.error, path);
+	}
+	if (!ParseFileMeta(resp.body, out.meta)) {
+		throw IOException("gdrive: malformed metadata response creating '%s'", path);
+	}
+	// Remember it, so the next statement (a read_sheet_range of the new
+	// Sheet) does not depend on Drive's listing having caught up.
+	CacheKey key {auth.identity, auth.drive_id, auth.root_folder_id, CanonicalPathOf(parsed.uri)};
+	cache.Put(key, out.meta);
+	return out;
 }
 
 void GDriveFileSystem::AbortFileWrite(FileHandle &handle) {

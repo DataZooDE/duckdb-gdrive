@@ -4,9 +4,10 @@ description: >
   Google Sheets by tab and A1 range with the gdrive DuckDB extension:
   read_sheet_range(path, 'Tab!A1:F' [, header, all_varchar]) reads any tab or
   range, typed (dates, booleans, formula results); COPY ... TO '<Sheet>'
-  (FORMAT sheet_range, RANGE 'Tab!A1' [, HEADER b] [, OVERWRITE | APPEND])
-  writes into a tab in place through the Sheets API (missing tab created,
-  other tabs and formats kept). Covers A1 forms and quoting ('My Tab'!A1),
+  (FORMAT sheet_range, RANGE 'Tab!A1' [, HEADER b] [, OVERWRITE | APPEND]
+  [, CREATE b]) writes into a tab in place through the Sheets API (missing
+  tab created, other tabs and formats kept), and creates a new native Sheet
+  when a gdrive:// path names nothing. Covers A1 forms and quoting ('My Tab'!A1),
   OVERWRITE vs APPEND vs the default block write, atomicity and the 2 MB
   split, value typing (dates as dates, '=1+1' stays text, LIST refused), the
   drive scope and SERVICE_DISABLED errors. Use when reading a specific tab or
@@ -31,11 +32,30 @@ SELECT * FROM read_sheet_range('https://docs.google.com/spreadsheets/d/<id>/edit
 
 COPY forecast TO 'gdrive://Finance/sales' (FORMAT sheet_range, RANGE 'Forecast!A1', OVERWRITE);
 COPY new_rows TO 'gdrive://id:<id>'       (FORMAT sheet_range, RANGE 'Log!A1', APPEND);
+COPY summary  TO 'gdrive://Finance/2026/q3-summary' (FORMAT sheet_range, RANGE 'Summary!A1');  -- creates it
 ```
 
 Paths: `gdrive://…` (scheme optional for `read_sheet_range`), `gdrive://id:<id>`, or the
-browser address. The target must already be a **native Google Sheet** (a CSV/xlsx in Drive is
-refused; the COPY does not create a spreadsheet, only missing tabs).
+browser address. An existing target must be a **native Google Sheet** (a CSV/xlsx in Drive is
+refused, never replaced).
+
+## Creating a Sheet (not in v2026.11.13 or earlier)
+- A `gdrive://` **path that names nothing** gets a new native Sheet (missing folders too);
+  its one tab is renamed to the RANGE's tab, written in the same atomic request. `OVERWRITE` /
+  `APPEND` into a new Sheet = a block at the anchor, header included. `CREATE false` opts out
+  ("no such Sheet"); `CREATE` takes only true/false.
+- `gdrive://id:` and browser addresses never create: they must name an existing Sheet.
+- Names ending `.csv .tsv .parquet .json .jsonl .ndjson .xlsx .xls .txt` (any case) are refused
+  for creation — "Drop the extension for a Sheet, or use FORMAT csv / FORMAT parquet". An
+  existing Sheet with such a name is written into.
+- Created LAST (after the query finished and the block fit), so a failing query creates nothing.
+  A Sheets error after the create leaves the Sheet in place; the error names its id and says
+  "left in place empty" (or partially written) — re-run the COPY to write into it.
+- Sent once, never retried (Drive refuses reserved ids for native files); a lost answer is
+  looked up by a marker. "may not have been created; nothing was retried; it is safe to re-run"
+  means the lookup found nothing. Two writers creating the same Sheet at once can make two.
+- Cost: one `files_create`, one `sheets_update`, no `sheets_get`. duckdb-sharepoint's
+  `excel_range` does not create workbooks.
 
 ## Ranges (A1, tab required)
 `Tab!A1:F200`, `Tab!A1:F` (open rows), `Tab!A:F`, `Tab!2:5`, bare `Tab`, `Tab!B2` (a cell /
@@ -77,3 +97,6 @@ SQL string literal double the quotes: `'''Q3 plan''!A1'`. `A1:B2` with no tab is
 - `… is not enabled in the Google Cloud project …`: run the printed
   `gcloud services enable sheets.googleapis.com --project <project>`.
 - `has no tab 'X'`: check the tab name (case and spaces matter).
+- `no such Sheet` on a COPY: an `id:`/address of nothing, or `CREATE false`.
+- `appeared while the COPY ran`: something took the name between the check and the create;
+  re-run to write into it if it is a Sheet.
