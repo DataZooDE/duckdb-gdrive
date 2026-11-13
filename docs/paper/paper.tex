@@ -451,8 +451,10 @@ Drive offers \texttt{files.generateIds}, which reserves an id without creating
 anything. We reserve first and create with the reserved id, which makes the
 create idempotent: a retry either succeeds, or returns \texttt{409}, and the
 \texttt{409} is positive evidence that the first attempt landed --- but only
-with the reason \texttt{fileIdInUse}, and only after re-fetching the id shows
-the object we meant to make. The same holds for folders and for the final
+with the reason \texttt{fileIdInUse}, only when an earlier attempt of the same
+call went unanswered, and only after re-fetching the id shows the object we
+meant to make. A \texttt{fileIdInUse} with no unanswered attempt cannot be
+ours, and is reported as an error naming the id. The same holds for folders and for the final
 chunk of a resumable upload session, so every create carries one: a write into
 a new subtree reserves the whole folder chain and the file in a single call,
 and a create that cannot reserve an id is refused before anything is sent.

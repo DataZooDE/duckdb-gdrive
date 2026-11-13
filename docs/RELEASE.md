@@ -230,7 +230,9 @@ still blocks is the decision below.
 
   Fixed 2026-11-13: every create (file, folder, resumable session) carries an
   id reserved with `files.generateIds`, and is refused if none can be had; a
-  repeat answers `409 fileIdInUse`, adopted only after the id is looked up.
+  repeat answers `409 fileIdInUse`, adopted only when an earlier attempt of the same
+  call went unanswered and the id is looked up (any other `fileIdInUse` is a
+  loud error naming the id).
   Overwrites, moves and trashes set absolute state by id and are retried.
   Check before tagging that no new write path sends a create without a
   reserved id (`IsRetrySafe` in `src/gdrive_upload_plan.cpp` is the rule;

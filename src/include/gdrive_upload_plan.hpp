@@ -188,7 +188,8 @@ bool IsRetrySafe(WriteKind kind, bool has_reserved_id);
 //! What a create's FINAL reply -- after the transport's own retries -- means.
 enum class CreateOutcome {
 	DONE,           //!< 2xx: created, the body is the new object
-	ADOPT_RESERVED, //!< 409 fileIdInUse on a reserved id: an earlier attempt landed
+	ADOPT_RESERVED, //!< 409 fileIdInUse after an unanswered attempt: that attempt landed
+	ID_IN_USE,      //!< 409 fileIdInUse with NO unanswered attempt: someone else has our id
 	CHECK_RESERVED, //!< no usable answer (transport / 5xx): look the reserved id up
 	FAIL_CLEAN,     //!< Drive refused the request: nothing was created
 	FAIL_UNKNOWN    //!< no usable answer and no reserved id: outcome unknown
@@ -196,8 +197,13 @@ enum class CreateOutcome {
 
 //! `reason` is Google's errors[0].reason (GDriveError::reason).
 //! `transport_ok` false means no HTTP response at all.
+//! `had_ambiguous_attempt`: an EARLIER attempt of this same call went
+//! unanswered (transport failure or 5xx) and so may have landed. STRICT: only
+//! then is a 409 fileIdInUse ours. Without one, the id was never used by us,
+//! so a 409 is a foreign use of a reserved id -- a bug or a concurrent writer
+//! -- and must be a loud error, never silently adopted.
 CreateOutcome InterpretCreateReply(bool transport_ok, int status, const std::string &reason,
-                                   bool has_reserved_id);
+                                   bool has_reserved_id, bool had_ambiguous_attempt);
 
 //! Did a move whose reply was lost land? From the file's own state, read back
 //! by id: it carries the target name and sits under the target parent (and,

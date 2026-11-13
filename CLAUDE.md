@@ -471,8 +471,14 @@ folder, no media part), and the repeat answers `409` with `errors[0].reason
 "fileIdInUse"` -- byte-identical to the file case and to a resumable session's
 final chunk, whose session also accepts `id` in its initiation metadata and
 publishes under it (nothing exists under the id before the final chunk: 404).
-The same `409` comes back for the reserved id under a DIFFERENT name, so a 409
-is adopted only after `files.get` on the id shows our name and kind. A
+The same `409` comes back for the reserved id under a DIFFERENT name, so the
+409 policy is STRICT (user decision): it is adopted as "our earlier attempt
+landed" ONLY when an earlier attempt of the same call went unanswered
+(`DriveResponse::had_ambiguous_attempt`, set by `ExecuteWithRetry` on a
+re-sent transport failure or 5xx -- not a 429) AND `files.get` on the id shows
+our name and kind. A 409 `fileIdInUse` with no unanswered attempt is
+`CreateOutcome::ID_IN_USE`: a loud error naming the id, because a foreign use
+of a reserved id is a bug or a concurrent writer. A
 never-issued id is `400 fileIdNotUsable`. A repeated move PATCH (name +
 addParents + removeParents) and a repeated `{trashed:true}` both answer 200
 with the same state, and a repeated content PATCH just adds a revision. So the

@@ -136,9 +136,18 @@ void UploadHandleContents(GDriveClient &client, GDriveFileHandleImpl &handle) {
 		// its body the file's metadata. A lost reply is recovered inside
 		// UploadChunk by asking the session, which then answers 200 + file.
 		resp = client.UploadChunk(handle.upload_session, buf, /*final=*/true);
-		if (!resp.ok && !handle.reserved_id.empty() &&
-		    InterpretCreateReply(resp.http_status != 0, resp.http_status, resp.error.reason, true) ==
-		        CreateOutcome::CHECK_RESERVED) {
+		const auto outcome =
+		    resp.ok || handle.reserved_id.empty()
+		        ? CreateOutcome::DONE
+		        : InterpretCreateReply(resp.http_status != 0, resp.http_status, resp.error.reason, true,
+		                               resp.had_ambiguous_attempt);
+		if (outcome == CreateOutcome::ID_IN_USE) {
+			resp.error.kind = GDriveErrorKind::UNKNOWN;
+			resp.error.message = "Drive reports the id reserved for this file (" + handle.reserved_id +
+			                     ") is already in use, but no earlier attempt went unanswered, so it is not ours. "
+			                     "That is a bug or a concurrent writer; this write published nothing.";
+		}
+		if (outcome == CreateOutcome::CHECK_RESERVED || outcome == CreateOutcome::ADOPT_RESERVED) {
 			// Every answer to the final chunk was lost. The session publishes
 			// under the reserved id, so the id says what happened.
 			auto meta_resp = client.GetMetadata(handle.reserved_id);

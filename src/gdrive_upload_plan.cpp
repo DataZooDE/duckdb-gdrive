@@ -200,14 +200,15 @@ bool IsRetrySafe(WriteKind kind, bool has_reserved_id) {
 }
 
 CreateOutcome InterpretCreateReply(bool transport_ok, int status, const std::string &reason,
-                                   bool has_reserved_id) {
+                                   bool has_reserved_id, bool had_ambiguous_attempt) {
 	if (transport_ok && status >= 200 && status < 300) {
 		return CreateOutcome::DONE;
 	}
-	// Only THIS reason proves the reserved id is taken. Any other 409 is a
+	// Only THIS reason proves the reserved id is taken, and only an earlier
+	// unanswered attempt of ours can have taken it. Any other 409 is a
 	// refusal like any other 4xx.
 	if (transport_ok && status == 409 && reason == "fileIdInUse" && has_reserved_id) {
-		return CreateOutcome::ADOPT_RESERVED;
+		return had_ambiguous_attempt ? CreateOutcome::ADOPT_RESERVED : CreateOutcome::ID_IN_USE;
 	}
 	if (!transport_ok || status >= 500) {
 		return has_reserved_id ? CreateOutcome::CHECK_RESERVED : CreateOutcome::FAIL_UNKNOWN;

@@ -802,16 +802,29 @@ public:
 	DriveResponse FinishCreate(DriveResponse resp, const std::string &reserved_id, const std::string &name,
 	                           bool is_folder) {
 		const bool transport_ok = resp.ok || resp.http_status != 0;
-		switch (InterpretCreateReply(transport_ok, resp.http_status, resp.error.reason, !reserved_id.empty())) {
+		switch (InterpretCreateReply(transport_ok, resp.http_status, resp.error.reason, !reserved_id.empty(),
+		                             resp.had_ambiguous_attempt)) {
 		case CreateOutcome::DONE:
 		case CreateOutcome::FAIL_CLEAN:
 		case CreateOutcome::FAIL_UNKNOWN:
+			return resp;
+		case CreateOutcome::ID_IN_USE:
+			resp.error.kind = GDriveErrorKind::UNKNOWN;
+			resp.error.message = ReservedIdInUseMessage(reserved_id);
 			return resp;
 		case CreateOutcome::ADOPT_RESERVED:
 		case CreateOutcome::CHECK_RESERVED:
 			break;
 		}
 		return LookUpReserved(std::move(resp), reserved_id, name, is_folder);
+	}
+
+	//! No attempt of ours went unanswered, so none can own the id: a foreign
+	//! use of a reserved id, which is never adopted.
+	static std::string ReservedIdInUseMessage(const std::string &reserved_id) {
+		return "Drive reports the id reserved for this create (" + reserved_id +
+		       ") is already in use, but no earlier attempt of this create went unanswered, so it is not ours. "
+		       "That is a bug or a concurrent writer; nothing was created by this call.";
 	}
 
 	//! Is the object under our reserved id the one we meant to create? An
@@ -962,6 +975,7 @@ public:
 			response.ok = false;
 			response.http_status = raw.transport_ok ? raw.status : 0;
 			response.body = raw.body;
+			response.had_ambiguous_attempt = final && state.final_maybe_sent;
 			if (step.ambiguous) {
 				// The final chunk may have reached Drive and published the file;
 				// only its replies were lost. Same honesty as the multipart path.
@@ -1294,6 +1308,7 @@ private:
 		// gets a token that is valid now, not the one it was opened with.
 		std::string access_token = tokens_->Token();
 		bool refreshed = false;
+		bool had_ambiguous_attempt = false;
 		for (;;) {
 			++attempt;
 			stats_.*counter += 1;
@@ -1347,10 +1362,12 @@ private:
 				if ((retry_non_idempotent || IsIdempotent(method)) && attempt < kMaxAttempts) {
 					stats_.retries += 1;
 					RecordGlobalRetry();
+					had_ambiguous_attempt = true;
 					SleepBackoff(attempt, 0);
 					continue;
 				}
 				DriveResponse response;
+				response.had_ambiguous_attempt = had_ambiguous_attempt;
 				response.ok = false;
 				response.http_status = 0;
 				response.error.kind = GDriveErrorKind::TRANSIENT;
@@ -1387,6 +1404,7 @@ private:
 				response.http_status = raw.status;
 				response.body = std::move(raw.body);
 				response.location = std::move(raw.location);
+				response.had_ambiguous_attempt = had_ambiguous_attempt;
 				return response;
 			}
 
@@ -1428,11 +1446,16 @@ private:
 			if (retryable && attempt < kMaxAttempts && (retry_non_idempotent || IsIdempotent(method))) {
 				stats_.retries += 1;
 				RecordGlobalRetry();
+				// A 5xx may have been applied; a 429 was refused before anything.
+				if (err.kind == GDriveErrorKind::TRANSIENT) {
+					had_ambiguous_attempt = true;
+				}
 				SleepBackoff(attempt, err.retry_after_seconds);
 				continue;
 			}
 
 			DriveResponse response;
+			response.had_ambiguous_attempt = had_ambiguous_attempt;
 			response.ok = false;
 			response.http_status = raw.status;
 			response.body = raw.body;

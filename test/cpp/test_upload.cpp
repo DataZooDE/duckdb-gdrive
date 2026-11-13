@@ -390,34 +390,47 @@ TEST_CASE("a create is retry-safe only with a reserved id; overwrite, move and t
 	}
 }
 
-TEST_CASE("the captured 409 fileIdInUse body adopts the reserved id", "[upload][retry]") {
+TEST_CASE("the captured 409 fileIdInUse body adopts the reserved id only after an unanswered attempt",
+          "[upload][retry]") {
 	auto err = ClassifyDriveError(409, kFileIdInUse);
 	REQUIRE(err.reason == "fileIdInUse");
-	REQUIRE(InterpretCreateReply(true, 409, err.reason, true) == CreateOutcome::ADOPT_RESERVED);
+	// An earlier attempt of this call went unanswered: it may have landed, and
+	// the 409 says it did.
+	REQUIRE(InterpretCreateReply(true, 409, err.reason, true, true) == CreateOutcome::ADOPT_RESERVED);
 	// Without a reservation of ours, the 409 proves nothing about us.
-	REQUIRE(InterpretCreateReply(true, 409, err.reason, false) == CreateOutcome::FAIL_CLEAN);
+	REQUIRE(InterpretCreateReply(true, 409, err.reason, false, true) == CreateOutcome::FAIL_CLEAN);
+}
+
+TEST_CASE("STRICT: a 409 fileIdInUse with no unanswered attempt is a foreign use of our id", "[upload][retry]") {
+	auto err = ClassifyDriveError(409, kFileIdInUse);
+	// Every attempt was answered, so none of ours can hold the id: a bug or a
+	// concurrent writer. Loud, never adopted.
+	REQUIRE(InterpretCreateReply(true, 409, err.reason, true, false) == CreateOutcome::ID_IN_USE);
+	// Any other 409 stays a plain refusal either way.
+	REQUIRE(InterpretCreateReply(true, 409, "conflict", true, false) == CreateOutcome::FAIL_CLEAN);
+	REQUIRE(InterpretCreateReply(true, 409, err.reason, false, false) == CreateOutcome::FAIL_CLEAN);
 }
 
 TEST_CASE("only fileIdInUse makes a 409 ours", "[upload][retry]") {
-	REQUIRE(InterpretCreateReply(true, 409, "", true) == CreateOutcome::FAIL_CLEAN);
-	REQUIRE(InterpretCreateReply(true, 409, "conflict", true) == CreateOutcome::FAIL_CLEAN);
+	REQUIRE(InterpretCreateReply(true, 409, "", true, true) == CreateOutcome::FAIL_CLEAN);
+	REQUIRE(InterpretCreateReply(true, 409, "conflict", true, true) == CreateOutcome::FAIL_CLEAN);
 	auto err = ClassifyDriveError(400, kFileIdNotUsable);
 	REQUIRE(err.reason == "fileIdNotUsable");
-	REQUIRE(InterpretCreateReply(true, 400, err.reason, true) == CreateOutcome::FAIL_CLEAN);
+	REQUIRE(InterpretCreateReply(true, 400, err.reason, true, true) == CreateOutcome::FAIL_CLEAN);
 }
 
 TEST_CASE("a create's final reply: done, refused, or looked up by its reserved id", "[upload][retry]") {
-	REQUIRE(InterpretCreateReply(true, 200, "", true) == CreateOutcome::DONE);
-	REQUIRE(InterpretCreateReply(true, 201, "", false) == CreateOutcome::DONE);
+	REQUIRE(InterpretCreateReply(true, 200, "", true, true) == CreateOutcome::DONE);
+	REQUIRE(InterpretCreateReply(true, 201, "", false, true) == CreateOutcome::DONE);
 	// No usable answer: with a reserved id the id says what happened.
-	REQUIRE(InterpretCreateReply(false, 0, "", true) == CreateOutcome::CHECK_RESERVED);
-	REQUIRE(InterpretCreateReply(true, 503, "backendError", true) == CreateOutcome::CHECK_RESERVED);
-	REQUIRE(InterpretCreateReply(false, 0, "", false) == CreateOutcome::FAIL_UNKNOWN);
-	REQUIRE(InterpretCreateReply(true, 500, "", false) == CreateOutcome::FAIL_UNKNOWN);
+	REQUIRE(InterpretCreateReply(false, 0, "", true, true) == CreateOutcome::CHECK_RESERVED);
+	REQUIRE(InterpretCreateReply(true, 503, "backendError", true, true) == CreateOutcome::CHECK_RESERVED);
+	REQUIRE(InterpretCreateReply(false, 0, "", false, true) == CreateOutcome::FAIL_UNKNOWN);
+	REQUIRE(InterpretCreateReply(true, 500, "", false, true) == CreateOutcome::FAIL_UNKNOWN);
 	// A 4xx is decided before Drive applies anything -- 429 included.
-	REQUIRE(InterpretCreateReply(true, 429, "rateLimitExceeded", true) == CreateOutcome::FAIL_CLEAN);
-	REQUIRE(InterpretCreateReply(true, 403, "insufficientFilePermissions", true) == CreateOutcome::FAIL_CLEAN);
-	REQUIRE(InterpretCreateReply(true, 404, "notFound", true) == CreateOutcome::FAIL_CLEAN);
+	REQUIRE(InterpretCreateReply(true, 429, "rateLimitExceeded", true, true) == CreateOutcome::FAIL_CLEAN);
+	REQUIRE(InterpretCreateReply(true, 403, "insufficientFilePermissions", true, true) == CreateOutcome::FAIL_CLEAN);
+	REQUIRE(InterpretCreateReply(true, 404, "notFound", true, true) == CreateOutcome::FAIL_CLEAN);
 }
 
 TEST_CASE("a move whose reply was lost has landed only if the file says so", "[upload][retry]") {

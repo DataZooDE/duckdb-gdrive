@@ -111,6 +111,10 @@ struct DriveResponse {
 	GDriveError error;
 	//! The Location header, when Drive sent one (a resumable session URI).
 	std::string location;
+	//! An attempt before the final one went unanswered (transport failure or
+	//! 5xx) and was re-sent, so it may have been applied. What makes a later
+	//! 409 fileIdInUse "ours" (InterpretCreateReply).
+	bool had_ambiguous_attempt = false;
 };
 
 class GDriveClient {
@@ -169,8 +173,10 @@ public:
 
 	//! Creates when `file_id` is empty, overwrites its content otherwise. A
 	//! create must carry `reserved_id`; with one, it is retried freely and its
-	//! final reply is interpreted by InterpretCreateReply: a 409 fileIdInUse,
-	//! or no usable answer at all, is resolved by looking the id up, so the
+	//! final reply is interpreted by InterpretCreateReply: a 409 fileIdInUse
+	//! after an unanswered attempt (STRICT: never without one -- that is a
+	//! loud error naming the id), or no usable answer at all, is resolved by
+	//! looking the id up, so the
 	//! caller sees either the created object or an error that means nothing
 	//! was created (or, when even that lookup fails, that re-running is safe).
 	//! An overwrite is retried too: the same bytes on the same id.
