@@ -41,6 +41,11 @@ enum class GDriveErrorKind {
 	//! application-default login` without --scopes, whose default
 	//! (cloud-platform) does not include Drive.
 	INSUFFICIENT_SCOPE,
+	//! 403 whose details[] carry reason "SERVICE_DISABLED": the Google Cloud
+	//! project the request is billed to has not enabled this API (the Sheets
+	//! API, typically -- Drive works, read_sheet_range does not). Nothing about
+	//! the file or the token; the fix is one `gcloud services enable`.
+	SERVICE_DISABLED,
 	//! 403 storageQuotaExceeded and friends -- a *storage* limit, not a rate
 	//! limit. Notably what a service account hits when writing outside a
 	//! Shared Drive.
@@ -67,6 +72,10 @@ struct GDriveError {
 	std::string reason;
 	//! Google's human-readable `error.message`, verbatim.
 	std::string message;
+	//! SERVICE_DISABLED: the API ("sheets.googleapis.com") and the project
+	//! ("projects/123456") from the ErrorInfo metadata, when Google sent them.
+	std::string service;
+	std::string consumer;
 	//! From a Retry-After header when present, else 0. Only meaningful for
 	//! RATE_LIMIT and TRANSIENT.
 	int retry_after_seconds = 0;
