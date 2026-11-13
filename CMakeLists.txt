@@ -117,6 +117,7 @@ file(GLOB PURE_SOURCES CONFIGURE_DEPENDS
     src/gdrive_rows.cpp
     src/gdrive_change_scope.cpp
     src/gdrive_weburl.cpp
+    src/gdrive_sheets.cpp
 )
 
 # ---------------------------------------------------------------------------

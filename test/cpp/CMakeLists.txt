@@ -65,6 +65,7 @@ add_executable(gdrive_unit_tests
     ${GD_ROOT}/src/gdrive_rows.cpp
     ${GD_ROOT}/src/gdrive_change_scope.cpp
     ${GD_ROOT}/src/gdrive_weburl.cpp
+    ${GD_ROOT}/src/gdrive_sheets.cpp
     ${GD_TESTS}
 )
 # Same ODR-relevant define as the extension build (see the root CMakeLists).
