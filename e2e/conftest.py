@@ -101,7 +101,7 @@ def fixtures_root(drive: Drive) -> str:
     found = drive.list_children(drive.drive_id, name=fx.FIXTURES_ROOT)
     if not found:
         pytest.fail(
-            f"no /{fx.FIXTURES_ROOT} folder in Shared Drive {drive.drive_id}. "
+            f"no /{fx.FIXTURES_ROOT} folder in CI root {drive.drive_id}. "
             "Run `make seed_fixtures` first."
         )
     if len(found) > 1:

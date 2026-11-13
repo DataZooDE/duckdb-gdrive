@@ -1,4 +1,4 @@
-"""Seed the permanent, read-only fixture tree into the CI Shared Drive.
+"""Seed the permanent, read-only fixture tree into the CI root (GDRIVE_CI_DRIVE_ID).
 
 Idempotent: run it as often as you like. A file is re-uploaded only when its
 content checksum differs from what Drive holds, so the 100 MB Parquet is
@@ -6,7 +6,7 @@ transferred once and then left alone.
 
     make seed_fixtures
 
-Layout produced under the Shared Drive root::
+Layout produced under the CI root (a My Drive folder today, or a Shared Drive)::
 
     /fixtures/
         small.csv                empty.csv
@@ -248,7 +248,7 @@ def main() -> int:
     except DriveConfigError as e:
         print(f"cannot seed: {e}", file=sys.stderr)
         return 2
-    print(f"seeding Shared Drive {drive.drive_id} ...")
+    print(f"seeding CI root {drive.drive_id} ...")
     seed(drive)
     print("done.")
     return 0

@@ -19,7 +19,7 @@ the code that cites it.
 | **D-2** | `datazoo-oauth2` is built first and consumed here immediately; the `erpl-web` migration is deferred. | Time-boxed debt against REQ-A-02. Until it lands, no logic change is made to the extracted code that `erpl-web` would need to absorb. **Status 2026-11-13: migration done structurally** (erpl-web is now `erpl-odata`, submodule at the same pin, no copy left), **D-12 live gate not yet run**, so the freeze still holds. |
 | **D-3** | No FUSE/rclone benchmark, no go/no-go gate. | BRD §9's strongest alternative stays formally unanswered, so the README answers it in prose ("When you should NOT use this"). The GCS comparison still ships — REQ-NF-01 requires it. |
 | **D-4** | Public `github.com/DataZooDE/duckdb-gdrive`, target name `gdrive`, scheme `gdrive://`. | `INSTALL gdrive; LOAD gdrive;` after community acceptance. |
-| **D-5** | **Shared Drives are in v1.** Not a preference: a service account has no personal Drive storage quota and cannot own files in a My Drive, so CI fixtures *must* live in a Shared Drive. | The secret carries an optional `drive_id` root binding. Personal Drive works for user-OAuth secrets. |
+| **D-5** | **Shared Drives are in v1.** Not a preference: a service account has no personal Drive storage quota and cannot own files in a My Drive, so a service-account-only user can write nowhere else. | The secret carries an optional `drive_id` root binding. Personal Drive works for user-OAuth secrets. **CI does not exercise the Shared Drive path yet:** its fixtures live in a My Drive folder (writes as the delegated user), and `gdrive_shared_drive.test` runs only once a `GDRIVE_CI_SHARED_DRIVE_ID` secret exists -- see "Known gap" under Live-test credentials. |
 | **D-6** | **`RemoveFile` trashes by default**; `SET gdrive_permanent_delete=true` opts into `files.delete`. | Trash is recoverable; a table-format cleanup routine deleting the wrong thing on someone's own Drive is not. |
 | **D-7** | **Docs export to `text/plain`** by default (`gdrive_docs_export_mime` to change); Sheets always `text/csv`. | Markdown is not byte-stable across exports, which would make `GetVersionTag`-keyed caching lie. |
 | **D-8** | Owner of `datazoo-oauth2`: Joachim Rosskopf (REQ-NF-06). | — |
@@ -140,25 +140,37 @@ Run one thing:
 
 One-time setup: `./scripts/setup_ci_drive.sh`, then `make seed_fixtures`.
 
-**A Shared Drive is required, not preferred.** A service account has no
-personal Drive storage quota; uploading anything outside a Shared Drive
-returns `403 storageQuotaExceeded` with the message *"Service Accounts do not
-have storage quota. Leverage shared drives…"*. Folder *creation* succeeds
-(folders consume no quota), so the failure looks like a permissions problem
-right up until you try to write a byte. Verified against the real API
-2026-07-26.
+**What CI actually runs against (verified 2026-11-13).** `GDRIVE_CI_DRIVE_ID`
+is NOT a Shared Drive. It is a plain folder named `duckdb-gdrive` in the
+delegated user's **My Drive** (owned by that data-zoo.de user, no `driveId`;
+`drives.get` on it answers 404), shared with the CI service account as
+`writer`. Live tests therefore bind it as `ROOT_FOLDER_ID` -- the templates'
+`${DRIVE_ID}` placeholder is that folder id, despite its name. The harness
+detects which kind of root it has (`Drive._detect_shared_drive`).
 
-Creating the Shared Drive itself needs a Google **Workspace user** —
-`drives.create` refuses a bare service account. That step is manual and the
-setup script walks you through it.
+That works because of who writes. A service account has no Drive storage
+quota: any upload that the SA would OWN -- i.e. anywhere outside a Shared
+Drive, which owns its own content -- returns `403 storageQuotaExceeded`
+(*"Service Accounts do not have storage quota. Leverage shared drives…"*).
+Folder *creation* succeeds (folders consume no quota), so the failure looks
+like a permissions problem right up until you try to write a byte. Verified
+against the real API 2026-07-26. So the SA only reads, and everything that
+creates content runs as the delegated user, whose quota pays for it.
+
+**The Shared Drive path (D-5) is not exercised by the main live suite.** A
+separate, optional Shared Drive (`GDRIVE_CI_SHARED_DRIVE_ID`) backs
+`test/sql/gdrive_shared_drive.test.template`; see "Known gap" below.
+Creating a Shared Drive needs a Google **Workspace user** -- `drives.create`
+refuses a bare service account -- so that step is manual and
+`scripts/setup_ci_drive.sh` walks you through it.
 
 ### Two identities, and why
 
 Reads run as the **service account**; writes and fixture seeding run as a
 **delegated user**. That is not a style choice — a service account has no
-Drive storage quota and gets `403 storageQuotaExceeded` on *any* upload
-outside a Shared Drive, so it literally cannot create the fixtures it then
-reads.
+Drive storage quota and gets `403 storageQuotaExceeded` on any upload it
+would own, i.e. anywhere outside a Shared Drive. In the My Drive folder CI
+uses, it literally cannot create the fixtures it then reads.
 
 `make oauth_consent` does the one-time browser consent and stores the refresh
 token in `.env.gdrive`.
@@ -169,9 +181,25 @@ stored as repository secrets:
 | Secret | Used for |
 |---|---|
 | `GDRIVE_CI_SA_KEY_B64` | service-account key, base64 — reads |
-| `GDRIVE_CI_DRIVE_ID` | the fixture root (folder id, or a Shared Drive id) |
+| `GDRIVE_CI_DRIVE_ID` | the fixture root: today a My Drive folder of the delegated user, shared with the SA (the harness also accepts a Shared Drive id) |
 | `GDRIVE_OAUTH_CLIENT_ID` / `GDRIVE_OAUTH_CLIENT_SECRET` | the OAuth client |
 | `GDRIVE_USER_REFRESH_TOKEN` | delegated user — writes and seeding |
+| `GDRIVE_CI_SHARED_DRIVE_ID` | *optional, not yet created*: a Shared Drive with both the SA and the delegated user as members, for `gdrive_shared_drive.test` (D-5) |
+
+**Known gap: no live test of `DRIVE_ID` runs yet.** No Shared Drive exists
+for CI, so `GDRIVE_CI_SHARED_DRIVE_ID` is unset everywhere and the materialiser
+leaves `gdrive_shared_drive.test.template` out, printing a WARNING. It is
+deliberately NOT in the required live set: "a gate that can skip will
+eventually skip" cuts both ways, and requiring a secret nobody can provision
+would only make every run red. To close the gap: (1) a Workspace USER creates
+a Shared Drive (`setup_ci_drive.sh` step 5) and adds the SA as **Content manager** and the
+delegated user as **Manager** (teardown permanently deletes the run folder); (2) store its id as `GDRIVE_CI_SHARED_DRIVE_ID`
+(locally in `.env.gdrive`, in CI as a repository secret -- the workflow
+already passes it); (3) make it required by setting
+`GDRIVE_REQUIRE_SHARED_DRIVE=1` in the live job, which turns the materialiser's
+warning into a failure. Until then `make test_live` and CI cannot catch a
+`DRIVE_ID` regression. The template was written without a Shared Drive to run
+it against, so expect to adjust it the first time it runs.
 
 A Google refresh token does not expire on a timer, but it *is* revoked if the
 user revokes access, if the OAuth client is deleted, or after ~6 months
@@ -191,9 +219,15 @@ died on the include before reaching any target -- a job that fails in 3
 seconds looks like an infrastructure blip. (2) `sweep()` let a single failed
 delete propagate, so even run by hand it removed one folder of 61 and stopped.
 (3) It authenticated as the SERVICE ACCOUNT, but scratch folders are created by
-writes, and writes run as the DELEGATED USER -- the user owns them, and a
-service account cannot permanently delete a file it does not own in a Shared
-Drive. Measured 2026-08-02: 0 of 58 deletable as the SA, 58 of 58 as the user.
+writes, and writes run as the DELEGATED USER -- the user owns them. The CI root
+is a My Drive folder, and in a My Drive only the OWNER may trash or delete an
+item; a `writer` may add children and edit, nothing more. Checked read-only
+2026-11-13: on the root, `/scratch` and a `run-*` folder, the SA's
+`capabilities` are `canEdit`/`canAddChildren` true and `canTrash`/`canDelete`
+**false**; the user's are all true. That is the measured 2026-08-02 result --
+0 of 58 deletable as the SA, 58 of 58 as the user. (An earlier note blamed
+"a Shared Drive"; there is none here. In a Shared Drive, deletion is decided
+by membership role, not ownership -- untested here.)
 The sweep now runs the module directly (no submodules needed), collects
 per-folder failures and exits non-zero, and authenticates as the user.
 
@@ -551,13 +585,23 @@ create-if-absent. A create-then-reconcile (delete the losing duplicates) was
 considered and rejected: another writer may already have written into the one
 you would delete. Documented as a limitation instead.
 
-**A live test must not assert on the whole Shared Drive.** `test_harness.py`
+**A live test must not assert on the whole CI drive.** `test_harness.py`
 snapshotted every child of `/scratch` and required the set to be unchanged
 across a create-and-delete. That is not a property of teardown; it is a
 property of nobody else being busy, and the Drive is shared by CI, the nightly
 sweep and any developer running the live suite. It went red in CI on
 2026-08-02 while a local drill happened to be writing scratch folders. Assert
 about the object the test itself created.
+
+The same trap, one level less visible, in a COST bound (2026-11-13):
+`test_since_token_cost_is_bounded_by_folders_not_files` asserted
+`files_get < 12` for a `gdrive_changes` call since a token -- but the changes
+feed is per IDENTITY, so every concurrent writer's changes are in the window
+and each costs a parent walk. It got exactly 12. A fixed bound over a feed is
+a bound on other people's activity. The test now reads the same window raw
+(before and after the call, merged), computes the folders above everything
+that is not its own, and asserts `files_get <= 1 + that`; listings, which
+foreign changes never cause, keep a fixed bound.
 
 **Handles hold a token SOURCE, never a token (2026-10-14).** A handle used
 to capture `access_token` at open, so a scan or an `ATTACH` living past the

@@ -1049,8 +1049,10 @@ make check_pin check_credentials check_cstdint check_stamp smoke_loadable
 
 There are no mocks: everything Drive-facing is proven against a real Google
 Drive -- there is no fake server and no recorded-HTTP layer. The fixtures live
-in a folder shared with a CI service account; writes run as a delegated user,
-because a service account cannot own files outside a Shared Drive. See
+in a folder in a user's My Drive, shared with a CI service account; writes run
+as that delegated user, because a service account cannot own files outside a
+Shared Drive. (`DRIVE_ID`, a Shared Drive root, has a live test that runs only
+once a CI Shared Drive is configured.) See
 `scripts/setup_ci_drive.sh` and [CLAUDE.md](CLAUDE.md) for the workflow, the
 recorded decisions and the pitfalls worth not rediscovering.
 

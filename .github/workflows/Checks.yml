@@ -293,6 +293,12 @@ jobs:
           GDRIVE_OAUTH_CLIENT_ID: ${{ secrets.GDRIVE_OAUTH_CLIENT_ID }}
           GDRIVE_OAUTH_CLIENT_SECRET: ${{ secrets.GDRIVE_OAUTH_CLIENT_SECRET }}
           GDRIVE_USER_REFRESH_TOKEN: ${{ secrets.GDRIVE_USER_REFRESH_TOKEN }}
+          # OPTIONAL, and not created yet: a Shared Drive for the DRIVE_ID
+          # (D-5) test. While it is empty the materialiser leaves
+          # gdrive_shared_drive.test out with a warning -- a known gap, see
+          # CLAUDE.md. Once the secret exists, add
+          # GDRIVE_REQUIRE_SHARED_DRIVE: '1' here so its absence fails.
+          GDRIVE_CI_SHARED_DRIVE_ID: ${{ secrets.GDRIVE_CI_SHARED_DRIVE_ID }}
         run: make test_live
       # BRD criterion 1, end to end: the artifact users install, in a stock
       # DuckDB, reading real Google Drive. Everything else in this workflow
@@ -326,8 +332,8 @@ jobs:
         run: make e2e
 
   # ---------------------------------------------------------------------------
-  # Crashed runs leak /scratch/run-* folders. Left alone they fill the Shared
-  # Drive and every later test fails for an unrelated reason.
+  # Crashed runs leak /scratch/run-* folders. Left alone they fill the CI
+  # drive and every later test fails for an unrelated reason.
   # ---------------------------------------------------------------------------
   sweep:
     name: Sweep orphaned scratch folders
@@ -342,12 +348,15 @@ jobs:
           GDRIVE_CI_DRIVE_ID: ${{ secrets.GDRIVE_CI_DRIVE_ID }}
           # The DELEGATED USER is required, not optional. Scratch folders are
           # created by writes, which run as the user, so the user owns them --
-          # and a service account cannot permanently delete a file it does not
-          # own in a Shared Drive. With only the SA key this job deletes
-          # nothing and reports 403 on every folder.
+          # and the CI root is a folder in that user's My Drive, where only the
+          # owner may trash or delete (the SA is a writer: canDelete false).
+          # With only the SA key this job deletes nothing and reports 403 on
+          # every folder.
           GDRIVE_OAUTH_CLIENT_ID: ${{ secrets.GDRIVE_OAUTH_CLIENT_ID }}
           GDRIVE_OAUTH_CLIENT_SECRET: ${{ secrets.GDRIVE_OAUTH_CLIENT_SECRET }}
           GDRIVE_USER_REFRESH_TOKEN: ${{ secrets.GDRIVE_USER_REFRESH_TOKEN }}
+          # Optional: also sweeps the DRIVE_ID tests' Shared Drive once it exists.
+          GDRIVE_CI_SHARED_DRIVE_ID: ${{ secrets.GDRIVE_CI_SHARED_DRIVE_ID }}
         # NOT `make sweep_orphans`. The Makefile includes
         # extension-ci-tools/makefiles/duckdb_extension.Makefile at the top,
         # and this job checks out without submodules -- so make died on the

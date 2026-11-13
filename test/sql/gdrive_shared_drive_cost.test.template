@@ -1,0 +1,52 @@
+# name: test/sql/gdrive_shared_drive_cost.test.template
+# description: D-5 -- what a DRIVE_ID-bound secret costs, against a REAL Shared Drive
+# group: [live]
+#
+# In its own file, like every cost assertion (CLAUDE.md): counts depend on
+# cache state, so nothing else touches this secret or these paths first.
+#
+# Materialised only when GDRIVE_CI_SHARED_DRIVE_ID is set; see the known-gap
+# note in gdrive_shared_drive.test.template. Not yet run against a real
+# Shared Drive.
+
+require gdrive
+
+require-env GDRIVE_CI_SHARED_DRIVE_ID
+
+require-env GDRIVE_CI_SA_KEY_FILE
+
+statement ok
+CREATE SECRET gdrive_sd_cost (
+    TYPE gdrive,
+    PROVIDER service_account,
+    KEY_FILE '${SA_KEY_FILE}',
+    DRIVE_ID '${SHARED_DRIVE_ID}',
+    DRIVE_SCOPE 'https://www.googleapis.com/auth/drive'
+);
+
+# gdrive_drives is one drives.list call.
+statement ok
+CALL gdrive_reset_stats();
+
+statement ok
+SELECT count(*) FROM gdrive_drives();
+
+query I
+SELECT value FROM gdrive_stats() WHERE metric = 'drives_list'
+----
+1
+
+# The id: form reaches the bytes with no path resolution, in a Shared Drive
+# as in a folder (S-2.9).
+statement ok
+CALL gdrive_reset_stats();
+
+query I
+SELECT count(*) FROM read_csv('gdrive://id:${SHARED_FIXTURE_ID}')
+----
+3
+
+query I
+SELECT value FROM gdrive_stats() WHERE metric = 'files_list'
+----
+0

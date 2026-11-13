@@ -62,6 +62,14 @@ cleanup() {
         (cd e2e && uv run --frozen python -m helpers.drop_scratch "$SCRATCH_TO_CLEAN") \
             >/dev/null 2>&1 || true
     fi
+    # The DRIVE_ID tests' scratch, inside GDRIVE_CI_SHARED_DRIVE_ID, when the
+    # materialiser made one (it leaves the name here).
+    if [[ -f test/sql/live/.shared_scratch ]]; then
+        local shared
+        shared="$(head -1 test/sql/live/.shared_scratch)"
+        (cd e2e && uv run --frozen python -m helpers.drop_scratch --shared-drive "$shared") \
+            >/dev/null 2>&1 || true
+    fi
 }
 trap cleanup EXIT INT TERM
 
@@ -150,7 +158,10 @@ if [[ ${#tests[@]} -eq 0 ]]; then
     exit 1
 fi
 
-SCRATCH_TO_CLEAN="$(sed -n 's|.*scratch/\(run-[a-z0-9]*\)/.*|\1|p' test/sql/live/*.test 2>/dev/null | head -1)"
+# Not from the Shared Drive tests: their scratch/run-* paths name a folder in
+# ANOTHER drive, cleaned up separately (see cleanup above).
+SCRATCH_TO_CLEAN="$(for f in test/sql/live/*.test; do [[ "$f" == *shared_drive* ]] || cat "$f"; done 2>/dev/null \
+    | sed -n 's|.*scratch/\(run-[a-z0-9]*\)/.*|\1|p' | head -1)"
 
 echo "==> running ${#tests[@]} live test file(s)"
 failed=0
