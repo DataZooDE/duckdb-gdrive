@@ -7,10 +7,11 @@ description: >
   (Drive's full-text search; hits read back by id), gdrive_drives (Shared
   Drives and their ids), gdrive_versions and the ?version= path form (read an
   earlier revision with any reader), gdrive_changes (what changed under a
-  folder since a token -- the mirror / incremental-sync pattern), and
+  folder since a token -- the mirror / incremental-sync pattern),
+  gdrive_labels (Drive labels / classification on files, optional names), and
   gdrive_permissions (who can reach what: direct, inherited, anyone-with-link,
   domain). Use when listing or inventorying Drive, finding a file, reading an
-  old version, syncing a folder incrementally, or auditing sharing.
+  old version, syncing a folder incrementally, or auditing sharing or labels.
 version: 2026.11.08
 user-invocable: false
 ---
@@ -95,3 +96,17 @@ link) | `organization` (a domain), `discoverable` (findable in search), `link_ur
 glob (not the glob's root: add it separately); one call per item. A grant
 no higher than an inherited one is not recorded by Drive and reads as inherited.
 
+## Labels (classification)
+```sql
+SELECT path, label_id, field_id, value FROM gdrive_labels('gdrive://Finance/**');
+SELECT path, label, field, value FROM gdrive_labels('gdrive://Finance/**', names := true);
+```
+One row per (file, label, field, value): `path, id, label_id, label, field_id, field, value_type,
+value` (`value_type` text | integer | dateString | selection | user; a user as their address).
+A label with no field set: one row, `field_id` NULL. One `files.listLabels` per file.
+`label`/`field` are NULL and a selection is its choice id unless `names := true`, which costs one
+Drive Labels API call per query and needs the scope `.../auth/drive.labels.readonly` (service
+account: add it to `DRIVE_SCOPE`, space-separated) AND the Drive Labels API enabled in the
+credential's Cloud project -- each missing piece errors and says which. Labels need a Workspace
+edition with labels enabled by the admin; where the identity may not read them, it errors rather
+than reporting "unlabelled".

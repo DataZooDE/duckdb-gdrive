@@ -96,6 +96,10 @@ struct DriveCallStats {
 	int64_t revisions_media = 0;
 	int64_t changes_list = 0;
 	int64_t drives_list = 0;
+	//! gdrive_labels: files.listLabels (one per file), and the Labels API
+	//! catalog (drivelabels.googleapis.com, names := true only).
+	int64_t labels_list = 0;
+	int64_t label_catalog = 0;
 
 	int64_t Total() const;
 };
@@ -135,7 +139,10 @@ public:
 	//! call. `path_and_query` starts at "/drive/v3/"; the caller adds
 	//! AllDrivesQuery() where the endpoint takes it (drives.list does not).
 	//! Does not follow pages: the callers each have their own token field.
-	virtual DriveResponse ApiGet(const std::string &path_and_query, int64_t DriveCallStats::*counter) = 0;
+	//! `host` names another Google API host (e.g. "drivelabels.googleapis.com")
+	//! for the same credential; empty means Drive's www.googleapis.com.
+	virtual DriveResponse ApiGet(const std::string &path_and_query, int64_t DriveCallStats::*counter,
+	                             const std::string &host = std::string()) = 0;
 
 	//! files.get?alt=media with `Range: bytes=start-end` (inclusive, as HTTP
 	//! defines it). `end` < 0 means "to end of file".

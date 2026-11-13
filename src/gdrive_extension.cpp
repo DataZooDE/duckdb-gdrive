@@ -6,6 +6,7 @@
 #include "gdrive_files_functions.hpp"
 #include "gdrive_internal.hpp"
 #include "gdrive_permissions_functions.hpp"
+#include "gdrive_labels_functions.hpp"
 #include "gdrive_versions.hpp"
 #include "gdrive_changes.hpp"
 #include "gdrive_stats.hpp"
@@ -224,6 +225,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	gdrive::RegisterGDriveStats(loader);
 	gdrive::RegisterFileFunctions(loader);
 	gdrive::RegisterPermissionFunctions(loader);
+	gdrive::RegisterLabelFunctions(loader);
 	gdrive::RegisterVersionFunctions(loader);
 	gdrive::RegisterChangeFunctions(loader);
 

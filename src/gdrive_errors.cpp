@@ -433,6 +433,10 @@ GDriveError ClassifyDriveError(int http_status, const std::string &body, const s
 		err.kind = GDriveErrorKind::INSUFFICIENT_SCOPE;
 		return err;
 	}
+	if (parsed.detail_reason == "SERVICE_DISABLED") {
+		err.kind = GDriveErrorKind::SERVICE_DISABLED;
+		return err;
+	}
 
 	// 429 is unambiguous regardless of body: rate limit. Google's documented
 	// shape puts a `reason` in the body for this case too, but a proxy/load
@@ -502,6 +506,13 @@ std::string FormatUserMessage(const GDriveError &error, const std::string &conte
 		      "    --scopes=openid,https://www.googleapis.com/auth/drive\n"
 		      "(gcloud's default scope, cloud-platform, does not include Drive.)";
 		break;
+	case GDriveErrorKind::SERVICE_DISABLED:
+		// Google's own message (appended below) names the API and carries the
+		// link that enables it; say what kind of problem it is.
+		out = "a Google API needed for " + context +
+		      " is not enabled in the Google Cloud project of the credential -- enable it there (the link is in "
+		      "Google's message), then wait a few minutes. This is not a file-sharing problem";
+		break;
 	case GDriveErrorKind::STORAGE_QUOTA:
 		out = "Drive storage quota exceeded while accessing " + context +
 		      ": the account has no storage quota available to complete this write "
@@ -544,7 +555,8 @@ GDriveExceptionType ExceptionTypeFor(GDriveErrorKind kind) {
 	switch (kind) {
 	case GDriveErrorKind::PERMISSION_DENIED:
 	case GDriveErrorKind::INSUFFICIENT_SCOPE:
-		// Both are PermissionException: DuckDB's exception taxonomy has no
+	case GDriveErrorKind::SERVICE_DISABLED:
+		// All are PermissionException: DuckDB's exception taxonomy has no
 		// "your credential is under-scoped" type, and Permission is the
 		// closest honest fit. The distinction that matters is carried by the
 		// message, which is where the reader looks.

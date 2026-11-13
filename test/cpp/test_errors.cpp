@@ -860,3 +860,73 @@ TEST_CASE("INVALID_REQUEST does not call a user's over-long input an internal er
 	REQUIRE(msg.find("internal error") == std::string::npos);
 	REQUIRE(msg.find("The query is too complex.") != std::string::npos);
 }
+
+// ---------------------------------------------------------------------------
+// The Drive Labels API (gdrive_labels names := true), captured 2026-11-13 as
+// the CI service account (labels_api_disabled / labels_api_scope in
+// drive_errors.json; the project number is replaced). Neither body has an
+// errors[] array: only details[].reason says what is wrong.
+// ---------------------------------------------------------------------------
+
+const char *kLabelsApiDisabled = R"({
+  "error": {
+    "code": 403,
+    "message": "Drive Labels API has not been used in project 000000000000 before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/drivelabels.googleapis.com/overview?project=000000000000 then retry. If you enabled this API recently, wait a few minutes for the action to propagate to our systems and retry.",
+    "status": "PERMISSION_DENIED",
+    "details": [
+      {
+        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+        "reason": "SERVICE_DISABLED",
+        "domain": "googleapis.com",
+        "metadata": {
+          "activationUrl": "https://console.developers.google.com/apis/api/drivelabels.googleapis.com/overview?project=000000000000",
+          "service": "drivelabels.googleapis.com",
+          "consumer": "projects/000000000000",
+          "serviceTitle": "Drive Labels API",
+          "containerInfo": "000000000000"
+        }
+      },
+      {
+        "@type": "type.googleapis.com/google.rpc.LocalizedMessage",
+        "locale": "en-US",
+        "message": "Drive Labels API has not been used in project 000000000000 before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/drivelabels.googleapis.com/overview?project=000000000000 then retry. If you enabled this API recently, wait a few minutes for the action to propagate to our systems and retry."
+      }
+    ]
+  }
+})";
+
+const char *kLabelsApiScope = R"({
+  "error": {
+    "code": 403,
+    "message": "Request had insufficient authentication scopes.",
+    "status": "PERMISSION_DENIED",
+    "details": [
+      {
+        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+        "reason": "ACCESS_TOKEN_SCOPE_INSUFFICIENT",
+        "domain": "googleapis.com",
+        "metadata": {
+          "service": "drivelabels.googleapis.com",
+          "method": "google.apps.drive.labels.v2.LabelService.ListLabels"
+        }
+      }
+    ]
+  }
+})";
+
+TEST_CASE("403 SERVICE_DISABLED: the API is off in the credential's project, not a sharing problem", "[errors]") {
+	auto err = ClassifyDriveError(403, kLabelsApiDisabled);
+	REQUIRE(err.kind == GDriveErrorKind::SERVICE_DISABLED);
+	CHECK_FALSE(err.IsRetryable());
+	CHECK(ExceptionTypeFor(err.kind) == GDriveExceptionType::PERMISSION);
+	auto msg = FormatUserMessage(err, "the Drive label catalog");
+	CHECK(msg.find("not enabled") != std::string::npos);
+	CHECK(msg.find("not a file-sharing problem") != std::string::npos);
+	// Google's message carries the link that enables it.
+	CHECK(msg.find("console.developers.google.com/apis/api/drivelabels.googleapis.com") != std::string::npos);
+	CHECK(msg.find("does not have sufficient access to this file") == std::string::npos);
+}
+
+TEST_CASE("the Labels API's scope error is INSUFFICIENT_SCOPE without an errors[] array", "[errors]") {
+	REQUIRE(ClassifyDriveError(403, kLabelsApiScope).kind == GDriveErrorKind::INSUFFICIENT_SCOPE);
+}

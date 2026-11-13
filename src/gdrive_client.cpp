@@ -75,7 +75,7 @@ int64_t DriveCallStats::Total() const {
 	// peak is a gauge and is not.
 	return files_get + files_list + files_media + files_export + files_create + files_update + files_delete +
 	       upload_chunks + upload_status_queries + upload_aborts + permissions_list + revisions_list +
-	       revisions_media + changes_list + drives_list;
+	       revisions_media + changes_list + drives_list + labels_list + label_catalog;
 }
 
 // ---------------------------------------------------------------------------
@@ -324,6 +324,7 @@ bool ParseFileList(const std::string &json_body, std::vector<DriveFileMeta> &out
 #include <atomic>
 #include <algorithm>
 #include <chrono>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <random>
@@ -642,8 +643,10 @@ public:
 		return out;
 	}
 
-	DriveResponse ApiGet(const std::string &path_and_query, int64_t DriveCallStats::*counter) override {
-		return ExecuteWithRetry(HttpMethod::GET, path_and_query, {}, "", "", counter, {200});
+	DriveResponse ApiGet(const std::string &path_and_query, int64_t DriveCallStats::*counter,
+	                     const std::string &host) override {
+		return ExecuteWithRetry(HttpMethod::GET, path_and_query, {}, "", "", counter, {200},
+		                        /*retry_non_idempotent=*/false, -1, -1, host);
 	}
 
 	DriveResponse Download(const std::string &file_id, int64_t start, int64_t end) override {
@@ -1070,13 +1073,19 @@ private:
 		if (counter == &DriveCallStats::drives_list) {
 			return "drives.list";
 		}
+		if (counter == &DriveCallStats::labels_list) {
+			return "files.listLabels";
+		}
+		if (counter == &DriveCallStats::label_catalog) {
+			return "labels.list";
+		}
 		return "unknown";
 	}
 
 	RawResult DoHttp(HttpMethod method, const std::string &access_token, const std::string &path_and_query,
 	                 const std::vector<std::pair<std::string, std::string>> &extra_headers, const std::string &body,
 	                 const std::string &content_type, bool with_auth = true, const char *put_body = nullptr,
-	                 size_t put_body_len = 0) {
+	                 size_t put_body_len = 0, const std::string &host = std::string()) {
 		// ---------------------------------------------------------------
 		// One TLS connection PER THREAD, reused for every request that
 		// thread makes.
@@ -1098,19 +1107,35 @@ private:
 		// connection, so reusing one across secrets leaks nothing -- the
 		// same reason ordinary HTTP connection pools are safe.
 		// ---------------------------------------------------------------
-		static thread_local duckdb_httplib_openssl::SSLClient client(kDriveHost, kDrivePort);
+		static thread_local duckdb_httplib_openssl::SSLClient drive_client(kDriveHost, kDrivePort);
 		static thread_local bool configured = false;
+		// Another Google API host (the Labels API, ...): one connection per
+		// host per thread, kept alive like the Drive one. Few hosts, so a map.
+		static thread_local std::map<std::string, std::unique_ptr<duckdb_httplib_openssl::SSLClient>> other_clients;
+		bool other_fresh = false;
+		duckdb_httplib_openssl::SSLClient *picked = &drive_client;
+		if (!host.empty() && host != kDriveHost) {
+			auto &slot = other_clients[host];
+			if (!slot) {
+				slot.reset(new duckdb_httplib_openssl::SSLClient(host, kDrivePort));
+				other_fresh = true;
+			}
+			picked = slot.get();
+		}
+		auto &client = *picked;
 		// Captured before the request: the FIRST call on this thread is the one
 		// that pays DNS + TCP + TLS, and a timeline that cannot distinguish it
 		// from a warm call misattributes the cost of a cold scan.
-		const bool fresh_conn = !configured;
-		if (!configured) {
+		const bool fresh_conn = picked == &drive_client ? !configured : other_fresh;
+		if (fresh_conn) {
 			client.enable_server_certificate_verification(true);
 			client.set_connection_timeout(std::chrono::seconds(10));
 			client.set_read_timeout(std::chrono::seconds(60));
 			client.set_write_timeout(std::chrono::seconds(60));
 			client.set_keep_alive(true);
-			configured = true;
+			if (picked == &drive_client) {
+				configured = true;
+			}
 		}
 
 		duckdb_httplib_openssl::Headers headers;
@@ -1214,7 +1239,7 @@ private:
 	                               const std::string &body, const std::string &content_type,
 	                               int64_t DriveCallStats::*counter, const std::vector<int> &success_statuses,
 	                               bool retry_non_idempotent = false, int64_t trace_range_off = -1,
-	                               int64_t trace_range_len = -1) {
+	                               int64_t trace_range_len = -1, const std::string &host = std::string()) {
 		int attempt = 0;
 		// Asked of the SOURCE, per logical call: a handle opened an hour ago
 		// gets a token that is valid now, not the one it was opened with.
@@ -1230,7 +1255,8 @@ private:
 			const bool tracing = trace::Enabled();
 			const uint64_t t_start = tracing ? trace::NowMicros() : 0;
 
-			RawResult raw = DoHttp(method, access_token, path_and_query, extra_headers, body, content_type);
+			RawResult raw = DoHttp(method, access_token, path_and_query, extra_headers, body, content_type,
+			                       /*with_auth=*/true, nullptr, 0, host);
 
 			if (tracing) {
 				trace::Span span;

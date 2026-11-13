@@ -152,6 +152,9 @@ bool FileRowOf(const picojson::object &o, FileRow &out, std::string &error) {
 	out.copy_requires_writer_permission = false;
 	out.has_copy_requires_writer_permission =
 	    Bool(o, "copyRequiresWriterPermission", out.copy_requires_writer_permission);
+	out.can_read_labels = false;
+	auto caps = Obj(o, "capabilities");
+	out.has_can_read_labels = caps && Bool(*caps, "canReadLabels", out.can_read_labels);
 	return true;
 }
 
@@ -263,7 +266,8 @@ std::string FileRowFields() {
 	return "id,name,mimeType,size,createdTime,modifiedTime,lastModifyingUser(displayName,emailAddress),"
 	       "owners(displayName,emailAddress),webViewLink,md5Checksum,headRevisionId,description,parents,"
 	       "properties,starred,shared,trashed,copyRequiresWriterPermission,"
-	       "contentRestrictions(readOnly,reason,restrictionTime,restrictingUser(displayName,emailAddress))";
+	       "contentRestrictions(readOnly,reason,restrictionTime,restrictingUser(displayName,emailAddress)),"
+	       "capabilities(canReadLabels)";
 }
 
 bool ParseFileRow(const std::string &json_object, FileRow &out, std::string &error) {

@@ -48,6 +48,10 @@ if ! gcloud projects describe "$PROJECT" >/dev/null 2>&1; then
 fi
 gcloud services enable drive.googleapis.com --project="$PROJECT"
 echo "drive.googleapis.com enabled on $PROJECT"
+# gdrive_labels(names := true) reads label names from the Drive Labels API.
+# Without it the call answers 403 SERVICE_DISABLED (seen 2026-11-13).
+gcloud services enable drivelabels.googleapis.com --project="$PROJECT"
+echo "drivelabels.googleapis.com enabled on $PROJECT"
 
 step "3/5  Service account"
 if ! gcloud iam service-accounts describe "$SA_EMAIL" --project="$PROJECT" >/dev/null 2>&1; then
@@ -115,3 +119,38 @@ cat <<CI
 
   Rotate the local key file if it was ever shared.
 CI
+
+step "Label fixture (MANUAL, Workspace admin -- for gdrive_labels)"
+cat <<LABELS
+  test/sql/pending/gdrive_labels_applied.test.template needs a REAL applied
+  label; until it exists that test stays out of the live gate. As of
+  2026-11-13 the CI identities see canReadLabels=false on every file and no
+  label is published. A Workspace ADMIN (labels need Business Standard or up):
+
+    1. Admin console -> Apps -> Google Workspace -> Drive and Docs -> Labels:
+       turn labels ON for the OU holding the delegated user, and check the
+       service account sees them too (capabilities.canReadLabels on a
+       fixture file must become true).
+    2. https://drive.google.com/labels -> New label, standard, named exactly
+         duckdb-gdrive CI
+       with fields (display names exactly):
+         Classification   Options (single select): Internal, Confidential
+         Owner team       Text
+         Review date      Date
+         Reviewer         Person
+         Retention years  Number
+       and a second label with NO fields:
+         duckdb-gdrive CI flag
+       Publish both; make them applicable by the delegated user.
+    3. Upload /fixtures/labelled.csv (any small CSV; seeding never touches it)
+       and apply, in the Drive UI (or files.modifyLabels as that user):
+         duckdb-gdrive CI: Classification=Confidential, Owner team=finance,
+                           Review date=2026-12-31, Reviewer=<delegated user>,
+                           Retention years=7
+         duckdb-gdrive CI flag
+    4. With drivelabels.googleapis.com enabled (step 2 above), move
+       test/sql/pending/gdrive_labels_applied.test.template up into test/sql/
+       and rewrite the two STATE-DEPENDENT blocks of gdrive_labels.test.template.
+  The CI refresh token does NOT need drive.labels.readonly: the names test runs
+  as the service account, which asks for that scope in its own DRIVE_SCOPE.
+LABELS
