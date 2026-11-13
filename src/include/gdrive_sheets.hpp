@@ -188,7 +188,7 @@ bool ParseAppendedRange(const std::string &json, SheetRange &out, std::string &e
 //! One cell of a grid-data read: its effectiveValue and the TYPE of its
 //! effective number format (Sheets says DATE/TIME/DATE_TIME outright -- no
 //! format-string parsing as for Excel).
-enum class SheetCellKind { EMPTY, NUMBER, STRING, BOOLEAN, ERROR };
+enum class SheetCellKind { EMPTY, NUMBER, STRING, BOOLEAN, ERROR_CELL };
 enum class SheetFormatKind { OTHER, DATE, DATE_TIME, TIME };
 
 struct SheetCell {

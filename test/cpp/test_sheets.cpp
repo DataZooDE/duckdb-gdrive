@@ -340,7 +340,7 @@ TEST_CASE("grid data becomes typed cells; trailing empty rows drop", "[sheets]")
 	REQUIRE(ParseSheetGrid(json, 0, rows, error));
 	REQUIRE(rows.size() == 3);
 	REQUIRE(rows[0].size() == 3);
-	REQUIRE(rows[2][1].kind == SheetCellKind::ERROR);
+	REQUIRE(rows[2][1].kind == SheetCellKind::ERROR_CELL);
 	REQUIRE(rows[2][1].text == "#DIV/0!");
 	REQUIRE(rows[2][2].kind == SheetCellKind::EMPTY);
 	REQUIRE(rows[1][0].format == SheetFormatKind::DATE);

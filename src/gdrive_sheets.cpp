@@ -268,7 +268,7 @@ SheetCell ToCell(const picojson::value &v) {
 			cell.boolean = b->get<bool>();
 		}
 	} else if (auto e = Field(value, "errorValue")) {
-		cell.kind = SheetCellKind::ERROR;
+		cell.kind = SheetCellKind::ERROR_CELL;
 		auto type = Field(Obj(*e), "type");
 		cell.text = ErrorCode(type && type->is<std::string>() ? type->get<std::string>() : std::string());
 	}
@@ -776,7 +776,7 @@ SheetColumnType InferSheetColumnType(const std::vector<const SheetCell *> &cells
 	for (auto *cell : cells) {
 		switch (cell->kind) {
 		case SheetCellKind::EMPTY:
-		case SheetCellKind::ERROR:
+		case SheetCellKind::ERROR_CELL:
 			break;
 		case SheetCellKind::STRING:
 			any_string = true;
@@ -826,7 +826,7 @@ std::string SheetCellText(const SheetCell &cell) {
 	case SheetCellKind::EMPTY:
 		return std::string();
 	case SheetCellKind::STRING:
-	case SheetCellKind::ERROR:
+	case SheetCellKind::ERROR_CELL:
 		return cell.text;
 	case SheetCellKind::BOOLEAN:
 		return cell.boolean ? "TRUE" : "FALSE";
