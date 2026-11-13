@@ -347,6 +347,9 @@ TEST_CASE("ParseFileRow: a content restriction is the lock", "[rows][files][lock
 	CHECK(row.lock_reason == "Quarter closed");
 	CHECK(row.has_copy_requires_writer_permission);
 	CHECK(row.copy_requires_writer_permission);
+	// Captured in a Workspace with no labels enabled for this identity.
+	CHECK(row.has_can_read_labels);
+	CHECK_FALSE(row.can_read_labels);
 }
 
 TEST_CASE("ParseFileRowList: a service account sees who locked a file, not their address", "[rows][files][locks]") {

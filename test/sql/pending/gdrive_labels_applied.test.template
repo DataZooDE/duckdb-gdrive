@@ -1,0 +1,87 @@
+# name: test/sql/pending/gdrive_labels_applied.test.template
+# description: gdrive_labels rows from a REAL applied label -- PENDING the label fixture
+# group: [live]
+#
+# NOT MATERIALISED: e2e/helpers/materialise.py reads only test/sql/*.test.template,
+# and this file lives in test/sql/pending/ because the fixture it reads does
+# not exist yet. A test that cannot run must not sit in the live gate, where
+# `make test_live` would fail every run on it (or, worse, a skip would read as
+# a pass). Promote it -- `git mv` to test/sql/ -- once a Workspace admin has done
+# the steps in scripts/setup_ci_drive.sh ("Label fixture"):
+#   - labels enabled for the CI identities,
+#   - the Drive Labels API enabled in the CI Cloud project,
+#   - the label "duckdb-gdrive CI" (fields below) and the field-less label
+#     "duckdb-gdrive CI flag" published,
+#   - both applied, with the values below, to /fixtures/labelled.csv.
+# Written against Drive's documented shapes; adjust what the first real run
+# shows, and capture its bodies for test/cpp/test_labels.cpp.
+
+require gdrive
+
+require-env GDRIVE_CI_DRIVE_ID
+
+require-env GDRIVE_CI_SA_KEY_FILE
+
+statement ok
+CREATE SECRET gdrive_test (
+    TYPE gdrive,
+    PROVIDER service_account,
+    KEY_FILE '${SA_KEY_FILE}',
+    ROOT_FOLDER_ID '${DRIVE_ID}',
+    DRIVE_SCOPE 'https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/drive.labels.readonly'
+);
+
+# Without names: ids and values; label and field are NULL. One listLabels call.
+statement ok
+CALL gdrive_reset_stats();
+
+query IIIII
+SELECT count(*), count(DISTINCT label_id), count(*) FILTER (WHERE field_id IS NULL),
+       bool_and(label IS NULL AND field IS NULL), bool_and(id = '${ID:labelled.csv}')
+FROM gdrive_labels('gdrive://fixtures/labelled.csv')
+----
+6	2	1	true	true
+
+query II
+SELECT (SELECT value FROM gdrive_stats() WHERE metric = 'labels_list'),
+       (SELECT value FROM gdrive_stats() WHERE metric = 'label_catalog')
+----
+1	0
+
+# With names: titles, field names, a selection as its choice's name, a user as
+# their address, a date as YYYY-MM-DD, an integer in decimal. One catalog call.
+statement ok
+CALL gdrive_reset_stats();
+
+query IIII
+SELECT label, field, value_type, value
+FROM gdrive_labels('gdrive://fixtures/labelled.csv', names := true)
+ORDER BY label, field NULLS FIRST
+----
+duckdb-gdrive CI	Classification	selection	Confidential
+duckdb-gdrive CI	Owner team	text	finance
+duckdb-gdrive CI	Retention years	integer	7
+duckdb-gdrive CI	Review date	dateString	2026-12-31
+duckdb-gdrive CI	Reviewer	user	jr@data-zoo.de
+duckdb-gdrive CI flag	NULL	NULL	NULL
+
+query II
+SELECT (SELECT value FROM gdrive_stats() WHERE metric = 'labels_list'),
+       (SELECT value FROM gdrive_stats() WHERE metric = 'label_catalog')
+----
+1	1
+
+# A folder means its files: the unlabelled ones add no rows, and each file
+# costs one listLabels.
+statement ok
+CALL gdrive_reset_stats();
+
+query I
+SELECT count(DISTINCT path) FROM gdrive_labels('gdrive://fixtures')
+----
+1
+
+query I
+SELECT value >= 4 FROM gdrive_stats() WHERE metric = 'labels_list'
+----
+true

@@ -390,6 +390,37 @@ SELECT name, id FROM gdrive_drives(search := 'Finance');
 
 The Shared Drives the identity is a member of; `id` is what `DRIVE_ID` takes.
 
+### Classification: `gdrive_labels`
+
+```sql
+SELECT path, label_id, field_id, value FROM gdrive_labels('gdrive://Finance/**');
+SELECT path, label, field, value FROM gdrive_labels('gdrive://Finance/**', names := true);
+```
+
+The [Drive labels](https://support.google.com/a/answer/9292382) applied to a
+file, or to the files a glob or folder names: one row per (file, label, field,
+value) -- `path`, `id`, `label_id`, `label`, `field_id`, `field`,
+`value_type` (`text`, `integer`, `dateString`, `selection`, `user`), `value`
+(a user as their address, a date as `YYYY-MM-DD`). A label applied with no
+field set is one row with `field_id` NULL; an unlabelled file adds no rows.
+One `files.listLabels` call per file.
+
+`label` and `field` are NULL by default, and a `selection` value is its choice
+id: the names live in a separate API. `names := true` fills them in (and a
+selection's `value` becomes its choice's name) with one Drive Labels API call
+per query, which needs **both**
+
+- the scope `https://www.googleapis.com/auth/drive.labels.readonly` besides the
+  Drive one -- for a service account, add it to `DRIVE_SCOPE`, space-separated;
+  a user login must be redone to request it -- and
+- the **Drive Labels API** enabled in the credential's Google Cloud project.
+
+Each missing piece is an error that says which. Labels need a Google
+Workspace edition that has them (Business Standard and up), turned on by the
+admin. Where they are not, Drive reports every file as unlabelled *and* as one
+whose labels this identity may not read; `gdrive_labels` says the second
+rather than returning an empty audit.
+
 ### Earlier versions: `gdrive_versions` and `?version=`
 
 Drive keeps a file's revisions, and `?version=<revision id>` reads one of them

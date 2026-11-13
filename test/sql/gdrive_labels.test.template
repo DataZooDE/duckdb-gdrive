@@ -1,0 +1,106 @@
+# name: test/sql/gdrive_labels.test.template
+# description: gdrive_labels -- against REAL Google Drive, as the CI project stands
+# group: [live]
+#
+# WHAT THIS CAN AND CANNOT PROVE (2026-11-13). The CI Workspace has no label
+# published, labels are not enabled for the CI identities (every file says
+# capabilities.canReadLabels = false), and the Drive Labels API is not enabled
+# in the CI Cloud project. So the only behaviour live-testable today is the
+# REFUSALS: each misconfiguration says what it is, and costs what it should.
+# The rows themselves -- a label with fields and values, with and without
+# names -- are in test/sql/pending/gdrive_labels_applied.test.template, which
+# needs the label fixture described in scripts/setup_ci_drive.sh. When those
+# admin steps are done, the two state-dependent blocks below (marked) flip
+# and must be rewritten as the applied test is promoted.
+
+require gdrive
+
+require-env GDRIVE_CI_DRIVE_ID
+
+require-env GDRIVE_CI_SA_KEY_FILE
+
+statement ok
+CREATE SECRET gdrive_test (
+    TYPE gdrive,
+    PROVIDER service_account,
+    KEY_FILE '${SA_KEY_FILE}',
+    ROOT_FOLDER_ID '${DRIVE_ID}',
+    DRIVE_SCOPE 'https://www.googleapis.com/auth/drive'
+);
+
+statement error
+SELECT * FROM gdrive_labels(NULL)
+----
+the path must not be NULL
+
+# A literal path that names nothing is an error, not "no labels".
+statement error
+SELECT * FROM gdrive_labels('gdrive://fixtures/no-such-file.csv')
+----
+no such file
+
+# A glob that matches nothing: zero rows, and no label call.
+statement ok
+CALL gdrive_reset_stats();
+
+query I
+SELECT count(*) FROM gdrive_labels('gdrive://fixtures/no-such-folder/*.csv')
+----
+0
+
+query I
+SELECT value FROM gdrive_stats() WHERE metric = 'labels_list'
+----
+0
+
+# --- STATE-DEPENDENT: labels not enabled for this identity -------------------
+# Drive would answer listLabels with an empty list; reporting that as "no
+# labels" would make a classification audit say "nothing is labelled". The
+# refusal costs no label call: canReadLabels comes in the resolve's own row.
+statement ok
+CALL gdrive_reset_stats();
+
+statement error
+SELECT * FROM gdrive_labels('gdrive://fixtures/small.csv')
+----
+cannot read the labels of 'gdrive://fixtures/small.csv'
+
+query I
+SELECT value FROM gdrive_stats() WHERE metric = 'labels_list'
+----
+0
+
+# names := true with only the Drive scope: the Labels API refuses the token.
+# Stable whatever the project state -- Google checks the scope first. One
+# catalog call, made before anything is resolved.
+statement ok
+CALL gdrive_reset_stats();
+
+statement error
+SELECT * FROM gdrive_labels('gdrive://fixtures/small.csv', names := true)
+----
+drive.labels.readonly
+
+query III
+SELECT (SELECT value FROM gdrive_stats() WHERE metric = 'label_catalog'),
+       (SELECT value FROM gdrive_stats() WHERE metric = 'labels_list'),
+       (SELECT value FROM gdrive_stats() WHERE metric = 'files_get')
+----
+1	0	0
+
+# --- STATE-DEPENDENT: the Labels API is not enabled in the CI project -------
+# With the scope granted (a service account may ask for any), the next refusal
+# is the API's, and it says so instead of reading as a sharing problem.
+statement ok
+CREATE OR REPLACE SECRET gdrive_test (
+    TYPE gdrive,
+    PROVIDER service_account,
+    KEY_FILE '${SA_KEY_FILE}',
+    ROOT_FOLDER_ID '${DRIVE_ID}',
+    DRIVE_SCOPE 'https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/drive.labels.readonly'
+);
+
+statement error
+SELECT * FROM gdrive_labels('gdrive://fixtures/small.csv', names := true)
+----
+is not enabled in the Google Cloud project of the credential

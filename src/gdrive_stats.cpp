@@ -77,6 +77,8 @@ unique_ptr<FunctionData> GDriveStatsBind(ClientContext &, TableFunctionBindInput
 	    {"revisions_media", stats.revisions_media},
 	    {"changes_list", stats.changes_list},
 	    {"drives_list", stats.drives_list},
+	    {"labels_list", stats.labels_list},
+	    {"label_catalog", stats.label_catalog},
 	    // A GAUGE, not a counter: the live size of the path cache, which S-2.11
 	    // requires to be bounded. Asserting the bound needs a way to see it.
 	    {"path_cache_entries", static_cast<int64_t>(GetGlobalPathCacheEntries())},
@@ -180,8 +182,8 @@ void RegisterGDriveStats(ExtensionLoader &loader) {
 	    "(data PUTs to a resumable upload session -- streaming writes; every attempt), upload_status_queries "
 	    "(empty status PUTs before a resume), upload_aborts (sessions cancelled, nothing "
 	    "published), upload_buffer_peak_bytes (a HIGH-WATER MARK: most bytes one write handle held), permissions_list, "
-	    "revisions_list, revisions_media (ranged reads of an earlier version), changes_list, drives_list (the "
-	    "metadata table functions' calls), total (sum of every Drive API call counter), and path_cache_entries (a GAUGE: the live size of the "
+	    "revisions_list, revisions_media (ranged reads of an earlier version), changes_list, drives_list, labels_list, label_catalog (the "
+	    "metadata table functions' calls; label_catalog is the Labels API), total (sum of every Drive API call counter), and path_cache_entries (a GAUGE: the live size of the "
 	    "path->id cache, bounded by gdrive_path_cache_entries). Process-wide, not reset between queries -- call it before and "
 	    "after an operation and diff the two snapshots to measure that operation's amplification.";
 	desc.parameter_names = {};

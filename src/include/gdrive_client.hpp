@@ -96,6 +96,10 @@ struct DriveCallStats {
 	int64_t revisions_media = 0;
 	int64_t changes_list = 0;
 	int64_t drives_list = 0;
+	//! gdrive_labels: files.listLabels (one per file), and the Labels API
+	//! catalog (drivelabels.googleapis.com, names := true only).
+	int64_t labels_list = 0;
+	int64_t label_catalog = 0;
 
 	int64_t Total() const;
 };

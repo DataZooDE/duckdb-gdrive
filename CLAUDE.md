@@ -652,6 +652,25 @@ The live test's locked file is made by `materialise.py` in the run's scratch
 folder (the extension cannot set a lock); a lock does not stop deleting the
 folder.
 
+**Labels spike, 2026-11-13 -- why gdrive_labels is not live-proven.** In the
+CI setup: (1) every file, for BOTH identities, reports
+`capabilities.canReadLabels: false`, and `files/{id}/listLabels` still answers
+`200 {"labels": []}` -- so "no labels" and "may not see labels" look the same,
+which is why `gdrive_labels` checks the capability (it rides in
+`FileRowFields`, no extra call) and errors. (2) The Labels API
+(`drivelabels.googleapis.com/v2/labels`) refuses the `drive` scope with
+`ACCESS_TOKEN_SCOPE_INSUFFICIENT` -- it needs `drive.labels(.readonly)`,
+which the CI refresh token was not granted. (3) With that scope (the service
+account may ask for any), it answers `403 SERVICE_DISABLED`: the API is not
+enabled in project 1025084330164, which owns both the SA and the OAuth client.
+That body has NO `errors[]`, only `details[].reason`, hence
+`GDriveErrorKind::SERVICE_DISABLED`. (4) No label could be listed, so none
+could be applied. Note `GDRIVE_CI_DRIVE_ID` is a FOLDER in a My Drive, not a
+Shared Drive (`corpora=drive&driveId=` answers "Shared drive not found").
+The admin steps are at the end of `scripts/setup_ci_drive.sh`; the rows test
+waits in `test/sql/pending/`, outside the materialiser's glob, so it cannot
+make the live gate red or skip-green.
+
 `.crew/` holds the crew runs (git-ignored). `helpers.drop_scratch` only
 accepts `run-*` names -- exploratory testers need their own cleanup.
 

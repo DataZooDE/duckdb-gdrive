@@ -41,6 +41,11 @@ enum class GDriveErrorKind {
 	//! application-default login` without --scopes, whose default
 	//! (cloud-platform) does not include Drive.
 	INSUFFICIENT_SCOPE,
+	//! 403 whose details[] carry reason "SERVICE_DISABLED": the Google API
+	//! (e.g. the Drive Labels API) is not enabled in the Cloud project the
+	//! credential belongs to. Like INSUFFICIENT_SCOPE, nothing to do with the
+	//! file; the body has no errors[] array, so it would read as UNKNOWN.
+	SERVICE_DISABLED,
 	//! 403 storageQuotaExceeded and friends -- a *storage* limit, not a rate
 	//! limit. Notably what a service account hits when writing outside a
 	//! Shared Drive.

@@ -68,6 +68,11 @@ struct FileRow {
 	//! print or copy. has_ is false when Drive omitted it (some folders).
 	bool copy_requires_writer_permission = false;
 	bool has_copy_requires_writer_permission = false;
+	//! capabilities.canReadLabels: whether this identity may see the file's
+	//! labels. Drive answers listLabels with an empty list either way, so
+	//! gdrive_labels checks it to tell "none" from "not allowed".
+	bool can_read_labels = false;
+	bool has_can_read_labels = false;
 
 	bool IsFolder() const;
 };
