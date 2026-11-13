@@ -93,6 +93,12 @@ struct DriveCallStats {
 	int64_t revisions_media = 0;
 	int64_t changes_list = 0;
 	int64_t drives_list = 0;
+	//! Sheets API v4 (sheets.googleapis.com), behind read_sheet_range and
+	//! COPY ... (FORMAT sheet_range): spreadsheets.get (tab properties, grid
+	//! data), spreadsheets.batchUpdate, spreadsheets.values.append.
+	int64_t sheets_get = 0;
+	int64_t sheets_update = 0;
+	int64_t sheets_append = 0;
 
 	int64_t Total() const;
 };

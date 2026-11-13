@@ -75,7 +75,8 @@ int64_t DriveCallStats::Total() const {
 	// peak is a gauge and is not.
 	return files_get + files_list + files_media + files_export + files_create + files_update + files_delete +
 	       upload_chunks + upload_status_queries + upload_aborts + permissions_list + revisions_list +
-	       revisions_media + changes_list + drives_list;
+	       revisions_media + changes_list + drives_list +
+	       sheets_get + sheets_update + sheets_append;
 }
 
 // ---------------------------------------------------------------------------
@@ -1073,6 +1074,15 @@ private:
 		}
 		if (counter == &DriveCallStats::drives_list) {
 			return "drives.list";
+		}
+		if (counter == &DriveCallStats::sheets_get) {
+			return "sheets.get";
+		}
+		if (counter == &DriveCallStats::sheets_update) {
+			return "sheets.batchUpdate";
+		}
+		if (counter == &DriveCallStats::sheets_append) {
+			return "sheets.values.append";
 		}
 		return "unknown";
 	}
