@@ -262,9 +262,9 @@ peaks at ~100 MiB RSS for the whole process). Drive publishes the file only
 when the final chunk lands on close: until then nothing appears in the folder
 and an overwritten file keeps its old content, and a write that fails
 mid-stream -- or a query that errors part-way through a `COPY` -- cancels the
-session and leaves nothing behind. (The one exception: if the final chunk is
-sent and every answer to it is lost, Drive may have published the file; the
-error then says the change may or may not have been applied.) Once the session
+session and leaves nothing behind. (If the final chunk is sent and every
+answer to it is lost, a new file is looked up by its reserved id -- see below
+-- so the write either succeeds or fails saying nothing was written.) Once the session
 is open, chunks carry no token, so a long upload cannot fail on token expiry.
 Drive cannot write at a byte offset, so a positional write raises an error
 rather than silently corrupting the file.
@@ -279,10 +279,15 @@ gdrive_permanent_delete=true` to opt in. Renames are **not atomic**; DuckDB's
 storage manager assumes they are, so do not put a writable DuckDB database
 file on `gdrive://`.
 
-Creates are **idempotent**: the extension reserves a file id
-(`files.generateIds`) before writing, so a retry after a dropped connection
-cannot leave you with two files of the same name -- which, given that
-duplicate names are a hard error here, would otherwise make the path unusable.
+Every write is **safe to retry**, and is retried. Creates -- files *and*
+folders -- carry an id reserved with `files.generateIds` (one call for a whole
+new subtree), so a retry after a dropped connection gets `409 fileIdInUse`
+instead of a second object of the same name -- which, given that duplicate
+names are a hard error here, would make the path unusable. An overwrite puts
+the same bytes on the same id again; a move or a trash sets absolute state.
+If Drive cannot be reached on any attempt the error says so and says that
+re-running is safe; a create that cannot reserve an id is refused before
+anything is written.
 
 **Consistency, stated plainly.** A scan is **not** isolated from a concurrent
 overwrite. DuckDB captures a file's size when it opens it, and reads are served
@@ -761,17 +766,19 @@ setting made with a plain `SET` does not apply to it -- use `SET GLOBAL`.
 ```sql
 CALL gdrive_reset_stats();
 SELECT * FROM read_parquet('gdrive://exports/**/*.parquet');
-SELECT * FROM gdrive_stats();   -- files_get, files_list, files_media, ..., permissions_list,
-                                -- revisions_list, changes_list, retries, cache_hits, total
+SELECT * FROM gdrive_stats();   -- files_get, files_list, files_media, ..., generate_ids,
+                                -- permissions_list, revisions_list, changes_list, retries,
+                                -- cache_hits, total
 ```
 
 `gdrive_stats()` counts the Drive API calls by kind for the process, plus the
 path cache's hits and size, `auth_refresh` (401s that triggered a token
-refresh, at most one per call) and `token_request` (token mint attempts).
-Reset, run one query, read it: that is what that query cost. Every call is
-retried with jittered exponential backoff on 5xx and rate limits -- requests
-that must not run twice, such as creating a file, only when Drive refused them,
-never after an ambiguous failure.
+refresh, at most one per call), `token_request` (token mint attempts) and
+`generate_ids` (the id reservations that make creates retry-safe: one per
+created file, or one per new subtree). Reset, run one query, read it: that is
+what that query cost. Every call is retried with jittered exponential backoff
+on dropped connections, 5xx and rate limits -- writes included, because every
+write the extension sends is safe to repeat (see above).
 
 Two environment variables, both **off** unless set. Neither is a DuckDB
 setting: they are read once at first use, so a flag cannot flip underneath a
@@ -837,15 +844,6 @@ Early, but read *and* write are real and verified against a live Google Drive
 on every change. Not production-ready; what follows is stated here rather than
 discovered later.
 
-- **A failed single-request write may or may not have happened.** Drive's
-  simple upload is not idempotent: if it commits a `files.create` and the
-  response is then lost, retrying creates a *second* file with the same name,
-  and duplicate names are a hard error here. So transport failures are retried
-  only for idempotent methods. A write no larger than
-  `gdrive_upload_chunk_bytes` that fails mid-flight returns an error saying
-  the change may or may not have been applied, and does **not** retry -- check
-  the path before re-running it. Larger files go through Drive's resumable
-  protocol, whose session URI makes every chunk's retry genuinely idempotent.
 - **`DRIVE_SCOPE` does not restrict a refresh token.** With `PROVIDER config`
   and a `REFRESH_TOKEN`, the scope was fixed at consent; a secret declared
   `drive.readonly` will still write -- verified. Grant only the read-only scope
@@ -861,7 +859,9 @@ discovered later.
   path by deleting one copy via `gdrive://id:<fileId>`.
 - **A failed `move_file` onto an existing target can leave two files.** The
   move is done before the replaced file is deleted, deliberately -- the reverse
-  risks losing data. If the delete then fails, the call raises.
+  risks losing data. Both steps are retried (each is safe to repeat), but if
+  the delete still fails -- refused, or Drive unreachable on every attempt --
+  the call raises with both files in place.
 - **Rate-limit errors are not covered by live tests.** Storage-quota errors are
   provoked against the real API; rate limits (403/429) only against captured
   Drive response bodies, because exhausting real quota degrades Drive for

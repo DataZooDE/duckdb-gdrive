@@ -437,27 +437,33 @@ $\pm$25\% and never shorter than a supplied \texttt{Retry-After}.
 
 The harder question is what to do about failures below the HTTP layer --- a
 connect timeout, a TLS error, a socket reset --- where the request may or may
-not have reached Google. We retry those for \texttt{GET} and \texttt{DELETE}
-only. \texttt{POST} is excluded because a retried \texttt{files.create}
-produces a second file, which is a duplicate-name collision manufactured by
-the client. \texttt{PATCH} is excluded conservatively, because we use
-\texttt{files.update} both to move a file and to trash one. A write that fails
-this way returns a message stating plainly that the change \emph{may or may
-not have been applied}; reporting ``failed'' would assert something we do not
-know.
+not have reached Google. Whether to retry depends on what the request does,
+not on its HTTP verb. A retried \texttt{files.create} produces a second file,
+which is a duplicate-name collision manufactured by the client; so a create is
+retried only when it carries a reserved id (below). Every other write we send
+sets absolute state by id: an overwrite puts the same bytes on the same id, a
+move names its target name and parents explicitly, a trash sets
+\texttt{trashed}. We verified that each, sent twice, answers with the same end
+state, so each is retried like a \texttt{GET}.
 
 \textbf{Making creates idempotent anyway.}
 Drive offers \texttt{files.generateIds}, which reserves an id without creating
 anything. We reserve first and create with the reserved id, which makes the
 create idempotent: a retry either succeeds, or returns \texttt{409}, and the
-\texttt{409} is positive evidence that the first attempt landed. We convert it
-into success by re-fetching the metadata. Reserved ids recover the guarantee
-the transport does not give us, at the cost of an extra round trip.
+\texttt{409} is positive evidence that the first attempt landed --- but only
+with the reason \texttt{fileIdInUse}, and only after re-fetching the id shows
+the object we meant to make. The same holds for folders and for the final
+chunk of a resumable upload session, so every create carries one: a write into
+a new subtree reserves the whole folder chain and the file in a single call,
+and a create that cannot reserve an id is refused before anything is sent.
+When no attempt gets an answer at all, the reserved id still settles the
+outcome: a \texttt{404} on it proves nothing was written. Reserved ids recover
+the guarantee the transport does not give us, at the cost of one round trip
+per create, or per new subtree.
 
-We do not use Drive's resumable upload protocol. Uploads are simple or
-multipart, which means a large upload interrupted mid-body is lost rather than
-resumable. This is a real limitation and Section~\ref{sec:guarantees} does not
-soften it.
+Files larger than one upload chunk go through Drive's resumable protocol, so an
+interrupted chunk is resumed from the session's own report of what it holds
+rather than lost.
 
 \subsection{Observability}
 \label{sec:tracing}
@@ -591,7 +597,7 @@ Conditional write / CAS    & \texttt{If-Match}, \texttt{If-None-Match} & \texttt
 Strongly consistent listing & yes & yes & unspecified & \expref{12} \\
 Atomic rename              & no (copy + delete) & no (copy + delete) & no (no rename primitive at all) & --- \\
 Create idempotent under retry & yes, PUT is by key & yes & yes, via a reserved id & \expref{3} \\
-Interrupted upload resumable & multipart upload & resumable upload & protocol exists; \textbf{not used here} & \expref{3} \\
+Interrupted upload resumable & multipart upload & resumable upload & yes, resumable session & \expref{3} \\
 Delete is immediate        & yes (absent versioning) & yes (absent versioning) & \textbf{no} --- trash by default, recoverable & \expref{4} \\
 Per-user request quota     & no & no & \textbf{yes} & \expref{8} \\
 \bottomrule
@@ -658,14 +664,16 @@ guard would conclude the path was free and create a third duplicate.
 
 \subsection{Write Durability and Delete Semantics}
 
-\textbf{Creates are idempotent; writes are not.} We reserve a file id through
-\texttt{files.generateIds} before creating, so a retry after a lost response
-either succeeds or returns \texttt{409}, and the \texttt{409} is positive
-evidence that the first attempt committed (\expref{3}). We do not use Drive's
-resumable upload protocol, so an upload interrupted mid-body is lost rather
-than resumable, and a transport failure on a create is reported as
-\emph{may or may not have been applied}. This is the largest single gap in the
-system and closing it is the first item of future work.
+\textbf{Every write is safe to retry.} We reserve an id through
+\texttt{files.generateIds} before creating any file or folder, so a retry
+after a lost response either succeeds or returns \texttt{409}
+\texttt{fileIdInUse}, which is positive evidence that the first attempt
+committed (\expref{3}). Overwrites, moves and trashes set absolute state by id
+and are retried as they are. The one outcome left is that Drive answers no
+attempt at all; the error then says so, and says that re-running is safe,
+because no write we send can make a second object. What remains unguarded is
+not a retry but a \emph{race}: Drive has no atomic create-if-absent, so two
+concurrent writers to one path can still make two files.
 
 \textbf{Delete is recoverable by default} (\expref{4}). \texttt{RemoveFile}
 trashes; \texttt{SET gdrive\_permanent\_delete=true} opts into a real delete.
@@ -1328,8 +1336,8 @@ share of a small query than the transfer is
 %% OUTLINE (plan sec. 7). Comparative, not a survey: DuckDB-Wasm's paged web
 %% filesystem (same problem shape, different constraints), httpfs/S3,
 %% duckdb-gcs, gsheets, rclone/FUSE, lakehouse formats. Close on the two
-%% limitations that would most change the result: resumable uploads, and the
-%% absence of any revision-pinned read.
+%% limitations that would most change the result: no atomic create-if-absent,
+%% and the absence of any revision-pinned read.
 
 \textbf{Related work.}
 DuckDB-Wasm~\cite{duckdbwasm} solves the closest problem: it reads remote data
@@ -1372,12 +1380,12 @@ Figure~\ref{fig:flame} is what revealed that a lakehouse workload on Drive is
 dominated by serialised metadata rather than transfer, which was invisible in
 every aggregate we had measured before building it.
 
-Two limitations would most change this result. Uploads are simple rather than
-resumable, so a failed write may or may not have been applied --- the single
-largest correctness gap, and the first item of future work. And no read can be
-pinned to a revision, so a scan concurrent with an overwrite may mix two of
-them; this one we can only report, since Drive exposes no mechanism that would
-let us fix it.
+Two limitations would most change this result. Drive has no atomic
+create-if-absent, so concurrent writers to one path can make duplicates that
+the R-4 rule then refuses to read --- retries no longer can, since every write
+carries a reserved id or sets state by id. And no read can be pinned to a
+revision, so a scan concurrent with an overwrite may mix two of them; neither
+can we fix, since Drive exposes no mechanism for it.
 
 \balance
 \bibliographystyle{ACM-Reference-Format}
