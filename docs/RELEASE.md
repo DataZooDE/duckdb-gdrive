@@ -15,7 +15,7 @@ The eight criteria the project set itself, and where each stands.
 | 2 | Cold 100 MB Parquet scan within 3× the same file over GCS, number published | met, narrowly — 2.91× default, 1.93× tuned (2026-08-01). Against S3 the same run is 4.05× and would fail, and a DuckLake workload is 4–10×; `docs/benchmark.md` |
 | 3 | A native Sheet queryable with no manual export | met, live-tested |
 | 4 | Credential, permission and quota errors each distinct and actionable | met, except the rate-limit path (see *What must be true first*) |
-| 5 | CI green on all target platforms, stable + LTS | met — 36 checks green on the v2026.08.01 commit |
+| 5 | CI green on all target platforms, DuckDB 2.0 + v1.5.6 | met — 36 checks green on the v2026.08.01 commit; DuckDB 1.4.x LTS dropped since |
 | 6 | `datazoo-oauth2` standalone **and `erpl-web` consuming it** with no remaining copy | **open** — deferred by D-2, not dropped |
 | 7 | No credential in the repo, in any log, or in any error message | met, gated by `make check_credentials` |
 | 8 | Accepted into `duckdb/community-extensions` | **met** — PR #2407 merged 2026-08-03 at v2026.08.01. Version bumps go in their own PR after that (#2425 for v2026.08.03), matching the sibling extensions' "Bump X to vYYYY.MM.DD" pattern |
@@ -157,6 +157,18 @@ commit lands on a merged PR and changes nothing.
 1. Copy `docs/community-extension-description.yml` to
    `community-extensions/extensions/gdrive/description.yml`, dropping the
    staging header (it is instructions to us, not content).
+
+   **Diff it against the upstream file first.** Upstream is edited too (a
+   maintainer, or a hand-fix in a bump PR), and a blind copy reverts it. At
+   v2026.11.08 the upstream file had a workload-identity-federation paragraph
+   our staged copy lacked; copying would have dropped a true claim. Fold any
+   upstream-only change back into `docs/community-extension-description.yml`
+   in the release PR, so the tagged commit holds what upstream gets:
+
+   ```bash
+   diff <(git -C ../community-extensions show upstream/main:extensions/gdrive/description.yml) \
+        <(sed '/^# /d;/^#$/d' docs/community-extension-description.yml | sed '/./,$!d')
+   ```
 2. Set `repo.ref` to the **tagged commit SHA** — not the tag name, and not
    `main`. It is `PLACEHOLDER_SET_AT_RELEASE` on purpose so that submitting
    without thinking about it fails loudly.
@@ -172,25 +184,33 @@ commit lands on a merged PR and changes nothing.
    2026-10-15) and `variegata` against v1.5.6; a missing key falls back to
    `ref`. One commit builds on both (duckdb-compat). There is no `andium`
    key: DuckDB 1.4.x is not supported.
-3. Open the PR.
-4. **After the merge, ask for the v1.5.6 build. Nothing builds it on its own.**
+3. Open the PR, and **ask for the v1.5.6 build in its description** (wording
+   below). For v2026.11.08 (#3566) that alone was enough: the maintainer who
+   merged also ran the v1.5.6 build, with no comment needed.
+4. **After the merge, make sure the v1.5.6 build ran. Nothing builds it on its own.**
    A merge (push to main) runs community-extensions' `build.yml` for DuckDB 2.0
    only; `scripts/build.py` reads `variegata` only when a maintainer dispatches
    `build.yml` with `duckdb_version: v1.5.6`. duckdb-sharepoint's v2026.10.18
    merged without that request and v1.5.6 had no binary (its #48). Comment on
-   the merged PR:
+   the merged PR if the description's request was not acted on:
 
    > Thanks for merging! Could someone run the **DuckDB v1.5.6** build for
    > `gdrive` (`build.yml` with `duckdb_version: v1.5.6`, `deploy: true`)?
    > The descriptor sets `variegata` to the same SHA as `ref`.
 
-   Done when the v1.5.6 binary exists on every platform:
+   Done when **both** lines carry the release's stamp on every platform. Check
+   the stamp, not that the file exists: a stale binary answers 200 too. That
+   is how v2026.10.18 shipped to DuckDB 2.0 only while v1.5.6 users kept
+   getting v2026.09.26 for three weeks, and the old "does it exist" check
+   passed throughout.
 
    ```bash
-   for a in linux_amd64 linux_arm64 osx_arm64 windows_amd64; do
-     echo "$a $(curl -s -o /dev/null -w '%{http_code}' \
-       https://community-extensions.duckdb.org/v1.5.6/$a/gdrive.duckdb_extension.gz)"
-   done
+   T=vYYYY.MM.DD
+   for v in v1.5.6 v2.0.0; do for a in linux_amd64 linux_arm64 osx_arm64 windows_amd64; do
+     s=$(curl -sf https://community-extensions.duckdb.org/$v/$a/gdrive.duckdb_extension.gz \
+         | gunzip 2>/dev/null | tail -c 512 | strings -n 4 | grep -m1 -E '^v20')
+     echo "$v $a ${s:-MISSING} $([ "$s" = "$T" ] && echo ok || echo STALE)"
+   done; done
    ```
 
 **0.1.0 was submitted 2026-07-30 as duckdb/community-extensions#2407**, ref

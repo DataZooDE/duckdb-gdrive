@@ -642,6 +642,18 @@ lessons:
 `.crew/` holds the crew runs (git-ignored). `helpers.drop_scratch` only
 accepts `run-*` names -- exploratory testers need their own cleanup.
 
+**The community v1.5.6 binary lagged a whole release and every check said
+fine (found 2026-11-08).** community-extensions builds only DuckDB 2.0 on
+merge; v1.5.6 needs a maintainer to dispatch `build.yml`. Nobody did for
+v2026.10.18, so `INSTALL gdrive` on stable DuckDB served v2026.09.26 for three
+weeks, while RELEASE.md's "done" check, an HTTP 200 on the file, passed,
+because a stale binary is still a file. Check the STAMP of both lines after a
+bump. Asking for the v1.5.6 build in the bump PR's description got it run at
+merge for v2026.11.08. Same release, second trap: the upstream descriptor
+had been edited upstream (a workload-identity paragraph), and copying our
+staged file over would have silently reverted it. Diff against upstream
+before copying.
+
 **Releasing:** follow `docs/RELEASE.md`. The community-extensions repo builds
 from a tagged commit and runs none of our live tests, so whatever is broken
 at tag time ships.
