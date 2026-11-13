@@ -1,0 +1,288 @@
+# name: test/sql/gdrive_sheet_range.test.template
+# description: read_sheet_range and COPY ... (FORMAT sheet_range) against a real Google Sheet
+# group: [live]
+#
+# Materialised by e2e/helpers/materialise.py; ${SHEET:name} is a fresh native
+# Sheet in this run's scratch folder, holding Sheet1 = a,b / 1,2. Writes go
+# through the Sheets API in place, so the Sheet keeps its id and its other
+# tabs. Call counts are asserted in gdrive_sheet_range_cost.test.template, in
+# a file of their own (CLAUDE.md: cost assertions belong in their own file).
+# A failed COPY and a formula on another tab need the Sheets API from the
+# harness: e2e/tests/test_sheet_range.py.
+
+require gdrive
+
+require-env GDRIVE_CI_DRIVE_ID
+
+require-env GDRIVE_CI_SA_KEY_FILE
+
+require-env GDRIVE_OAUTH_CLIENT_ID
+
+require-env GDRIVE_OAUTH_CLIENT_SECRET
+
+require-env GDRIVE_USER_REFRESH_TOKEN
+
+statement ok
+CREATE SECRET gdrive_sheets (
+    TYPE gdrive,
+    PROVIDER config,
+    CLIENT_ID '${OAUTH_CLIENT_ID}',
+    CLIENT_SECRET '${OAUTH_CLIENT_SECRET}',
+    REFRESH_TOKEN '${USER_REFRESH_TOKEN}',
+    ROOT_FOLDER_ID '${DRIVE_ID}',
+    DRIVE_SCOPE 'https://www.googleapis.com/auth/drive'
+);
+
+# ---------------------------------------------------------------------------
+# Reading: the tab as uploaded, by bare tab name, by range, without a header.
+# ---------------------------------------------------------------------------
+query II
+SELECT a, b FROM read_sheet_range('gdrive://id:${SHEET:sheet_range}', 'Sheet1')
+----
+1	2
+
+query TT
+SELECT typeof(a), typeof(b) FROM read_sheet_range('gdrive://id:${SHEET:sheet_range}', 'Sheet1!A1:B')
+----
+BIGINT	BIGINT
+
+query II
+SELECT column1, column2 FROM read_sheet_range('gdrive://id:${SHEET:sheet_range}', 'Sheet1!A2:B2', header := false)
+----
+1	2
+
+# The path by name and by browser address reads the same Sheet.
+query I
+SELECT a FROM read_sheet_range('gdrive://scratch/${SCRATCH}/sheet_range', 'Sheet1')
+----
+1
+
+query I
+SELECT b FROM read_sheet_range('https://docs.google.com/spreadsheets/d/${SHEET:sheet_range}/edit#gid=0', 'Sheet1')
+----
+2
+
+statement error
+SELECT * FROM read_sheet_range('gdrive://id:${SHEET:sheet_range}', 'NoSuchTab!A1:B2')
+----
+has no tab 'NoSuchTab'
+
+statement error
+SELECT * FROM read_sheet_range('gdrive://id:${SHEET:sheet_range}', 'A1:B2')
+----
+names no tab
+
+# ---------------------------------------------------------------------------
+# A typed round trip into a NEW tab (created by the COPY). Dates and times are
+# written as serials with a date format, so they read back as dates; a string
+# that looks like a formula stays text (RAW); NULL is an empty cell.
+# ---------------------------------------------------------------------------
+statement ok
+COPY (
+    SELECT * FROM (VALUES
+        (1, 2.5::DOUBLE, '=1+1', true, DATE '2026-01-05', TIMESTAMP '2026-01-05 13:30:00', TIME '06:00:00', 12.34::DECIMAL(10,2), 170141183460469231731687303715884105727::HUGEINT, NULL::VARCHAR),
+        (2, NULL, 'two', false, DATE '2026-02-01', TIMESTAMP '2026-02-01 00:00:00', TIME '23:59:59', -1.5::DECIMAL(10,2), 3::HUGEINT, 'x')
+    ) t(n, x, s, b, d, ts, tm, dec, huge, e)
+    ORDER BY n
+) TO 'gdrive://id:${SHEET:sheet_range}' (FORMAT sheet_range, RANGE 'Forecast!A1');
+
+query TTTTTTTTTT
+SELECT typeof(n), typeof(x), typeof(s), typeof(b), typeof(d), typeof(ts), typeof(tm), typeof(dec), typeof(huge), typeof(e)
+FROM read_sheet_range('gdrive://id:${SHEET:sheet_range}', 'Forecast') LIMIT 1
+----
+BIGINT	DOUBLE	VARCHAR	BOOLEAN	DATE	TIMESTAMP	TIME	DOUBLE	DOUBLE	VARCHAR
+
+query IRTTTTTRT
+SELECT n, x, s, b, d, ts, tm, dec, e FROM read_sheet_range('gdrive://id:${SHEET:sheet_range}', 'Forecast') ORDER BY n
+----
+1	2.5	=1+1	true	2026-01-05	2026-01-05 13:30:00	06:00:00	12.34	NULL
+2	NULL	two	false	2026-02-01	2026-02-01 00:00:00	23:59:59	-1.5	x
+
+# HUGEINT goes through DOUBLE: about 15-17 significant digits survive.
+query I
+SELECT huge > 1.7e38 FROM read_sheet_range('gdrive://id:${SHEET:sheet_range}', 'Forecast') WHERE n = 1
+----
+true
+
+# The other tab is untouched.
+query II
+SELECT a, b FROM read_sheet_range('gdrive://id:${SHEET:sheet_range}', 'Sheet1')
+----
+1	2
+
+# ---------------------------------------------------------------------------
+# Default mode writes a block and clears nothing: one row over two leaves the
+# second row in place. OVERWRITE clears from the anchor down and right first,
+# so the same write SHRINKS the range.
+# ---------------------------------------------------------------------------
+statement ok
+COPY (SELECT 10 AS n, 'ten' AS s) TO 'gdrive://id:${SHEET:sheet_range}' (FORMAT sheet_range, RANGE 'Forecast!A1');
+
+# The header row was rewritten too ("n","s"), so read by position.
+query IT
+SELECT column1, column2 FROM read_sheet_range('gdrive://id:${SHEET:sheet_range}', 'Forecast!A1:B3', header := false) ORDER BY column1
+----
+10	ten
+2	NULL
+n	s
+
+statement ok
+COPY (SELECT 10 AS n, 'ten' AS s) TO 'gdrive://id:${SHEET:sheet_range}' (FORMAT sheet_range, RANGE 'Forecast!A1', OVERWRITE);
+
+query IT
+SELECT n, s FROM read_sheet_range('gdrive://id:${SHEET:sheet_range}', 'Forecast')
+----
+10	ten
+
+query I
+SELECT count(*) FROM read_sheet_range('gdrive://id:${SHEET:sheet_range}', 'Forecast')
+----
+1
+
+# ---------------------------------------------------------------------------
+# An anchor that is not A1, without a header; OVERWRITE bounded by the given
+# columns leaves column D alone.
+# ---------------------------------------------------------------------------
+statement ok
+COPY (SELECT 'keep' AS k) TO 'gdrive://id:${SHEET:sheet_range}' (FORMAT sheet_range, RANGE 'Grid!D2', HEADER false);
+
+statement ok
+COPY (SELECT i, i * 2 AS j FROM range(3) t(i)) TO 'gdrive://id:${SHEET:sheet_range}' (FORMAT sheet_range, RANGE 'Grid!B2', HEADER false);
+
+statement ok
+COPY (SELECT 9 AS i, 9 AS j) TO 'gdrive://id:${SHEET:sheet_range}' (FORMAT sheet_range, RANGE 'Grid!B2:C', HEADER false, OVERWRITE);
+
+query TTT
+SELECT column1, column2, column3 FROM read_sheet_range('gdrive://id:${SHEET:sheet_range}', 'Grid!B2:D', header := false)
+----
+9	9	keep
+
+# Rows that do not fit an explicit range are refused before anything is sent.
+statement error
+COPY (SELECT 1 AS a, 2 AS b, 3 AS c) TO 'gdrive://id:${SHEET:sheet_range}' (FORMAT sheet_range, RANGE 'Grid!B2:C', HEADER false);
+----
+3 columns do not fit
+
+# ---------------------------------------------------------------------------
+# APPEND: below the data, no second header, dates still typed.
+# ---------------------------------------------------------------------------
+statement ok
+COPY (SELECT 'north' AS region, DATE '2026-03-01' AS day) TO 'gdrive://id:${SHEET:sheet_range}' (FORMAT sheet_range, RANGE 'Log!A1', APPEND);
+
+statement ok
+COPY (SELECT * FROM (VALUES ('south', DATE '2026-03-02'), ('east', DATE '2026-03-03')) t(region, day)) TO 'gdrive://id:${SHEET:sheet_range}' (FORMAT sheet_range, RANGE 'Log!A1', APPEND);
+
+query TT
+SELECT region, day FROM read_sheet_range('gdrive://id:${SHEET:sheet_range}', 'Log') ORDER BY day
+----
+north	2026-03-01
+south	2026-03-02
+east	2026-03-03
+
+query T
+SELECT typeof(day) FROM read_sheet_range('gdrive://id:${SHEET:sheet_range}', 'Log') LIMIT 1
+----
+DATE
+
+# The path forms work for writing too.
+statement ok
+COPY (SELECT 'by name' AS how) TO 'gdrive://scratch/${SCRATCH}/sheet_range' (FORMAT sheet_range, RANGE 'Paths!A1');
+
+statement ok
+COPY (SELECT 'by address' AS how) TO 'https://docs.google.com/spreadsheets/d/${SHEET:sheet_range}/edit' (FORMAT sheet_range, RANGE 'Paths!A1', OVERWRITE);
+
+query T
+SELECT how FROM read_sheet_range('gdrive://id:${SHEET:sheet_range}', 'Paths')
+----
+by address
+
+# ---------------------------------------------------------------------------
+# Refusals.
+# ---------------------------------------------------------------------------
+
+# Not a Sheet: a CSV is not written by range (that would rewrite its bytes).
+statement ok
+SELECT write_blob('gdrive://scratch/${SCRATCH}/sheets/plain.csv', encode(E'a\n1\n'));
+
+statement error
+COPY (SELECT 1 AS a) TO 'gdrive://scratch/${SCRATCH}/sheets/plain.csv' (FORMAT sheet_range, RANGE 'Sheet1!A1');
+----
+works on a native Google Sheet
+
+statement error
+SELECT * FROM read_sheet_range('gdrive://scratch/${SCRATCH}/sheets', 'Sheet1')
+----
+is a folder
+
+statement error
+COPY (SELECT 1 AS a) TO 'gdrive://scratch/${SCRATCH}/no-such-sheet' (FORMAT sheet_range, RANGE 'Sheet1!A1');
+----
+no such file or folder
+
+# A plain file write onto a Sheet is still refused -- it would destroy it.
+statement error
+COPY (SELECT 1 AS a) TO 'gdrive://id:${SHEET:sheet_range}' (FORMAT csv);
+----
+it is a native Google file
+
+statement error
+COPY (SELECT [1, 2] AS l) TO 'gdrive://id:${SHEET:sheet_range}' (FORMAT sheet_range, RANGE 'Sheet1!A1');
+----
+a Sheet cell holds one value
+
+statement error
+COPY (SELECT 1 AS a) TO 'gdrive://id:${SHEET:sheet_range}' (FORMAT sheet_range);
+----
+needs RANGE
+
+statement error
+COPY (SELECT 1 AS a) TO 'gdrive://id:${SHEET:sheet_range}' (FORMAT sheet_range, RANGE 'Sheet1!A1', OVERWRITE, APPEND);
+----
+exclude each other
+
+statement error
+COPY (SELECT 1 AS a) TO 'gdrive://id:${SHEET:sheet_range}' (FORMAT sheet_range, RANGE 'Sheet1!A1', USE_TMP_FILE true);
+----
+USE_TMP_FILE is not supported
+
+statement error
+COPY (SELECT 1 AS a) TO 'gdrive://id:${SHEET:sheet_range}' (FORMAT __gdrive_sheet_range, RANGE 'Sheet1!A1');
+----
+write Sheets with FORMAT sheet_range
+
+statement error
+COPY (SELECT 1 AS a) TO 'gdrive://id:${SHEET:sheet_range}?version=1' (FORMAT sheet_range, RANGE 'Sheet1!A1');
+----
+not an earlier version
+
+# None of the refusals touched it.
+query II
+SELECT a, b FROM read_sheet_range('gdrive://id:${SHEET:sheet_range}', 'Sheet1')
+----
+1	2
+
+# ---------------------------------------------------------------------------
+# drive.readonly reads a Sheet but cannot write one: the Sheets API answers
+# ACCESS_TOKEN_SCOPE_INSUFFICIENT, and the message says what to change.
+# ---------------------------------------------------------------------------
+statement ok
+DROP SECRET gdrive_sheets;
+
+statement ok
+CREATE SECRET gdrive_sheets_ro (
+    TYPE gdrive,
+    PROVIDER service_account,
+    KEY_FILE '${SA_KEY_FILE}',
+    ROOT_FOLDER_ID '${DRIVE_ID}',
+    DRIVE_SCOPE 'https://www.googleapis.com/auth/drive.readonly'
+);
+
+query II
+SELECT a, b FROM read_sheet_range('gdrive://id:${SHEET:sheet_range}', 'Sheet1')
+----
+1	2
+
+statement error
+COPY (SELECT 1 AS a) TO 'gdrive://id:${SHEET:sheet_range}' (FORMAT sheet_range, RANGE 'Sheet1!A1');
+----
+<REGEX>:(?s).*insufficient OAuth scope.*sheet_range.*
