@@ -126,6 +126,32 @@ bool FileRowOf(const picojson::object &o, FileRow &out, std::string &error) {
 	Bool(o, "starred", out.starred);
 	Bool(o, "shared", out.shared);
 	Bool(o, "trashed", out.trashed);
+	out.locked = false;
+	out.locked_by = DrivePerson();
+	out.locked_at.clear();
+	out.lock_reason.clear();
+	if (auto restrictions = Arr(o, "contentRestrictions")) {
+		// The first read-only entry is the lock. Drive keeps at most one
+		// today; taking the first rather than the last keeps the answer
+		// stable if it ever reports more.
+		for (auto &v : *restrictions) {
+			if (!v.is<picojson::object>()) {
+				continue;
+			}
+			const auto &r = v.get<picojson::object>();
+			bool read_only = false;
+			if (Bool(r, "readOnly", read_only) && read_only) {
+				out.locked = true;
+				out.locked_by = PersonOf(Obj(r, "restrictingUser"));
+				out.locked_at = Str(r, "restrictionTime");
+				out.lock_reason = Str(r, "reason");
+				break;
+			}
+		}
+	}
+	out.copy_requires_writer_permission = false;
+	out.has_copy_requires_writer_permission =
+	    Bool(o, "copyRequiresWriterPermission", out.copy_requires_writer_permission);
 	return true;
 }
 
@@ -236,7 +262,8 @@ bool FileRow::IsFolder() const {
 std::string FileRowFields() {
 	return "id,name,mimeType,size,createdTime,modifiedTime,lastModifyingUser(displayName,emailAddress),"
 	       "owners(displayName,emailAddress),webViewLink,md5Checksum,headRevisionId,description,parents,"
-	       "properties,starred,shared,trashed";
+	       "properties,starred,shared,trashed,copyRequiresWriterPermission,"
+	       "contentRestrictions(readOnly,reason,restrictionTime,restrictingUser(displayName,emailAddress))";
 }
 
 bool ParseFileRow(const std::string &json_object, FileRow &out, std::string &error) {

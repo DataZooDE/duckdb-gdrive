@@ -40,11 +40,20 @@ SELECT path, owner_email, modified, modified_by_email
 FROM files WHERE shared AND modified < now()::TIMESTAMP - INTERVAL 1 YEAR
 ORDER BY modified;
 
+-- 4. Locked files (Drive's content restriction): who locked what, when, and
+--    why -- and which of them readers may not download or copy.
+CREATE OR REPLACE TABLE locked AS
+SELECT path, locked_by, locked_by_email, locked_at, lock_reason, copy_requires_writer_permission
+FROM files WHERE locked
+ORDER BY locked_at;
+
 -- The report, back to Drive.
 COPY exposed TO 'gdrive://Audit/exposed.csv' (FORMAT csv, HEADER);
 COPY external TO 'gdrive://Audit/external.csv' (FORMAT csv, HEADER);
 COPY stale TO 'gdrive://Audit/stale.csv' (FORMAT csv, HEADER);
+COPY locked TO 'gdrive://Audit/locked.csv' (FORMAT csv, HEADER);
 
 SELECT 'link-shared' AS finding, count(*) AS files FROM exposed
 UNION ALL SELECT 'external grants', count(*) FROM external
-UNION ALL SELECT 'stale and shared', count(*) FROM stale;
+UNION ALL SELECT 'stale and shared', count(*) FROM stale
+UNION ALL SELECT 'locked', count(*) FROM locked;

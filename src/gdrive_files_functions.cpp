@@ -26,16 +26,23 @@ namespace gdrive {
 
 namespace {
 
-//! Columns of read_gdrive_files and search_gdrive, in order.
+//! Columns of read_gdrive_files and search_gdrive, in order. New columns are
+//! APPENDED, so a SELECT * keeps its positions across releases.
 void FileColumns(vector<LogicalType> &types, duckdb_compat::BindNames &names) {
 	names = {"path",        "name",        "size",    "created", "modified", "modified_by", "modified_by_email",
 	         "owner",       "owner_email", "mime_type", "id",    "web_url",  "version",     "md5",
-	         "description", "starred",     "shared",  "parent_id", "properties"};
+	         "description", "starred",     "shared",  "parent_id", "properties",
+	         // The lock: Drive's content restriction (duckdb-sharepoint's
+	         // checked_out_by is the nearest idea over Graph).
+	         "locked", "locked_by", "locked_by_email", "locked_at", "lock_reason",
+	         "copy_requires_writer_permission"};
 	types = {LogicalType::VARCHAR, LogicalType::VARCHAR,   LogicalType::BIGINT,  LogicalType::TIMESTAMP,
 	         LogicalType::TIMESTAMP, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
 	         LogicalType::VARCHAR, LogicalType::VARCHAR,   LogicalType::VARCHAR, LogicalType::VARCHAR,
 	         LogicalType::VARCHAR, LogicalType::VARCHAR,   LogicalType::VARCHAR, LogicalType::BOOLEAN,
-	         LogicalType::BOOLEAN, LogicalType::VARCHAR,   LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR)};
+	         LogicalType::BOOLEAN, LogicalType::VARCHAR,   LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR),
+	         LogicalType::BOOLEAN, LogicalType::VARCHAR,   LogicalType::VARCHAR, LogicalType::TIMESTAMP,
+	         LogicalType::VARCHAR, LogicalType::BOOLEAN};
 }
 
 vector<Value> FileValues(const std::string &path, const FileRow &r) {
@@ -66,7 +73,14 @@ vector<Value> FileValues(const std::string &path, const FileRow &r) {
 	        Value::BOOLEAN(r.starred),
 	        Value::BOOLEAN(r.shared),
 	        TextOrNull(r.parents.empty() ? std::string() : r.parents[0]),
-	        Value::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR, std::move(keys), std::move(values))};
+	        Value::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR, std::move(keys), std::move(values)),
+	        Value::BOOLEAN(r.locked),
+	        TextOrNull(r.locked_by.name),
+	        TextOrNull(r.locked_by.email),
+	        TimestampOrNull(r.locked_at),
+	        TextOrNull(r.lock_reason),
+	        r.has_copy_requires_writer_permission ? Value::BOOLEAN(r.copy_requires_writer_permission)
+	                                              : Value(LogicalType::BOOLEAN)};
 }
 
 // ---------------------------------------------------------------------------
@@ -258,7 +272,8 @@ void RegisterFileFunctions(ExtensionLoader &loader) {
 		         "Drive files as rows, with their metadata: one row per file a gdrive:// path, glob or folder names "
 		         "(a folder means the files directly in it) -- path, name, size, created, modified, modified_by(_email), "
 		         "owner(_email), mime_type, id, web_url, version (the revision id), md5, description, starred, shared, "
-		         "parent_id, and the file's custom properties as a MAP.",
+		         "parent_id, the file's custom properties as a MAP, and its lock: locked, locked_by(_email), "
+		         "locked_at, lock_reason (Drive's content restriction) and copy_requires_writer_permission.",
 		         {"SELECT name, size, modified, modified_by FROM read_gdrive_files('gdrive://Finance/**/*.csv')",
 		          "SELECT * FROM read_gdrive_files('gdrive://Finance')"});
 	}

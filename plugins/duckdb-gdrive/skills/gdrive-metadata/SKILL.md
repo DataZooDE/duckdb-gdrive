@@ -3,7 +3,7 @@ name: gdrive-metadata
 description: >
   Google Drive's metadata as tables with the gdrive DuckDB extension:
   read_gdrive_files (files under a path, glob or folder with owner, last
-  modifier, size, md5, web_url, revision, custom properties), search_gdrive
+  modifier, size, md5, web_url, revision, custom properties, lock), search_gdrive
   (Drive's full-text search; hits read back by id), gdrive_drives (Shared
   Drives and their ids), gdrive_versions and the ?version= path form (read an
   earlier revision with any reader), gdrive_changes (what changed under a
@@ -30,8 +30,14 @@ FROM read_gdrive_files('gdrive://Finance/**/*.csv');      -- a glob, a file, or 
 ```
 Columns: `path, name, size, created, modified, modified_by(_email), owner(_email), mime_type,
 id, web_url, version, md5, description, starred, shared, parent_id, properties`
-(MAP of Drive's custom properties). A glob costs the listings `glob()` makes, no call per file.
-Native Docs/Sheets: `size`, `md5`, `version` are NULL.
+(MAP of Drive's custom properties), then the lock (Drive's content restriction):
+`locked, locked_by, locked_by_email, locked_at, lock_reason, copy_requires_writer_permission`
+(`locked_by_email` is NULL for a service account -- Drive hides it). A glob costs the listings
+`glob()` makes, no call per file. Native Docs/Sheets: `size`, `md5`, `version` are NULL.
+A write to a locked file is refused by Drive ("would violate a content restriction").
+```sql
+SELECT path, locked_by, locked_at, lock_reason FROM read_gdrive_files('gdrive://Finance/**') WHERE locked;
+```
 
 ## Search
 ```sql
@@ -88,3 +94,4 @@ link) | `organization` (a domain), `discoverable` (findable in search), `link_ur
 `inherited_from` (Shared Drives), `expires`. A file or folder, or the files and folders of a
 glob (not the glob's root: add it separately); one call per item. A grant
 no higher than an inherited one is not recorded by Drive and reads as inherited.
+
