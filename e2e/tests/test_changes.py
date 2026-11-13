@@ -210,6 +210,18 @@ def _feed_parents(drive, token: str) -> dict[str, list[str]]:
     return out
 
 
+def _feed_parents_with(drive, token: str, ids) -> dict[str, list[str]]:
+    """_feed_parents, polled until it holds every id in `ids`. Drive's change
+    feed is read from replicas that lag each other: gdrive_changes saw all
+    twenty files and the very next raw read missed one (CI, 2026-11-13)."""
+    deadline = time.monotonic() + FEED_DEADLINE_S
+    while True:
+        feed = _feed_parents(drive, token)
+        if set(ids) <= set(feed) or time.monotonic() > deadline:
+            return feed
+        time.sleep(5)
+
+
 def _ancestor_folders(drive, starts, stop: str, seen: set[str]) -> None:
     """Every folder above `starts`, up to `stop` or the top, into `seen`: the
     folders a parent walk may have to look up (one files.get each)."""
@@ -248,7 +260,7 @@ def test_since_token_cost_is_bounded_by_folders_not_files(writer, scratch, sql, 
     # foreign item deleted in between is "removed" afterwards (no parents), and
     # one created in between is only in the second read. What remains missed is
     # an item both created and deleted within the call itself -- seconds.
-    before = _feed_parents(writer, token)
+    before = _feed_parents_with(writer, token, ids)
     # One process: the first gdrive_changes resolves the path and warms the path
     # cache, so the second's counters are the feed walk alone.
     out = _rows(sql(f"""{gdrive_secret_sql}
@@ -256,7 +268,7 @@ def test_since_token_cost_is_bounded_by_folders_not_files(writer, scratch, sql, 
         CALL gdrive_reset_stats();
         SELECT count(*) FROM gdrive_changes('{base}', token := '{token}');
         SELECT metric || '|' || value FROM gdrive_stats() WHERE metric IN ('files_get', 'files_list');"""))
-    after = _feed_parents(writer, token)
+    after = _feed_parents_with(writer, token, ids)
     stats = {r[0]: int(r[1]) for r in out if r[0] in ("files_get", "files_list")}
     feed = {**before, **after}
     assert set(ids) <= set(feed), "the raw feed shows our files (the poll above saw them)"
@@ -314,6 +326,7 @@ def test_a_mirror_that_follows_the_feed_equals_the_folder(writer, scratch, sql, 
         return {a, c, sub, leaving} <= set(got)
 
     rows = _poll(sql, gdrive_secret_sql, base, token, done, outside=True)
+    seen = [r for r in rows if r[0] != "checkpoint" and r[1] in (a, b, c, sub, s1, leaving, l1)]
     for r in rows:
         if r[0] == "checkpoint":
             continue
@@ -323,4 +336,5 @@ def test_a_mirror_that_follows_the_feed_equals_the_folder(writer, scratch, sql, 
 
     fresh = _rows(sql(f"""{gdrive_secret_sql}
         SELECT id, path FROM read_gdrive_files('{base}/**');"""))
-    assert mirror == {i: p for i, p in fresh}
+    assert mirror == {i: p for i, p in fresh}, {"rows for our ids, in feed order": seen,
+                                                 "c": c, "a": a, "b": b, "sub": sub, "leaving": leaving}
