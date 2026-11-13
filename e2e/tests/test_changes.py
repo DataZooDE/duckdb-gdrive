@@ -193,8 +193,10 @@ def test_a_folder_moved_out_takes_its_subtree(writer, scratch, sql, gdrive_secre
 
 
 def _feed_parents(drive, token: str) -> dict[str, list[str]]:
-    """file id -> parents, for every change since `token` that the walk would
-    try to place: what changes.list returns for this identity, read raw."""
+    """file id -> parents, for every change since `token`: what changes.list
+    returns for this identity, read raw. A removed entry, or one with no file
+    record, maps to [] -- like a file without parents, gdrive_changes confirms
+    it with one files.get before it may become a delete."""
     out: dict[str, list[str]] = {}
     page = token
     while page:
@@ -206,6 +208,8 @@ def _feed_parents(drive, token: str) -> dict[str, list[str]]:
         for c in data.get("changes", []):
             if not c.get("removed") and "file" in c:
                 out[c["fileId"]] = c["file"].get("parents", [])
+            else:
+                out[c["fileId"]] = []
         page = data.get("nextPageToken")
     return out
 
@@ -281,12 +285,16 @@ def test_since_token_cost_is_bounded_by_folders_not_files(writer, scratch, sql, 
     ours = set(ids) | {sub, scratch}
     _ancestor_folders(writer, {p for fid, ps in feed.items() if fid not in ours for p in ps}, scratch, foreign)
     foreign.discard(sub)
-    bound = 1 + len(foreign)
+    # Plus one confirming files.get per entry the walk cannot place (removed,
+    # or no parents) -- in EITHER read, since the call may have seen either.
+    confirms = {fid for fid, ps in [*before.items(), *after.items()] if not ps and fid not in ours}
+    bound = 1 + len(foreign) + len(confirms)
     # +2 for what the merged reads can still miss (a foreign folder created and
     # deleted inside the call). Measured 2026-11-13 with a release live suite
     # writing alongside: files_get 10 against a computed bound of exactly 10;
     # quiet runs, 1. A call per file would be 20 over.
-    assert stats["files_get"] <= bound + 2, (stats, f"bound {bound} = 1 + {len(foreign)} foreign folder(s)")
+    assert stats["files_get"] <= bound + 2, (
+        stats, f"bound {bound} = 1 + {len(foreign)} foreign folder(s) + {len(confirms)} confirm(s)")
     # And the bound means something: a call per file would need the 20 own
     # files on top of whatever the others cost.
     assert bound < len(feed), (bound, len(feed))

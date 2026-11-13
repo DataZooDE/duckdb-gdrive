@@ -52,5 +52,9 @@
   "file_id_not_usable": {
     "status": 400,
     "body": "{\n  \"error\": {\n    \"code\": 400,\n    \"message\": \"The provided file ID is not usable.\",\n    \"errors\": [\n      {\n        \"message\": \"The provided file ID is not usable.\",\n        \"domain\": \"global\",\n        \"reason\": \"fileIdNotUsable\",\n        \"location\": \"file.id\",\n        \"locationType\": \"other\"\n      }\n    ]\n  }\n}\n"
+  },
+  "not_found_deleted_get": {
+    "status": 404,
+    "body": "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"File not found: 1BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB.\",\n    \"errors\": [\n      {\n        \"message\": \"File not found: 1BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB.\",\n        \"domain\": \"global\",\n        \"reason\": \"notFound\",\n        \"location\": \"fileId\",\n        \"locationType\": \"parameter\"\n      }\n    ]\n  }\n}\n"
   }
 }

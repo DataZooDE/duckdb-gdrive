@@ -711,6 +711,35 @@ lessons:
   permissions audit with a typo reports "nothing shared".
 - Native Docs/Sheets report `size: 1024` whatever their content.
 
+**A delete from the changes feed is confirmed first (2026-11-13).** One CI
+run of `test_a_mirror_that_follows_the_feed_equals_the_folder` lost `c.csv`
+from the mirror although its id was in the polled rows -- in the same run in
+which a raw `changes.list` read missed an id `gdrive_changes` had just seen,
+i.e. the feed is served by replicas that lag each other. The suspected path:
+a LIVE in-folder file arrives as `removed`, without a file record, or without
+`parents`, becomes a path-less `delete`, and once the mirror moves past the
+token it is never seen again. A 26-round live investigation (~3,800 feed
+entries, both identities) could NOT reproduce it -- the feed was current that
+day. Fix: such an entry gets ONE `files.get` (FileRowFields, counted as
+`files_get`) before it may become a delete; Drive placing it under the folder
+makes it an upsert (a folder brings its subtree), a 404 keeps the delete. The
+decision is pure (`DecideChange` in `gdrive_change_scope.cpp`, whole table in
+Catch2); entries WITH parents are placed as before at no extra cost.
+`e2e/tests/test_changes_cost.py` pins that between a floor (one `files_get` per
+path-less delete row, which only a confirm produces without `outside`) and a
+ceiling computed from the raw feed (one per unplaceable entry + foreign
+folders), with 8 permanent deletes and 8 uploads in the window. An exact "+1
+per delete" read off a token split was tried first and does not work: in 24
+samples (4 splits) our entries never sat between the tokens taken just
+before and just after the writes -- a feed position is not ordered with the
+write's reply. Do not build a cost test on token splits. A `removed` entry that `files.get` shows alive OUTSIDE the
+folder stays a delete even without `outside := true` -- that is what a move
+out looks like. This narrows the window, it does not close it: a lagging
+`files.get` can be wrong too (and could even keep a ghost of a just-deleted
+file alive in a mirror), so the README tells mirrors that must never lose a
+file to re-list now and then. Captured bodies: `test/cpp/testdata/
+changes_feed.json` and `drive_errors.json` `not_found_deleted_get`.
+
 **Drive locks guard bytes, not names (2026-11-13).** A content restriction
 (`contentRestrictions: [{readOnly: true, reason}]` via files.update -- the
 UI's *Lock*) makes Drive refuse a content write with `403

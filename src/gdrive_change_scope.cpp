@@ -1,5 +1,6 @@
 // Is a file under a folder, and at what path? PURE: see gdrive_change_scope.hpp.
 #include "gdrive_change_scope.hpp"
+#include "gdrive_errors.hpp"
 
 #include <utility>
 
@@ -57,6 +58,63 @@ bool ChangeScope::Locate(const std::string &name, const std::vector<std::string>
 		}
 	}
 	return false;
+}
+
+ChangeEntryKind ClassifyChangeEntry(bool removed, bool has_file, bool has_parents, bool trashed) {
+	if (removed) {
+		return ChangeEntryKind::REMOVED;
+	}
+	if (!has_file) {
+		return ChangeEntryKind::NO_FILE;
+	}
+	if (!has_parents) {
+		return ChangeEntryKind::NO_PARENTS;
+	}
+	return trashed ? ChangeEntryKind::TRASHED : ChangeEntryKind::PLACEABLE;
+}
+
+ChangeVerdict DecideChange(ChangeEntryKind kind, const ChangeLookup *lookup, bool outside) {
+	// An entry with parents is placed by its parents, as it always was: a
+	// confirm per foreign change would cost a files.get for every change the
+	// identity can see.
+	if (kind == ChangeEntryKind::TRASHED || kind == ChangeEntryKind::PLACEABLE) {
+		return ChangeVerdict::KEEP_AS_IS;
+	}
+	if (!lookup) {
+		return ChangeVerdict::LOOK_UP;
+	}
+	// Drive shows it under the folder: the entry was a lagging replica's
+	// view, and the file is what files.get says it is.
+	if (lookup->found && lookup->located) {
+		return lookup->trashed ? ChangeVerdict::DELETE_AT_PATH : ChangeVerdict::UPSERT_FROM_LOOKUP;
+	}
+	// Gone, or alive (or trashed) but NOT under the folder.
+	//
+	// A file record without parents is placed nowhere, as before: a delete
+	// only when outside := true asks for what is not under the folder.
+	if (kind == ChangeEntryKind::NO_PARENTS) {
+		return outside ? ChangeVerdict::DELETE : ChangeVerdict::NOTHING;
+	}
+	// A removed entry stays a delete even when files.get finds the file alive
+	// elsewhere, with or without outside := true: alive-and-outside is exactly
+	// what a file moved OUT looks like, and a mirror holding the id must drop
+	// it. Removed entries were always reported for any id (Drive says only the
+	// id, so nobody can tell ours from foreign ones), and deleting an id the
+	// mirror never had is harmless. The confirm only ever turns a delete into
+	// an upsert when Drive places the file under the folder.
+	return ChangeVerdict::DELETE;
+}
+
+ConfirmReply InterpretConfirmReply(int http_status, const std::string &body, FileRow &file, std::string &error) {
+	if (http_status == 200) {
+		return ParseFileRow(body, file, error) ? ConfirmReply::FOUND : ConfirmReply::FAILED;
+	}
+	// 404 for a file deleted for good and for one this identity cannot see:
+	// Drive answers both the same way, and both mean "drop it".
+	if (ClassifyDriveError(http_status, body).kind == GDriveErrorKind::NOT_FOUND) {
+		return ConfirmReply::GONE;
+	}
+	return ConfirmReply::FAILED;
 }
 
 } // namespace gdrive
