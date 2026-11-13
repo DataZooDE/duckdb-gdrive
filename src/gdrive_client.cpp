@@ -906,6 +906,73 @@ public:
 		return failed;
 	}
 
+	DriveResponse CreateNative(const std::string &parent_id, const std::string &name, const std::string &mime_type,
+	                           const std::string &nonce) override {
+		const std::string metadata = "{\"name\":\"" + JsonEscape(name) + "\",\"parents\":[\"" + JsonEscape(parent_id) +
+		                             "\"],\"mimeType\":\"" + JsonEscape(mime_type) + "\",\"appProperties\":{\"" +
+		                             kCreateNonceKey + "\":\"" + JsonEscape(nonce) + "\"}}";
+		const std::string path = "/drive/v3/files?fields=" + UrlEncode(FileFieldsMask()) + "&" + AllDrivesParams();
+		// Sent ONCE: no reserved id is possible for a Docs Editors type, so a
+		// repeat could make a second file (R-4). retry_non_idempotent=false.
+		auto resp = ExecuteWithRetry(HttpMethod::POST, path, {}, metadata, "application/json; charset=UTF-8",
+		                             &DriveCallStats::files_create, {200}, /*retry_non_idempotent=*/false);
+		const bool transport_ok = resp.ok || resp.http_status != 0;
+		switch (InterpretNonceCreateReply(transport_ok, resp.http_status)) {
+		case NonceCreateOutcome::DONE:
+		case NonceCreateOutcome::FAIL_CLEAN:
+			return resp;
+		case NonceCreateOutcome::LOOK_UP:
+			break;
+		}
+		const std::string cause =
+		    resp.http_status == 0 ? std::string("no response") : "HTTP " + std::to_string(resp.http_status);
+		auto listed = List(NonceLookupQuery(parent_id, nonce), "", "");
+		std::vector<DriveFileMeta> matches;
+		std::string next;
+		if (!listed.ok || !ParseFileList(listed.body, matches, next)) {
+			resp.ok = false;
+			resp.error.kind = GDriveErrorKind::UNKNOWN;
+			resp.error.message = "creating '" + name + "' got no usable answer (" + cause +
+			                     "), and looking it up failed too, so whether it was created is not known. It was "
+			                     "NOT retried: check the folder for it before re-running.";
+			return resp;
+		}
+		switch (DecideNonceLookup(matches.size())) {
+		case NonceLookupOutcome::ADOPT: {
+			// The create landed and only its answer was lost: hand back the
+			// object as the create would have.
+			picojson::value top;
+			picojson::parse(top, listed.body);
+			DriveResponse adopted;
+			adopted.ok = true;
+			adopted.http_status = 200;
+			adopted.body = top.get("files").get(0).serialize();
+			adopted.had_ambiguous_attempt = true;
+			return adopted;
+		}
+		case NonceLookupOutcome::NOT_CREATED:
+			resp.ok = false;
+			resp.error.kind = GDriveErrorKind::TRANSIENT;
+			resp.error.message = "creating '" + name + "' got no usable answer (" + cause +
+			                     "), and Drive lists nothing carrying this create's marker: the Sheet may not have "
+			                     "been created; nothing was retried; it is safe to re-run.";
+			return resp;
+		case NonceLookupOutcome::DUPLICATED:
+			break;
+		}
+		std::string ids;
+		for (const auto &m : matches) {
+			ids += (ids.empty() ? "" : ", ") + m.id;
+		}
+		resp.ok = false;
+		resp.error.kind = GDriveErrorKind::UNKNOWN;
+		resp.error.message = "creating '" + name + "' got no usable answer (" + cause + "), and " +
+		                     std::to_string(matches.size()) +
+		                     " objects carry this create's marker, though it was sent once (ids: " + ids +
+		                     "). That is a bug; nothing was adopted.";
+		return resp;
+	}
+
 	DriveResponse StartResumableUpload(const std::string &file_id, const std::string &parent_id,
 	                                   const std::string &name, const std::string &content_type,
 	                                   const std::string &reserved_id) override {

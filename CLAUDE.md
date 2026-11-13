@@ -29,7 +29,7 @@ the code that cites it.
 | **D-12** | The `erpl-web` migration gate runs that repo's **live** OAuth suites, not just its offline Catch2 binaries. | Needs real SAP Datasphere / Entra / Business Central credentials. Consistent with D-1: a suite that only proves the code compiles is not a gate. |
 | **D-13** | **CalVer, `vYYYY.MM.DD`**, matching the other DataZoo extensions. | The community descriptor carries the CalVer string as `version:` (e.g. `2026.10.18`), as duckdb-sharepoint's does, and the tagged commit as `ref`/`variegata` -- the `ref` is what builds. (An earlier reading held that `version:` must be omitted as not valid semver; the v2026.10.18 submission carried it and merged and built fine, so it stays.) `src/gdrive_version.cpp` is a hardcoded string and `make check_stamp` fails if it does not match the tag; nothing compared them before v2026.08.01. |
 | **D-14** | **`gdrive_immutable_prefixes` is opt-in and empty by default.** | It skips the per-open metadata refresh for paths the user declares are never modified in place. The extension cannot verify the claim: Drive keeps a file id across an overwrite, returns no `ETag`, and *silently ignores* `If-Match` (verified 2026-08-01 — a bogus precondition returns `206` and the data, not `412`). So it is a user assertion, and the promise is stronger than "not overwritten": not modified, not replaced, and not deleted-and-recreated while the process runs. |
-| **D-15** | **Sheets are read and written by range through the Sheets API v4** (`sheets.googleapis.com`), not by exporting and re-uploading CSV. `read_sheet_range` / `COPY … (FORMAT sheet_range, RANGE 'Tab!A1' [, HEADER] [, OVERWRITE \| APPEND])`, parallel to duckdb-sharepoint's `excel_range`. The name `gsheet` is not used anywhere (the `gsheets` community extension owns `read_gsheet` / `FORMAT gsheet`). | A CSV re-upload (`files.update` with `text/csv` onto the Sheet) was rejected: it replaces EVERY tab with one, drops formulas, formats, charts and named ranges, and can change values it never meant to (a converted CSV is re-parsed as if typed, so text such as `00123` or `=1+1` need not stay text). It is also exactly what `RefuseReplacing` exists to stop. The Sheets API changes only the cells it is told to, keeps the file id, and can do a new tab + clear + write in one atomic `batchUpdate`. The cost: a second API host (`HostRequest`), the Sheets API enabled on the billed project (a new `SERVICE_DISABLED` error kind), and the full `drive` scope to write. |
+| **D-15** | **Sheets are read and written by range through the Sheets API v4** (`sheets.googleapis.com`), not by exporting and re-uploading CSV. `read_sheet_range` / `COPY … (FORMAT sheet_range, RANGE 'Tab!A1' [, HEADER] [, OVERWRITE \| APPEND])`, parallel to duckdb-sharepoint's `excel_range`. The name `gsheet` is not used anywhere (the `gsheets` community extension owns `read_gsheet` / `FORMAT gsheet`). | A CSV re-upload (`files.update` with `text/csv` onto the Sheet) was rejected: it replaces EVERY tab with one, drops formulas, formats, charts and named ranges, and can change values it never meant to (a converted CSV is re-parsed as if typed, so text such as `00123` or `=1+1` need not stay text). It is also exactly what `RefuseReplacing` exists to stop. The Sheets API changes only the cells it is told to, keeps the file id, and can do a new tab + clear + write in one atomic `batchUpdate`. The cost: a second API host (`HostRequest`), the Sheets API enabled on the billed project (a new `SERVICE_DISABLED` error kind), and the full `drive` scope to write. A `gdrive://` PATH that names nothing gets a new Sheet (2026-11-13; `CREATE false` opts out; ids/addresses and data-file names never create): ONE metadata-only Drive `files.create` -- the only create in the extension that cannot reserve an id, so it is sent once and recovered by an appProperties nonce, fail closed (see "Creating a native Sheet" below). Created last, in finalize; LEFT in place on a later Sheets failure, named in the error. |
 
 Target name: **`gdrive`** — `INSTALL gdrive; LOAD gdrive;`, and `TARGET_NAME`
 in `CMakeLists.txt`.
@@ -774,7 +774,9 @@ Sheet it was writing into** -- verified red: `CopyToFunctionGlobalState`'s
 destructor calls `TryRemoveFile` on `op.file_path`, pushed into
 `created_files` before `copy_to_initialize_global` ever runs, so an in-place
 writer's target counts as "created". `TryRemoveFile` now never removes a native
-Google file (nothing this filesystem writes can create one). 2.0's
+Google file. (Since 2026-11-13 FORMAT sheet_range CAN create one -- a missing
+Sheet -- and that one is deliberately left in place on a failure too, named in
+the error, so the rule still holds: no cleanup removes a native file.) 2.0's
 `CopyOutputLifecycle` preserves a target that existed before the COPY, so it
 was 1.5.6 only -- but `duckdb-sharepoint`'s `excel_range` has the same shape
 and no guard: check it there. (5) `updateCells` with a `range` and NO `rows`
@@ -785,6 +787,37 @@ parsed, which is RAW semantics without `values.update`; dates therefore go as
 `numberValue` serials plus a `repeatCell` number format, or they read back as
 numbers. (7) Grid growth uses `updateSheetProperties` (set rowCount), not
 `appendDimension`: it is idempotent, so an OVERWRITE batch can be retried.
+
+**Creating a native Sheet (2026-11-13) -- Drive will not reserve its id.**
+Spiked live before building `COPY … (FORMAT sheet_range)` into a missing
+Sheet: (a) a metadata-only `files.create` with a `generateIds` id and
+`mimeType` spreadsheet answers **403 `generatedIdNotSupported`**, "Generated
+IDs are not supported for Docs Editors formats" -- no media part does not
+help; (b) `spreadsheets.create` rejects a supplied id too ("The id is
+invalid", or with a Drive-reserved one "The id is for a different type of
+document"). `e2e/helpers/drive.py`'s `upload_native` had recorded the same 403
+for a CSV conversion since 2026-10-16, but nothing here did, and the first
+plan assumed the reserved-id path would work. So this one create is NOT
+retry-safe by id: `GDriveClient::CreateNative` sends it ONCE
+(retry_non_idempotent=false) with `appProperties: {gdrive_create: <nonce>}`,
+and on a transport failure / 5xx does one `files.list` for the nonce
+(`NonceLookupQuery`, counted as files_list): one hit adopted, none = "may not
+have been created; nothing was retried; it is safe to re-run", several = an
+error naming them (pure: `InterpretNonceCreateReply`, `DecideNonceLookup`).
+The residual risk is real and UNPROVEN: if Drive's listing lags a create that
+did land, the lookup misses it and a re-run duplicates. No lost-reply hook
+exists to test it (D-1). Also verified: the new Sheet is visible to the
+Sheets API at once (`spreadsheets.get` 1.3 s after, 200; a `batchUpdate`
+straight after, 200 -- no 404 retry needed); its one tab is `sheetId` 0,
+"Sheet1" in en_GB, 1000 x 26 -- the title is locale-dependent, so it is never
+read, only renamed (`SheetSetTabRequest`) in the first batch, which is
+idempotent (repeat answers 200). A tab title over 100 characters is a
+reliable `400` ("cannot be greater than 100 characters") -- that is how the
+e2e failure-after-create test fails a write on purpose. The create runs in
+finalize, after `ValidateNewSheetWrite`, and the mkdir walk is shared with
+`OpenFile` as `GDriveFileSystem::PrepareWriteTarget` (folders still reserve
+ids in one `generateIds`; the Sheet adds none). Two writers creating one new
+Sheet at the same moment can both create it, exactly as with folders.
 
 **The community v1.5.6 binary lagged a whole release and every check said
 fine (found 2026-11-08).** community-extensions builds only DuckDB 2.0 on

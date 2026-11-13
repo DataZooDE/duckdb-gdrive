@@ -15,11 +15,13 @@
 #include "gdrive_internal.hpp"
 #include "gdrive_sheets.hpp"
 #include "gdrive_table_util.hpp"
+#include "gdrive_weburl.hpp"
 
 #include "duckdb.hpp"
 #include "duckdb/common/types/date.hpp"
 #include "duckdb/common/types/time.hpp"
 #include "duckdb/common/types/timestamp.hpp"
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/function/copy_function.hpp"
 #include "duckdb/main/client_data.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
@@ -82,6 +84,63 @@ Spreadsheet OpenSpreadsheet(ClientContext &context, const std::string &arg, cons
 	}
 	s.auth = GetAuthContext(opener, s.path);
 	s.id = meta.id;
+	return s;
+}
+
+//! COPY ... (FORMAT sheet_range)'s target: an existing native Sheet, or --
+//! for a gdrive:// PATH that names nothing -- one this COPY will create in
+//! finalize (`create`; nothing is created yet). Everything else is refused
+//! here, before a row is read (DecideSheetTarget).
+Spreadsheet ResolveSheetForWrite(ClientContext &context, const std::string &arg, bool create_allowed, bool &create) {
+	const char *function = "FORMAT sheet_range";
+	create = false;
+	Spreadsheet s;
+	s.path = PathArgument(Value(arg), function);
+	auto parsed = ParseGDriveUri(s.path);
+	if (!parsed.ok) {
+		throw InvalidInputException("gdrive: %s", parsed.error);
+	}
+	if (!parsed.uri.version.empty()) {
+		throw InvalidInputException("gdrive: %s: the Sheets API reads and writes the current Sheet only, not an "
+		                            "earlier version: '%s'",
+		                            function, s.path);
+	}
+	if (parsed.uri.kind != GDriveUriKind::FILE_ID && HasGlobMetacharacters(s.path)) {
+		throw InvalidInputException("gdrive: %s takes one Sheet, not a glob: '%s'", function, s.path);
+	}
+	const auto form = IsDriveWebUrl(arg) ? SheetTargetForm::ADDRESS
+	                  : parsed.uri.kind == GDriveUriKind::FILE_ID ? SheetTargetForm::ID
+	                                                               : SheetTargetForm::PATH;
+	auto opener = ClientData::Get(context).file_opener.get();
+	auto &fs = GDriveFileSystem::ForDatabase(DatabaseInstance::GetDatabase(context));
+	DriveFileMeta meta;
+	// Non-throwing for "names nothing"; an R-4 ambiguity still throws.
+	const bool found = fs.TryResolveLiteral(s.path, opener, meta);
+	const auto name = form == SheetTargetForm::PATH ? parsed.uri.FileName() : std::string();
+	switch (DecideSheetTarget(found, meta.mime_type, form, create_allowed, name)) {
+	case SheetTargetAction::OPEN:
+		s.id = meta.id;
+		break;
+	case SheetTargetAction::CREATE:
+		create = true;
+		break;
+	case SheetTargetAction::REFUSE_NOT_SHEET:
+		throw InvalidInputException("gdrive: %s works on a native Google Sheet, and '%s' is %s%s", function, s.path,
+		                            meta.IsFolder() ? "a folder" : "not one (" + meta.mime_type + ")",
+		                            meta.IsFolder() ? "" : "; read a file with read_csv / read_parquet");
+	case SheetTargetAction::REFUSE_DATA_EXTENSION:
+		throw InvalidInputException(
+		    "gdrive: no such Sheet: '%s', and FORMAT sheet_range will not create a Sheet named '%s': the name reads "
+		    "as a data file. Drop the extension for a Sheet, or use FORMAT csv / FORMAT parquet to write a file.",
+		    s.path, name);
+	case SheetTargetAction::NO_SUCH:
+		throw InvalidInputException("gdrive: no such Sheet: '%s'%s", s.path,
+		                            form != SheetTargetForm::PATH
+		                                ? " (only a gdrive:// path can create a new Sheet; an id or an address "
+		                                  "must name an existing one)"
+		                                : "");
+	}
+	s.auth = GetAuthContext(opener, s.path);
 	return s;
 }
 
@@ -428,6 +487,9 @@ struct SheetWriteBindData : public FunctionData {
 	//! when it creates the tab).
 	bool header_given = false;
 	WriteMode mode = WriteMode::BLOCK;
+	//! CREATE (default true): a gdrive:// path that names nothing gets a new
+	//! native Sheet. CREATE false restores "the Sheet must exist".
+	bool create = true;
 	vector<string> names;
 	vector<SheetValueKind> kinds;
 
@@ -437,7 +499,7 @@ struct SheetWriteBindData : public FunctionData {
 	bool Equals(const FunctionData &other_p) const override {
 		auto &other = other_p.Cast<SheetWriteBindData>();
 		return FormatSheetRange(target) == FormatSheetRange(other.target) && names == other.names &&
-		       mode == other.mode && header == other.header;
+		       mode == other.mode && header == other.header && create == other.create;
 	}
 };
 
@@ -466,6 +528,9 @@ unique_ptr<FunctionData> SheetWriteBind(ClientContext &, CopyFunctionBindInput &
 	} else if (FindCopyOption(info.options, kAppendMarker)) {
 		data->mode = WriteMode::APPEND;
 	}
+	if (auto create = FindCopyOption(info.options, kCreateMarker)) {
+		data->create = CopyFlagSet(create);
+	}
 	for (idx_t i = 0; i < sql_types.size(); i++) {
 		const auto name = duckdb_compat::Str(names[i]);
 		if (IsNested(sql_types[i])) {
@@ -481,6 +546,17 @@ unique_ptr<FunctionData> SheetWriteBind(ClientContext &, CopyFunctionBindInput &
 
 struct SheetWriteGlobalState : public GlobalFunctionData {
 	Spreadsheet sheet;
+	//! The target names nothing: finalize creates the Sheet, AFTER every row
+	//! is in and the block is validated -- a COPY whose query fails, or that
+	//! is too large, creates nothing.
+	bool create_pending = false;
+	//! Set once finalize created the Sheet (sheet.id is then its id).
+	bool created = false;
+	//! Batches that landed; on a new Sheet, none means it is still empty.
+	int64_t batches_done = 0;
+	//! Rows are values.append RAW arrays (an APPEND into an existing Sheet),
+	//! not CellData. A new Sheet is written as a BLOCK whatever the mode.
+	bool raw_rows = false;
 	std::vector<SheetProperties> tabs;
 	//! The target tab, or nullptr when this COPY creates it.
 	const SheetProperties *tab = nullptr;
@@ -497,18 +573,24 @@ unique_ptr<GlobalFunctionData> SheetWriteInitGlobal(ClientContext &context, Func
 	auto &bind = bind_p.Cast<SheetWriteBindData>();
 	auto g = make_uniq<SheetWriteGlobalState>();
 	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, {
-		g->sheet = OpenSpreadsheet(context, file_path, "FORMAT sheet_range");
-		auto client = CreateGDriveClient(g->sheet.auth);
-		g->tabs = GetTabs(*client, g->sheet);
-		g->tab = FindTab(g->tabs, bind.target.sheet);
-		for (auto &t : g->tabs) {
-			if (&t != g->tab) {
-				g->other_cells += t.rows * t.cols;
+		g->sheet = ResolveSheetForWrite(context, file_path, bind.create, g->create_pending);
+		if (!g->create_pending) {
+			auto client = CreateGDriveClient(g->sheet.auth);
+			g->tabs = GetTabs(*client, g->sheet);
+			g->tab = FindTab(g->tabs, bind.target.sheet);
+			for (auto &t : g->tabs) {
+				if (&t != g->tab) {
+					g->other_cells += t.rows * t.cols;
+				}
 			}
 		}
+		// A new Sheet has one tab (sheetId 0) that finalize renames; it is
+		// never asked for (its title is locale-dependent: "Sheet1",
+		// "Tabelle1"). Like a new tab, it gets the header by default.
+		g->raw_rows = bind.mode == WriteMode::APPEND && !g->create_pending;
 		g->header_row = bind.mode == WriteMode::APPEND ? (bind.header_given ? bind.header : !g->tab) : bind.header;
 		if (g->header_row) {
-			std::string row = bind.mode == WriteMode::APPEND ? "[" : "{\"values\":[";
+			std::string row = g->raw_rows ? "[" : "{\"values\":[";
 			for (size_t c = 0; c < bind.names.size(); c++) {
 				SheetWriteValue v;
 				v.kind = SheetValueKind::TEXT;
@@ -516,9 +598,9 @@ unique_ptr<GlobalFunctionData> SheetWriteInitGlobal(ClientContext &context, Func
 				if (c) {
 					row += ',';
 				}
-				row += bind.mode == WriteMode::APPEND ? SheetRawValueJson(v) : SheetCellJson(v);
+				row += g->raw_rows ? SheetRawValueJson(v) : SheetCellJson(v);
 			}
-			row += bind.mode == WriteMode::APPEND ? "]" : "]}";
+			row += g->raw_rows ? "]" : "]}";
 			g->rows.push_back(std::move(row));
 		}
 	});
@@ -534,7 +616,7 @@ void SheetWriteSink(ExecutionContext &, FunctionData &bind_p, GlobalFunctionData
 	auto &bind = bind_p.Cast<SheetWriteBindData>();
 	auto &g = gstate_p.Cast<SheetWriteGlobalState>();
 	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, {
-		const bool raw = bind.mode == WriteMode::APPEND;
+		const bool raw = g.raw_rows;
 		const int64_t cols = static_cast<int64_t>(bind.names.size());
 		for (idx_t r = 0; r < input.size(); r++) {
 			std::string row = raw ? "[" : "{\"values\":[";
@@ -586,13 +668,20 @@ std::string PartialWriteMessage(const Spreadsheet &s, int64_t done, int64_t tota
 //! the OVERWRITE clear, the cells and the date formats -- as batchUpdate
 //! requests, ONE call when it fits the byte budget (atomic: Sheets applies a
 //! batch all or nothing), else one per chunk with the structure in the first.
+//!
+//! A Sheet this COPY just created (`g.created`) has exactly one tab, sheetId
+//! 0, under a title nobody relies on: the first batch renames it and sizes its
+//! grid (SheetSetTabRequest), and the cells follow in the same atomic batch.
+//! OVERWRITE needs no clear and APPEND has nothing to append below, so every
+//! mode is a BLOCK at the anchor there.
 void WriteBlock(GDriveClient &client, const SheetWriteBindData &bind, SheetWriteGlobalState &g) {
-	const bool overwrite = bind.mode == WriteMode::OVERWRITE;
+	const bool fresh = g.created;
+	const bool overwrite = bind.mode == WriteMode::OVERWRITE && !fresh;
 	const int64_t cols = static_cast<int64_t>(bind.names.size());
 	const int64_t rows = static_cast<int64_t>(g.rows.size());
 	std::vector<std::string> structure;
 	int64_t sheet_id;
-	const bool creating = g.tab == nullptr;
+	const bool creating = g.tab == nullptr && !fresh;
 	SheetGridRange block;
 	if (rows > 0) {
 		std::string error;
@@ -606,7 +695,11 @@ void WriteBlock(GDriveClient &client, const SheetWriteBindData &bind, SheetWrite
 		block.end_col = block.start_col;
 	}
 	int64_t grid_rows, grid_cols;
-	if (creating) {
+	if (fresh) {
+		sheet_id = 0;
+		SheetGridFor(kSheetsDefaultRows, kSheetsDefaultColumns, block, grid_rows, grid_cols);
+		structure.push_back(SheetSetTabRequest(sheet_id, bind.target.sheet, grid_rows, grid_cols));
+	} else if (creating) {
 		sheet_id = NewSheetId(g.tabs);
 		SheetGridFor(kSheetsDefaultRows, kSheetsDefaultColumns, block, grid_rows, grid_cols);
 		structure.push_back(SheetAddSheetRequest(sheet_id, bind.target.sheet, grid_rows, grid_cols));
@@ -659,7 +752,9 @@ void WriteBlock(GDriveClient &client, const SheetWriteBindData &bind, SheetWrite
 		// Only an OVERWRITE is repeatable whatever happened to the first try:
 		// it sets the whole range. A new tab is not (a second addSheet fails),
 		// so its first batch is never retried.
-		const bool retry = overwrite && !(creating && k == 0);
+		// A new Sheet's batches are repeatable too: renaming tab 0, setting its
+		// grid and writing cells all set absolute state.
+		const bool retry = fresh || (overwrite && !(creating && k == 0));
 		auto resp = client.HostRequest(kSheetsHost, "POST", SpreadsheetPath(g.sheet) + ":batchUpdate",
 		                               SheetBatchUpdateBody(requests), &DriveCallStats::sheets_update, retry);
 		if (!resp.ok) {
@@ -670,6 +765,7 @@ void WriteBlock(GDriveClient &client, const SheetWriteBindData &bind, SheetWrite
 			                                      FormatUserMessage(resp.error, What(g.sheet))));
 		}
 		written += static_cast<int64_t>(end - begin);
+		g.batches_done++;
 	}
 }
 
@@ -757,10 +853,71 @@ void WriteAppend(GDriveClient &client, const SheetWriteBindData &bind, SheetWrit
 	}
 }
 
-void SheetWriteFinalize(ClientContext &, FunctionData &bind_p, GlobalFunctionData &gstate_p) {
+//! Everything a new Sheet's write can be refused for without Drive, checked
+//! BEFORE it is created: a COPY too large for its RANGE, or for a Sheet, must
+//! not leave an empty Sheet behind.
+void ValidateNewSheetWrite(const SheetWriteBindData &bind, const SheetWriteGlobalState &g) {
+	const int64_t rows = static_cast<int64_t>(g.rows.size());
+	const int64_t cols = static_cast<int64_t>(bind.names.size());
+	std::string error;
+	SheetGridRange block;
+	if (rows > 0) {
+		if (!SheetWriteBlock(bind.target, rows, cols, block, error)) {
+			throw InvalidInputException("gdrive: cannot write to %s: %s", What(g.sheet), error);
+		}
+	} else {
+		block.start_row = block.end_row = bind.target.HasCells() ? bind.target.first_row - 1 : 0;
+		block.start_col = block.end_col = bind.target.HasCells() ? bind.target.first_col - 1 : 0;
+	}
+	int64_t grid_rows, grid_cols;
+	SheetGridFor(kSheetsDefaultRows, kSheetsDefaultColumns, block, grid_rows, grid_cols);
+	if (!CheckSheetCellLimit(0, grid_rows, grid_cols, error)) {
+		throw InvalidInputException("gdrive: cannot write to %s: %s", What(g.sheet), error);
+	}
+}
+
+//! Create the Sheet (and any missing folders) now that the rows are known to
+//! fit. Drive refuses a reserved id for a native type, so the create is sent
+//! once and recovered by its nonce (GDriveClient::CreateNative).
+void CreatePendingSheet(ClientContext &context, SheetWriteGlobalState &g) {
+	auto opener = ClientData::Get(context).file_opener.get();
+	auto &fs = GDriveFileSystem::ForDatabase(DatabaseInstance::GetDatabase(context));
+	auto made = fs.CreateNativeFile(g.sheet.path, opener, kSpreadsheetMime);
+	if (made.appeared) {
+		// Another writer, or a person, got there first. Writing into what
+		// appeared would be a guess about what it is.
+		throw IOException("gdrive: '%s' appeared while the COPY ran (id %s, %s); nothing was created. Re-run the "
+		                  "COPY to write into it if it is a Sheet.",
+		                  g.sheet.path, made.meta.id, made.meta.mime_type);
+	}
+	g.sheet.id = made.meta.id;
+	g.created = true;
+}
+
+void SheetWriteFinalize(ClientContext &context, FunctionData &bind_p, GlobalFunctionData &gstate_p) {
 	auto &bind = bind_p.Cast<SheetWriteBindData>();
 	auto &g = gstate_p.Cast<SheetWriteGlobalState>();
 	DATAZOO_GUARDED_BLOCK(GDRIVE_BANNER, {
+		if (g.create_pending) {
+			ValidateNewSheetWrite(bind, g);
+			CreatePendingSheet(context, g);
+			auto client = CreateGDriveClient(g.sheet.auth);
+			try {
+				WriteBlock(*client, bind, g);
+			} catch (std::exception &e) {
+				// LEFT in place, deliberately (user decision 2026-11-13): it is
+				// ours, it is named here, and a re-run writes into it. Trashing
+				// it could not be told apart from trashing someone's Sheet.
+				ErrorData error(e);
+				throw IOException("gdrive: created a new Sheet at '%s' (id %s), but writing into it failed, so it is "
+				                  "left in place %s. Re-run the COPY to write into it (gdrive://id:%s names it too). "
+				                  "Cause: %s",
+				                  g.sheet.path, g.sheet.id,
+				                  g.batches_done == 0 ? "empty" : "partially written", g.sheet.id,
+				                  error.RawMessage());
+			}
+			return;
+		}
 		auto client = CreateGDriveClient(g.sheet.auth);
 		if (bind.mode == WriteMode::APPEND) {
 			WriteAppend(*client, bind, g);
@@ -779,6 +936,7 @@ void SheetRangeCopyOptions(ClientContext &, CopyOptionsInput &input) {
 	AddCopyOption(input.options, kInPlaceMarker, LogicalType::BOOLEAN);
 	AddCopyOption(input.options, kOverwriteMarker, LogicalType::BOOLEAN);
 	AddCopyOption(input.options, kAppendMarker, LogicalType::BOOLEAN);
+	AddCopyOption(input.options, kCreateMarker, LogicalType::BOOLEAN);
 	AddCopyOption(input.options, "range", LogicalType::VARCHAR);
 	AddCopyOption(input.options, "header", LogicalType::BOOLEAN);
 }

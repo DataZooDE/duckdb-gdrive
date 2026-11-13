@@ -206,6 +206,17 @@ public:
 	                             const std::string &data,
 	                             const std::string &reserved_id = "") = 0;
 
+	//! Create an EMPTY native Google file (`mime_type`, e.g. a spreadsheet)
+	//! named `name` in `parent_id`: one metadata-only files.create. Drive
+	//! refuses a reserved id for these (403 generatedIdNotSupported), so the
+	//! request carries `nonce` in appProperties instead and is sent ONCE, never
+	//! re-sent. With no usable reply it is looked up by the nonce (one
+	//! files.list): one match is adopted, none fails closed ("may not have
+	//! been created, nothing was retried"), more than one is an error naming
+	//! them. See InterpretNonceCreateReply / DecideNonceLookup.
+	virtual DriveResponse CreateNative(const std::string &parent_id, const std::string &name,
+	                                   const std::string &mime_type, const std::string &nonce) = 0;
+
 	//! STREAMING writes over a Drive resumable upload session.
 	//!
 	//! StartResumableUpload initiates a session (files.create when `file_id`

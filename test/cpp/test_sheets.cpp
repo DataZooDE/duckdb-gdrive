@@ -288,6 +288,46 @@ TEST_CASE("batchUpdate request shapes", "[sheets]") {
 	REQUIRE(SheetBatchUpdateBody({}) == R"({"requests":[]})");
 }
 
+TEST_CASE("a created Sheet's first tab: title and grid in one idempotent request", "[sheets]") {
+	REQUIRE(SheetSetTabRequest(0, "It's \"Data\"", 1000, 26) ==
+	        R"({"updateSheetProperties":{"properties":{"sheetId":0,"title":"It's \"Data\"","gridProperties":{"rowCount":1000,"columnCount":26}},"fields":"title,gridProperties.rowCount,gridProperties.columnCount"}})");
+}
+
+TEST_CASE("what a sheet_range COPY target is: open, create, or refuse", "[sheets]") {
+	const std::string sheet = "application/vnd.google-apps.spreadsheet";
+	const std::string folder = "application/vnd.google-apps.folder";
+	using F = SheetTargetForm;
+	using A = SheetTargetAction;
+	// Existing objects, however addressed.
+	for (auto form : {F::PATH, F::ID, F::ADDRESS}) {
+		REQUIRE(DecideSheetTarget(true, sheet, form, true, "sales") == A::OPEN);
+		REQUIRE(DecideSheetTarget(true, sheet, form, false, "sales") == A::OPEN);
+		REQUIRE(DecideSheetTarget(true, folder, form, true, "sales") == A::REFUSE_NOT_SHEET);
+		REQUIRE(DecideSheetTarget(true, "text/csv", form, true, "plain.csv") == A::REFUSE_NOT_SHEET);
+	}
+	// An existing Sheet named like a data file is still written into.
+	REQUIRE(DecideSheetTarget(true, sheet, F::PATH, true, "export.csv") == A::OPEN);
+	// Nothing there: only a path creates, and only when allowed.
+	REQUIRE(DecideSheetTarget(false, "", F::PATH, true, "sales") == A::CREATE);
+	REQUIRE(DecideSheetTarget(false, "", F::PATH, false, "sales") == A::NO_SUCH);
+	REQUIRE(DecideSheetTarget(false, "", F::ID, true, "") == A::NO_SUCH);
+	REQUIRE(DecideSheetTarget(false, "", F::ADDRESS, true, "") == A::NO_SUCH);
+	REQUIRE(DecideSheetTarget(false, "", F::PATH, true, "") == A::NO_SUCH);
+	// A data-file name is refused, any case -- unless CREATE false asked for
+	// the plain "must exist" error.
+	for (auto name : {"out.csv", "out.TSV", "x.parquet", "x.json", "x.jsonl", "x.ndjson", "x.xlsx", "x.XLS",
+	                  "notes.txt"}) {
+		INFO(name);
+		REQUIRE(DecideSheetTarget(false, "", F::PATH, true, name) == A::REFUSE_DATA_EXTENSION);
+		REQUIRE(DecideSheetTarget(false, "", F::PATH, false, name) == A::NO_SUCH);
+	}
+	// Not data extensions: a bare name, a dot elsewhere, the extension alone.
+	for (auto name : {"report", "q3.plan", "csv", ".csv", "data.csv.bak", "v1.2"}) {
+		INFO(name);
+		REQUIRE(DecideSheetTarget(false, "", F::PATH, true, name) == A::CREATE);
+	}
+}
+
 TEST_CASE("spreadsheet properties, and an unused sheetId", "[sheets]") {
 	// The shape spreadsheets.get answers with fields=sheets.properties(...):
 	// the first tab's sheetId 0 is omitted, as proto3 omits a default.

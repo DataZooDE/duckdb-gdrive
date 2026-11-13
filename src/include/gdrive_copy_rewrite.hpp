@@ -33,6 +33,9 @@ constexpr const char *kInPlaceMarker = "__gdrive_in_place";
 //! range first" and "append below the data".
 constexpr const char *kOverwriteMarker = "__gdrive_overwrite";
 constexpr const char *kAppendMarker = "__gdrive_append";
+//! FORMAT sheet_range's CREATE (default true: a missing Sheet is created),
+//! validated here and carried as an explicit boolean.
+constexpr const char *kCreateMarker = "__gdrive_create";
 
 //! A COPY option's values, or nullptr; the map's key is a string before 2.0
 //! and an Identifier in 2.0.
@@ -60,11 +63,27 @@ inline bool CopyFlagSet(const vector<Value> *values) {
 //! Rebind `stmt` as `internal_format`, in place (USE_TMP_FILE false). `what`
 //! names the target in errors. OVERWRITE and APPEND become markers (never
 //! reaching DuckDB's file handling); both at once, or OVERWRITE_OR_IGNORE,
-//! are refused.
+//! are refused. CREATE [true|false] becomes a marker too; anything but a
+//! boolean is refused. (CopyFunction::plan runs for COPY ... TO only.)
 inline BoundStatement RewriteCopyInPlace(Binder &binder, CopyStatement &stmt, const char *internal_format,
                                          const char *what) {
 	auto copy = stmt.Copy();
 	auto &info = *copy->Cast<CopyStatement>().info;
+	using Key = typename std::decay<decltype(info.options)>::type::key_type;
+	if (auto create = FindCopyOption(info.options, "create")) {
+		bool flag = true;
+		if (!create->empty()) {
+			Value v = (*create)[0];
+			if (create->size() != 1 || v.IsNull() || !v.DefaultTryCastAs(LogicalType::BOOLEAN)) {
+				throw InvalidInputException("gdrive: CREATE takes true or false (CREATE false: the %s must already "
+				                            "exist), not %s",
+				                            what, (*create)[0].ToString());
+			}
+			flag = BooleanValue::Get(v);
+		}
+		info.options.erase(Key("create"));
+		info.options[Key(kCreateMarker)] = {Value::BOOLEAN(flag)};
+	}
 	if (CopyFlagSet(FindCopyOption(info.options, "use_tmp_file"))) {
 		throw InvalidInputException("gdrive: USE_TMP_FILE is not supported for %s writes: they change the %s in place",
 		                            what, what);
@@ -80,7 +99,6 @@ inline BoundStatement RewriteCopyInPlace(Binder &binder, CopyStatement &stmt, co
 	if (info.file_path.find("://") == std::string::npos) {
 		info.file_path = "gdrive://" + info.file_path;
 	}
-	using Key = typename std::decay<decltype(info.options)>::type::key_type;
 	if (FindCopyOption(info.options, "overwrite_or_ignore")) {
 		throw InvalidInputException("gdrive: OVERWRITE_OR_IGNORE is a file option, not supported for %s writes", what);
 	}

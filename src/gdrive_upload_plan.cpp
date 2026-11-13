@@ -217,6 +217,30 @@ CreateOutcome InterpretCreateReply(bool transport_ok, int status, const std::str
 	return CreateOutcome::FAIL_CLEAN;
 }
 
+NonceCreateOutcome InterpretNonceCreateReply(bool transport_ok, int status) {
+	if (transport_ok && status >= 200 && status < 300) {
+		return NonceCreateOutcome::DONE;
+	}
+	if (!transport_ok || status >= 500) {
+		return NonceCreateOutcome::LOOK_UP;
+	}
+	// A 4xx -- 429 included -- is decided before Drive applies anything.
+	return NonceCreateOutcome::FAIL_CLEAN;
+}
+
+NonceLookupOutcome DecideNonceLookup(size_t matches) {
+	if (matches == 1) {
+		return NonceLookupOutcome::ADOPT;
+	}
+	return matches == 0 ? NonceLookupOutcome::NOT_CREATED : NonceLookupOutcome::DUPLICATED;
+}
+
+std::string NonceLookupQuery(const std::string &parent_id, const std::string &nonce) {
+	// Both are generated or Drive-issued ([A-Za-z0-9_-]): nothing to escape.
+	return "'" + parent_id + "' in parents and appProperties has { key='" + std::string(kCreateNonceKey) +
+	       "' and value='" + nonce + "' } and trashed=false";
+}
+
 bool MoveLanded(const std::string &name, const std::vector<std::string> &parents, const std::string &want_name,
                 const std::string &new_parent_id, const std::string &old_parent_id) {
 	auto has = [&](const std::string &id) {

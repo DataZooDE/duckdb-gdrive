@@ -137,3 +137,56 @@ def test_overwrite_keeps_formulas_and_formats_outside_its_values(writer, scratch
         COPY (SELECT '=1+1' AS f) TO 'gdrive://id:{sheet}' (FORMAT sheet_range, RANGE 'Text!A1');""")
     f = _cells(writer, sheet, "Text!A2")[0][0]
     assert f["userEnteredValue"] == {"stringValue": "=1+1"}, f
+
+
+# ---------------------------------------------------------------------------
+# Creating a Sheet at a path that names nothing (2026-11-13). The create
+# happens in the writer's finalize, after every row is in, so a COPY whose
+# query fails creates nothing; a Sheets error AFTER the create leaves the
+# new Sheet in place (user decision), named in the error, and a re-run writes
+# into it.
+# ---------------------------------------------------------------------------
+
+def _named(drive, folder: str, name: str) -> list[dict]:
+    return [c for c in drive.list_children(folder) if c["name"] == name]
+
+
+def _run_name(drive, scratch: str) -> str:
+    return drive._request("GET", f"{DRIVE_V3}/files/{scratch}", "files_get",
+                          params={"fields": "name", "supportsAllDrives": "true"}).json()["name"]
+
+
+def test_a_failed_query_creates_no_sheet(writer, scratch, sql, gdrive_secret_sql):
+    run = _run_name(writer, scratch)
+    out = sql(f"""{gdrive_secret_sql}
+        COPY (SELECT CASE WHEN i < 9000 THEN i ELSE error('boom') END AS a FROM range(10000) t(i))
+        TO 'gdrive://{fx.SCRATCH_ROOT}/{run}/never/made' (FORMAT sheet_range, RANGE 'T!A1');""",
+              expect_error=True)
+    assert "boom" in out, out
+    # Neither the Sheet nor its folder: the create waits for finalize.
+    assert _named(writer, scratch, "never") == []
+
+
+def test_a_sheets_failure_after_the_create_leaves_the_sheet_named_and_reusable(
+        writer, scratch, sql, gdrive_secret_sql):
+    run = _run_name(writer, scratch)
+    target = f"gdrive://{fx.SCRATCH_ROOT}/{run}/made_then_failed"
+    # Sheets refuses a tab title over 100 characters (400) -- the first
+    # batchUpdate, sent right after the create.
+    long_tab = "t" * 101
+    out = sql(f"""{gdrive_secret_sql}
+        COPY (SELECT 1 AS a) TO '{target}' (FORMAT sheet_range, RANGE '{long_tab}!A1');""",
+              expect_error=True)
+    made = _named(writer, scratch, "made_then_failed")
+    assert len(made) == 1, made
+    sheet = made[0]["id"]
+    assert "created a new Sheet" in out and sheet in out and "left in place empty" in out, out
+    assert "100 characters" in out, out
+    # Left in place, not trashed -- also by DuckDB's failed-COPY cleanup.
+    assert _drive_state(writer, sheet) == {"id": sheet, "trashed": False, "mimeType": SHEET}
+
+    # A re-run with a valid title writes INTO it: same id, still one Sheet.
+    sql(f"""{gdrive_secret_sql}
+        COPY (SELECT 1 AS a) TO '{target}' (FORMAT sheet_range, RANGE 'Fixed!A1');""")
+    assert [m["id"] for m in _named(writer, scratch, "made_then_failed")] == [sheet]
+    assert _values(writer, sheet, "Fixed!A1:A2") == [["a"], ["1"]]
