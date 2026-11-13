@@ -70,6 +70,16 @@ inline BoundStatement RewriteCopyInPlace(Binder &binder, CopyStatement &stmt, co
 		                            what, what);
 	}
 	info.format = internal_format;
+	// A bare target ('Finance/sales') is a Drive path to the writer, but
+	// DuckDB's failed-COPY cleanup calls TryRemoveFile on the path as written,
+	// and a scheme-less path goes to the LOCAL filesystem: it deleted a local
+	// file of the same relative name (found in duckdb-sharepoint #131,
+	// reproduced here by e2e test_sheet_range.py). With the scheme the
+	// cleanup reaches GDriveFileSystem::TryRemoveFile, which keeps the Sheet.
+	// A browser address keeps its form: this filesystem claims those too.
+	if (info.file_path.find("://") == std::string::npos) {
+		info.file_path = "gdrive://" + info.file_path;
+	}
 	using Key = typename std::decay<decltype(info.options)>::type::key_type;
 	if (FindCopyOption(info.options, "overwrite_or_ignore")) {
 		throw InvalidInputException("gdrive: OVERWRITE_OR_IGNORE is a file option, not supported for %s writes", what);

@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import pytest
 
+from helpers import fixtures as fx
+
 pytestmark = pytest.mark.live
 
 DRIVE_V3 = "https://www.googleapis.com/drive/v3"
@@ -87,6 +89,30 @@ def test_a_failed_copy_leaves_the_sheet_intact(writer, scratch, sql, gdrive_secr
         assert _drive_state(writer, sheet) == {"id": sheet, "trashed": False, "mimeType": SHEET}
         assert _values(writer, sheet, "Sheet1!A1:D2") == before
         assert _values(writer, sheet, "Calc!A1") == [["3"]]
+
+
+def test_a_failed_copy_to_a_bare_path_leaves_a_local_namesake_alone(
+        writer, scratch, sql, gdrive_secret_sql, tmp_path, monkeypatch):
+    """A bare target ('scratch/run-x/target', no gdrive://) is a Drive path to
+    the writer, but DuckDB's failed-COPY cleanup gets the path as written and
+    hands a scheme-less one to the LOCAL filesystem -- which deletes a local
+    file of the same relative name. Found in duckdb-sharepoint (#131), where it
+    deleted the file for real. The rewrite now gives a bare target its scheme,
+    so the cleanup reaches GDriveFileSystem::TryRemoveFile instead."""
+    sheet = writer.upload_sheet("target", b"a,b\n1,2\n", scratch)
+    run = writer._request("GET", f"https://www.googleapis.com/drive/v3/files/{scratch}", "files_get",
+                          params={"fields": "name", "supportsAllDrives": "true"}).json()["name"]
+    bare = f"{fx.SCRATCH_ROOT}/{run}/target"
+    monkeypatch.chdir(tmp_path)
+    local = tmp_path / bare
+    local.parent.mkdir(parents=True)
+    local.write_bytes(b"local data, not the Sheet\n")
+    out = sql(f"""{gdrive_secret_sql}
+        COPY (SELECT i AS a FROM range(5) t(i)) TO '{bare}' (FORMAT sheet_range, RANGE 'Sheet1!A1:A3', OVERWRITE);""",
+              expect_error=True)
+    assert "do not fit" in out, out
+    assert local.read_bytes() == b"local data, not the Sheet\n", "the failed COPY deleted a local file"
+    assert _drive_state(writer, sheet) == {"id": sheet, "trashed": False, "mimeType": SHEET}
 
 
 def test_overwrite_keeps_formulas_and_formats_outside_its_values(writer, scratch, sql, gdrive_secret_sql):
