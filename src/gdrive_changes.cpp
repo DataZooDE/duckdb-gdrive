@@ -8,6 +8,11 @@
 // A change the walk puts outside the folder is reported as a 'delete' by id:
 // the file may have been moved OUT, and a mirror must drop it -- deleting an
 // id the mirror never had is harmless, missing a move-out is not.
+//
+// A removed entry (or one with no file record) is confirmed with one files.get
+// before it may become a delete: the feed lags, and a live file can arrive in
+// that shape. An entry without parents is confirmed only with outside := true;
+// without it, it emits nothing and costs nothing (DecideChange, pure).
 #include "gdrive_changes.hpp"
 #include "gdrive_banner.hpp"
 #include "gdrive_change_scope.hpp"
@@ -252,6 +257,76 @@ unique_ptr<FunctionData> ChangesBind(ClientContext &context, TableFunctionBindIn
 				return count != hit->second.end() && count->second > 1;
 			};
 
+			// A file placed under the folder: an upsert, or a delete with its
+			// path when trashed. A folder renamed or moved in brings its subtree:
+			// their paths changed (or they just arrived), and the feed reports
+			// only the folder.
+			auto place = [&](const std::string &id, const FileRow &file, const std::string &relative,
+			                 bool representable) {
+				const bool by_id = folder_by_id || !representable ||
+				                   (!file.parents.empty() && shares_name(file.parents[0], file.name));
+				const auto change_path = ChangePath(folder_path, by_id, relative, id);
+				if (file.trashed) {
+					out.Put(id, ChangeValues(ChangeKind::REMOVE, id, change_path, nullptr, ""));
+					return;
+				}
+				out.Put(id, ChangeValues(ChangeKind::UPSERT, id, change_path, &file, ""));
+				if (file.IsFolder()) {
+					walk(id, relative, by_id, ChangeKind::UPSERT);
+				}
+			};
+			// A path-less delete by id. With outside := true, a folder (still
+			// alive, so moved out) takes its subtree with it: the feed reports
+			// only the folder.
+			auto remove_by_id = [&](const std::string &id, const FileRow *known) {
+				out.Put(id, ChangeValues(ChangeKind::REMOVE, id, "", nullptr, ""));
+				if (outside && known && known->IsFolder() && !known->trashed) {
+					walk(id, "", true, ChangeKind::REMOVE);
+				}
+			};
+			// Confirm before delete: an entry the feed gives no way to place
+			// (removed or no file record; no parents only with outside := true)
+			// is asked about ONCE, by id,
+			// before it may become a delete. Drive's feed is served by replicas
+			// that lag each other, and a live file of the folder can arrive in
+			// that shape; dropped by a mirror, it is never seen again once the
+			// mirror moves past the token. This narrows that window -- a
+			// lagging files.get can still be wrong -- it does not close it.
+			auto confirm = [&](const ChangeRow &c, ChangeEntryKind kind) {
+				auto resp = client->ApiGet("/drive/v3/files/" + QueryEncode(c.file_id) + "?fields=" +
+				                               QueryEncode(FileRowFields()) + "&" + AllDrivesQuery(),
+				                           &DriveCallStats::files_get);
+				FileRow now;
+				ChangeLookup lookup;
+				std::string relative, error;
+				bool representable = true;
+				switch (InterpretConfirmReply(resp.http_status, resp.body, now, error)) {
+				case ConfirmReply::FOUND:
+					lookup.found = true;
+					lookup.trashed = now.trashed;
+					lookup.located = scope.Locate(now.name, now.parents, relative, &representable);
+					break;
+				case ConfirmReply::GONE:
+					break;
+				default:
+					if (!resp.ok) {
+						ThrowGDriveError(resp.error, what);
+					}
+					throw IOException("gdrive: unexpected response reading %s: %s", what, error);
+				}
+				switch (DecideChange(kind, &lookup, outside)) {
+				case ChangeVerdict::UPSERT_FROM_LOOKUP:
+				case ChangeVerdict::DELETE_AT_PATH:
+					place(c.file_id, now, relative, representable);
+					break;
+				case ChangeVerdict::DELETE:
+					remove_by_id(c.file_id, lookup.found ? &now : (c.has_file ? &c.file : nullptr));
+					break;
+				default:
+					break;
+				}
+			};
+
 			std::string page = token;
 			std::string next_start;
 			for (int pages = 0; !page.empty(); pages++) {
@@ -287,12 +362,14 @@ unique_ptr<FunctionData> ChangesBind(ClientContext &context, TableFunctionBindIn
 					if (c.file_id == folder_id) {
 						continue;
 					}
-					// Removed (deleted for good, or no longer visible): Drive says
-					// only the id, so it cannot be placed. Always reported -- it
-					// costs nothing, and a permanently deleted file of the folder
-					// must not be missed.
-					if (c.removed || !c.has_file) {
-						out.Put(c.file_id, ChangeValues(ChangeKind::REMOVE, c.file_id, "", nullptr, ""));
+					const auto kind =
+					    ClassifyChangeEntry(c.removed, c.has_file, !c.file.parents.empty(), c.file.trashed);
+					const auto verdict = DecideChange(kind, nullptr, outside);
+					if (verdict == ChangeVerdict::LOOK_UP) {
+						confirm(c, kind);
+						continue;
+					}
+					if (verdict == ChangeVerdict::NOTHING) {
 						continue;
 					}
 					std::string relative;
@@ -300,28 +377,11 @@ unique_ptr<FunctionData> ChangesBind(ClientContext &context, TableFunctionBindIn
 					const bool located = scope.Locate(c.file.name, c.file.parents, relative, &representable);
 					if (!located) {
 						if (outside) {
-							out.Put(c.file_id, ChangeValues(ChangeKind::REMOVE, c.file_id, "", nullptr, ""));
-							// A folder moved out takes its subtree with it, and the
-							// feed reports only the folder.
-							if (c.file.IsFolder() && !c.file.trashed) {
-								walk(c.file_id, "", true, ChangeKind::REMOVE);
-							}
+							remove_by_id(c.file_id, &c.file);
 						}
 						continue;
 					}
-					const bool by_id = folder_by_id || !representable ||
-					                   (!c.file.parents.empty() && shares_name(c.file.parents[0], c.file.name));
-					const auto change_path = ChangePath(folder_path, by_id, relative, c.file_id);
-					if (c.file.trashed) {
-						out.Put(c.file_id, ChangeValues(ChangeKind::REMOVE, c.file_id, change_path, nullptr, ""));
-						continue;
-					}
-					out.Put(c.file_id, ChangeValues(ChangeKind::UPSERT, c.file_id, change_path, &c.file, ""));
-					// A folder renamed or moved in: its subtree's paths changed
-					// (or it just arrived), and the feed reports only the folder.
-					if (c.file.IsFolder()) {
-						walk(c.file_id, relative, by_id, ChangeKind::UPSERT);
-					}
+					place(c.file_id, c.file, relative, representable);
 				}
 				page = next;
 			}

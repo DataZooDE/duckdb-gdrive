@@ -1,0 +1,71 @@
+{
+  "_comment": "Captured live 2026-11-13 as the delegated user (changes.list with includeRemoved=true, the extension's field mask): the entry for a file in a scratch folder of the CI Shared Drive, permanently deleted (files.delete) seconds before. Drive sends a permanently deleted file as removed:true with NO file record. The entry is verbatim except the fileId (redacted to 1BBB...); the page wrapper carries a placeholder newStartPageToken. files.get on the same id answered drive_errors.json's not_found_deleted_get.",
+  "removed_entry_page": {
+    "changes": [
+      {
+        "changeType": "file",
+        "time": "2026-11-13T15:39:51.314Z",
+        "removed": true,
+        "fileId": "1BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+      }
+    ],
+    "newStartPageToken": "100000"
+  },
+  "_comment_confirm_get": "Captured live 2026-11-13 as the delegated user: files.get with the extension's FileRowFields() mask on a live file and on a trashed file (files.update trashed:true) in a scratch folder of the CI Shared Drive -- what gdrive_changes' confirm-before-delete reads. Ids redacted (1CCC.../1DDD..., parent 1FFF...), owner and modifier redacted to owner@example.com; everything else verbatim.",
+  "confirm_get_live": {
+    "id": "1CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+    "name": "live.csv",
+    "mimeType": "text/csv",
+    "starred": false,
+    "trashed": false,
+    "parents": [
+      "1FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+    ],
+    "webViewLink": "https://drive.google.com/file/d/1CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC/view?usp=drivesdk",
+    "createdTime": "2026-11-13T15:42:30.796Z",
+    "modifiedTime": "2026-11-13T15:42:30.796Z",
+    "owners": [
+      {
+        "displayName": "owner",
+        "emailAddress": "owner@example.com"
+      }
+    ],
+    "lastModifyingUser": {
+      "displayName": "owner",
+      "emailAddress": "owner@example.com"
+    },
+    "shared": true,
+    "copyRequiresWriterPermission": false,
+    "md5Checksum": "dc3ba59be5d893be2c69ea202014fe78",
+    "size": "4",
+    "headRevisionId": "0B9fS7-FFsZTlMlE5WFFERFhYbHMvQWl1NFpXdmFzL01MODRrPQ"
+  },
+  "confirm_get_trashed": {
+    "id": "1DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD",
+    "name": "binned.csv",
+    "mimeType": "text/csv",
+    "starred": false,
+    "trashed": true,
+    "parents": [
+      "1FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+    ],
+    "webViewLink": "https://drive.google.com/file/d/1DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD/view?usp=drivesdk",
+    "createdTime": "2026-11-13T15:42:32.815Z",
+    "modifiedTime": "2026-11-13T15:42:32.815Z",
+    "owners": [
+      {
+        "displayName": "owner",
+        "emailAddress": "owner@example.com"
+      }
+    ],
+    "lastModifyingUser": {
+      "displayName": "owner",
+      "emailAddress": "owner@example.com"
+    },
+    "shared": true,
+    "copyRequiresWriterPermission": false,
+    "md5Checksum": "dc3ba59be5d893be2c69ea202014fe78",
+    "size": "4",
+    "headRevisionId": "0B9fS7-FFsZTlZUxCS1J1SjdKY052bWJtTjJ3dW0yR1FpS0w4PQ"
+  }
+}

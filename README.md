@@ -553,7 +553,11 @@ file or folder moved **out** looks exactly like one that was never in, so by
 default neither is reported; `outside := true` reports both as path-less
 `delete`s (a folder with its subtree) -- what a mirror needs, at the cost of a
 row and a walk for every change elsewhere in the drive. A permanent deletion
-cannot be placed at all and is always reported. A path that would not read
+cannot be placed at all and is always reported -- after one `files.get` on its
+id, which turns it into an `upsert` if Drive still shows the file under the
+folder. Cost: one `files_get` per removed entry in the window, and, with
+`outside := true` only, one per change that arrives without parents (such as a
+file shared with you). A path that would not read
 back (a name shared by siblings, a `/` in a name) is a `gdrive://id:` path.
 An expired token says so; start over without one. A very old token replays
 everything since, which on a busy drive is a long, sequential walk. The feed
@@ -587,6 +591,9 @@ UPDATE lake.sync SET token = (SELECT token FROM c WHERE _change = 'checkpoint');
 ```
 
 Running it again is harmless: each run applies what changed since the last.
+A delete for an id the feed cannot place is confirmed against Drive before it
+is reported, but Drive's feed itself can lag, so a mirror that must never lose
+a file should also rebuild from a fresh listing now and then.
 The harness checks exactly this -- a mirror that follows the feed ends up equal
 to a fresh listing, across deletes, new files, updates, a folder renamed and a
 folder moved out (`e2e/tests/test_changes.py`).

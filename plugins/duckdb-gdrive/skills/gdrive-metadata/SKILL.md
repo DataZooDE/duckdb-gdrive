@@ -81,7 +81,9 @@ by seconds to minutes; a very old token replays everything since. An unknown or 
 token is an error: start over.
 Mirror pattern: store the token FIRST, then the listing; each run (with `outside := true`)
 delete the changed ids, insert the non-folder upserts, store the new token (README
-"Keeping a mirror").
+"Keeping a mirror"). A removed entry is confirmed with one `files.get` before it becomes a
+delete (an entry without parents too, but only with `outside := true`); the feed can still
+lag, so a mirror that must never lose a file re-lists now and then.
 
 ## Who can reach it
 ```sql
