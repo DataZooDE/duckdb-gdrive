@@ -7,6 +7,7 @@ noise eventually hides the failure that mattered.
 
 from __future__ import annotations
 
+import os
 import sys
 
 from .drive import Drive, DriveConfigError
@@ -14,12 +15,23 @@ from . import fixtures as fx
 
 
 def main() -> int:
-    if len(sys.argv) != 2 or not sys.argv[1].startswith("run-"):
-        print("usage: python -m helpers.drop_scratch run-<id>", file=sys.stderr)
+    args = sys.argv[1:]
+    # --shared-drive: the run's scratch in GDRIVE_CI_SHARED_DRIVE_ID (the
+    # DRIVE_ID tests) rather than in the CI root.
+    shared = "--shared-drive" in args
+    args = [a for a in args if a != "--shared-drive"]
+    if len(args) != 1 or not args[0].startswith("run-"):
+        print("usage: python -m helpers.drop_scratch [--shared-drive] run-<id>", file=sys.stderr)
         return 2
-    name = sys.argv[1]
+    name = args[0]
+    root_id = None
+    if shared:
+        root_id = os.environ.get("GDRIVE_CI_SHARED_DRIVE_ID", "")
+        if not root_id:
+            print("cannot clean up: --shared-drive without GDRIVE_CI_SHARED_DRIVE_ID", file=sys.stderr)
+            return 2
     try:
-        drive = Drive.from_env(prefer_user=True)
+        drive = Drive.from_env(prefer_user=True, root_id=root_id)
     except DriveConfigError as e:
         print(f"cannot clean up: {e}", file=sys.stderr)
         return 2

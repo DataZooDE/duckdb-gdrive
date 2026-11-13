@@ -1,0 +1,135 @@
+# name: test/sql/gdrive_shared_drive.test.template
+# description: D-5 -- a secret bound to a Shared Drive with DRIVE_ID, against a REAL Shared Drive
+# group: [live]
+#
+# Materialised by e2e/helpers/materialise.py, ONLY when GDRIVE_CI_SHARED_DRIVE_ID
+# is set. The main CI root (GDRIVE_CI_DRIVE_ID) is a My Drive folder bound as
+# ROOT_FOLDER_ID, so without this file nothing live exercises DRIVE_ID: the
+# corpora=drive+driveId scoping, path resolution from a Shared Drive's root,
+# or a service account writing where it can (the only place it can).
+#
+# KNOWN GAP (CLAUDE.md, "Live-test credentials"): no CI Shared Drive exists
+# yet, so this file is left out of every run, with a WARNING from the
+# materialiser. It is not in the required live set; GDRIVE_REQUIRE_SHARED_DRIVE=1
+# makes it so once the secret exists. It was written before there was a Shared
+# Drive to run it against -- the first real run may need adjusting.
+#
+# Setup the materialiser does, as the delegated user, inside the Shared Drive:
+#   /scratch/${SHARED_SCRATCH}/            per-run, deleted by run_live_tests.sh
+#   /scratch/${SHARED_SCRATCH}/read/small.csv    "id,name\n1,a\n2,b\n3,c\n"
+#   /scratch/${SHARED_SCRATCH}/read/other.csv    "id\n9\n"
+#
+# Membership the setup needs (scripts/setup_ci_drive.sh step 5): the service
+# account as Content manager, the delegated user as Manager (teardown deletes
+# the run folder permanently).
+
+require gdrive
+
+require-env GDRIVE_CI_SHARED_DRIVE_ID
+
+require-env GDRIVE_CI_SA_KEY_FILE
+
+require-env GDRIVE_OAUTH_CLIENT_ID
+
+require-env GDRIVE_OAUTH_CLIENT_SECRET
+
+require-env GDRIVE_USER_REFRESH_TOKEN
+
+# ---------------------------------------------------------------------------
+# Reads, as the service account, with paths relative to the Shared Drive root.
+# ---------------------------------------------------------------------------
+statement ok
+CREATE SECRET gdrive_sd_sa (
+    TYPE gdrive,
+    PROVIDER service_account,
+    KEY_FILE '${SA_KEY_FILE}',
+    DRIVE_ID '${SHARED_DRIVE_ID}',
+    DRIVE_SCOPE 'https://www.googleapis.com/auth/drive'
+);
+
+query II
+SELECT id, name FROM read_csv('gdrive://scratch/${SHARED_SCRATCH}/read/small.csv') ORDER BY id
+----
+1	a
+2	b
+3	c
+
+query I
+SELECT parse_filename(file) FROM glob('gdrive://scratch/${SHARED_SCRATCH}/read/*.csv') ORDER BY 1
+----
+other.csv
+small.csv
+
+# The Shared Drive this secret is bound to is one the identity is a member of.
+query I
+SELECT count(*) FROM gdrive_drives() WHERE id = '${SHARED_DRIVE_ID}'
+----
+1
+
+# D-5's whole point: a service account CAN write inside a Shared Drive (the
+# drive owns the file, so the SA's missing quota does not matter).
+statement ok
+COPY (SELECT 42 AS answer) TO 'gdrive://scratch/${SHARED_SCRATCH}/sa/answer.csv' (FORMAT csv, HEADER);
+
+query I
+SELECT answer FROM read_csv('gdrive://scratch/${SHARED_SCRATCH}/sa/answer.csv')
+----
+42
+
+# Trash by default (D-6); a Content manager may trash.
+query I
+SELECT remove_file('gdrive://scratch/${SHARED_SCRATCH}/sa/answer.csv')
+----
+true
+
+query I
+SELECT file_size('gdrive://scratch/${SHARED_SCRATCH}/sa/answer.csv') IS NULL
+----
+true
+
+statement ok
+DROP SECRET gdrive_sd_sa;
+
+# ---------------------------------------------------------------------------
+# A write + read + remove round trip as the delegated user.
+# ---------------------------------------------------------------------------
+statement ok
+CREATE SECRET gdrive_sd_user (
+    TYPE gdrive,
+    PROVIDER config,
+    CLIENT_ID '${OAUTH_CLIENT_ID}',
+    CLIENT_SECRET '${OAUTH_CLIENT_SECRET}',
+    REFRESH_TOKEN '${USER_REFRESH_TOKEN}',
+    DRIVE_ID '${SHARED_DRIVE_ID}',
+    DRIVE_SCOPE 'https://www.googleapis.com/auth/drive'
+);
+
+query I
+SELECT count(*) FROM gdrive_drives() WHERE id = '${SHARED_DRIVE_ID}'
+----
+1
+
+# Into a subtree that does not exist yet: the mkdir walk runs inside the
+# Shared Drive too.
+statement ok
+COPY (SELECT range AS n FROM range(5)) TO 'gdrive://scratch/${SHARED_SCRATCH}/user/deep/rt.csv' (FORMAT csv, HEADER);
+
+query II
+SELECT count(*), sum(n) FROM read_csv('gdrive://scratch/${SHARED_SCRATCH}/user/deep/rt.csv')
+----
+5	10
+
+query I
+SELECT parse_filename(path) FROM read_gdrive_files('gdrive://scratch/${SHARED_SCRATCH}/user/deep/*')
+----
+rt.csv
+
+query I
+SELECT remove_file('gdrive://scratch/${SHARED_SCRATCH}/user/deep/rt.csv')
+----
+true
+
+query I
+SELECT count(*) FROM glob('gdrive://scratch/${SHARED_SCRATCH}/user/deep/*')
+----
+0

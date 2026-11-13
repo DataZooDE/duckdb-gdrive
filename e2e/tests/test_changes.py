@@ -192,25 +192,110 @@ def test_a_folder_moved_out_takes_its_subtree(writer, scratch, sql, gdrive_secre
     assert by_id[folder][0] == "delete" and by_id[child][0] == "delete", rows
 
 
+def _feed_parents(drive, token: str) -> dict[str, list[str]]:
+    """file id -> parents, for every change since `token` that the walk would
+    try to place: what changes.list returns for this identity, read raw."""
+    out: dict[str, list[str]] = {}
+    page = token
+    while page:
+        resp = drive._request("GET", f"{DRIVE_V3}/changes", "changes.list", params={
+            "pageToken": page, "pageSize": "1000", "includeRemoved": "true",
+            "fields": "nextPageToken,changes(fileId,removed,file(parents))"})
+        resp.raise_for_status()
+        data = resp.json()
+        for c in data.get("changes", []):
+            if not c.get("removed") and "file" in c:
+                out[c["fileId"]] = c["file"].get("parents", [])
+        page = data.get("nextPageToken")
+    return out
+
+
+def _feed_parents_with(drive, token: str, ids) -> dict[str, list[str]]:
+    """_feed_parents, polled until it holds every id in `ids`. Drive's change
+    feed is read from replicas that lag each other: gdrive_changes saw all
+    twenty files and the very next raw read missed one (CI, 2026-11-13)."""
+    deadline = time.monotonic() + FEED_DEADLINE_S
+    while True:
+        feed = _feed_parents(drive, token)
+        if set(ids) <= set(feed) or time.monotonic() > deadline:
+            return feed
+        time.sleep(5)
+
+
+def _ancestor_folders(drive, starts, stop: str, seen: set[str]) -> None:
+    """Every folder above `starts`, up to `stop` or the top, into `seen`: the
+    folders a parent walk may have to look up (one files.get each)."""
+    todo = [p for p in starts if p != stop]
+    while todo:
+        fid = todo.pop()
+        if fid in seen or fid == stop:
+            continue
+        seen.add(fid)
+        resp = drive._request("GET", f"{DRIVE_V3}/files/{fid}", "files.get", params={"fields": "parents"})
+        if resp.status_code == 200:
+            todo.extend(resp.json().get("parents", []))
+
+
 def test_since_token_cost_is_bounded_by_folders_not_files(writer, scratch, sql, gdrive_secret_sql):
     """One files.get per folder the parent walk has not seen; a sibling
-    listing per distinct parent (for duplicate names) -- not one call per file."""
+    listing per distinct parent (for duplicate names) -- not one call per file.
+
+    Drive's feed is per identity, not per folder: every change the delegated
+    user can see -- other CI runs, the nightly sweep, developers, parallel
+    agents, the user's own Drive -- is in the window and costs its own parent
+    walk. A fixed bound over that flakes (seen 2026-11-13: exactly 12 against
+    `< 12`). So the bound is computed from the window itself: our folder, plus
+    every folder above anything ELSE the feed reported. Twenty files in one
+    folder add one folder to that and twenty items to the feed; a call per
+    file would overshoot by about nineteen whatever anyone else is doing.
+    """
     name = writer.get_metadata(scratch)["name"]
     base = f"gdrive://scratch/{name}"
     token = _token(_changes(sql, gdrive_secret_sql, base, "latest"))
     sub = writer.create_folder("many", scratch)
     ids = [writer.upload(f"f{i}.csv", b"a\n1\n", sub, "text/csv") for i in range(20)]
     _poll(sql, gdrive_secret_sql, base, token, lambda rs: set(ids) <= set(_by_id(rs)))
+
+    # The feed, read raw BEFORE and AFTER the measured call and merged: a
+    # foreign item deleted in between is "removed" afterwards (no parents), and
+    # one created in between is only in the second read. What remains missed is
+    # an item both created and deleted within the call itself -- seconds.
+    before = _feed_parents_with(writer, token, ids)
+    # One process: the first gdrive_changes resolves the path and warms the path
+    # cache, so the second's counters are the feed walk alone.
     out = _rows(sql(f"""{gdrive_secret_sql}
+        SELECT count(*) FROM gdrive_changes('{base}', token := 'latest');
         CALL gdrive_reset_stats();
         SELECT count(*) FROM gdrive_changes('{base}', token := '{token}');
         SELECT metric || '|' || value FROM gdrive_stats() WHERE metric IN ('files_get', 'files_list');"""))
-    stats = {r[0]: int(r[1]) for r in out}
-    # 20 new files in one new folder: a parent walk of a couple of gets, a
-    # sibling listing per distinct parent, the folder's subtree walk. Other
-    # activity the test account can see also costs walks, so the bound is
-    # loose -- but 20+ would mean a call per file.
-    assert stats["files_get"] < 12 and stats["files_list"] < 12, stats
+    after = _feed_parents_with(writer, token, ids)
+    stats = {r[0]: int(r[1]) for r in out if r[0] in ("files_get", "files_list")}
+    feed = {**before, **after}
+    assert set(ids) <= set(feed), "the raw feed shows our files (the poll above saw them)"
+
+    # Our own subtree costs exactly one lookup: `many`, whose parent is the
+    # watched folder. Everything else in the window is someone else's.
+    # (The watched folder itself is in the feed too -- adding children touches
+    # it -- but gdrive_changes skips it without a lookup.)
+    foreign: set[str] = set()
+    ours = set(ids) | {sub, scratch}
+    _ancestor_folders(writer, {p for fid, ps in feed.items() if fid not in ours for p in ps}, scratch, foreign)
+    foreign.discard(sub)
+    bound = 1 + len(foreign)
+    # +2 for what the merged reads can still miss (a foreign folder created and
+    # deleted inside the call). Measured 2026-11-13 with a release live suite
+    # writing alongside: files_get 10 against a computed bound of exactly 10;
+    # quiet runs, 1. A call per file would be 20 over.
+    assert stats["files_get"] <= bound + 2, (stats, f"bound {bound} = 1 + {len(foreign)} foreign folder(s)")
+    # And the bound means something: a call per file would need the 20 own
+    # files on top of whatever the others cost.
+    assert bound < len(feed), (bound, len(feed))
+
+    # Listings never touch foreign changes (with outside := false they are only
+    # placed, never walked), so their bound is ours alone: one sibling listing
+    # each for `many`'s parent and the files' parent, one subtree walk of
+    # `many`. Fixed, and a call per file would be 20+.
+    assert stats["files_list"] <= 3, stats
 
 
 def test_a_mirror_that_follows_the_feed_equals_the_folder(writer, scratch, sql, gdrive_secret_sql):
@@ -241,6 +326,7 @@ def test_a_mirror_that_follows_the_feed_equals_the_folder(writer, scratch, sql, 
         return {a, c, sub, leaving} <= set(got)
 
     rows = _poll(sql, gdrive_secret_sql, base, token, done, outside=True)
+    seen = [r for r in rows if r[0] != "checkpoint" and r[1] in (a, b, c, sub, s1, leaving, l1)]
     for r in rows:
         if r[0] == "checkpoint":
             continue
@@ -250,4 +336,5 @@ def test_a_mirror_that_follows_the_feed_equals_the_folder(writer, scratch, sql, 
 
     fresh = _rows(sql(f"""{gdrive_secret_sql}
         SELECT id, path FROM read_gdrive_files('{base}/**');"""))
-    assert mirror == {i: p for i, p in fresh}
+    assert mirror == {i: p for i, p in fresh}, {"rows for our ids, in feed order": seen,
+                                                 "c": c, "a": a, "b": b, "sub": sub, "leaving": leaving}

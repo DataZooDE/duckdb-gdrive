@@ -167,7 +167,7 @@ def credentials_available() -> bool:
 
 @dataclass
 class Drive:
-    """Authenticated Drive v3 session scoped to one Shared Drive."""
+    """Authenticated Drive v3 session scoped to one root: a Shared Drive or a folder."""
 
     drive_id: str
     _creds: object = field(default=None, repr=False)
@@ -184,7 +184,7 @@ class Drive:
     calls: dict = field(default_factory=dict)
 
     @classmethod
-    def from_env(cls, prefer_user: bool = False) -> "Drive":
+    def from_env(cls, prefer_user: bool = False, root_id: str | None = None) -> "Drive":
         """Authenticate, as the user when possible and needed.
 
         Two identities, for a reason that is not a preference:
@@ -198,8 +198,11 @@ class Drive:
 
         So seeding runs as the user and the read tests run as the service
         account, against the same folder. `prefer_user` selects which.
+
+        `root_id` overrides GDRIVE_CI_DRIVE_ID, for the optional CI Shared
+        Drive (GDRIVE_CI_SHARED_DRIVE_ID) that the DRIVE_ID tests use.
         """
-        drive_id = os.environ.get("GDRIVE_CI_DRIVE_ID")
+        drive_id = root_id or os.environ.get("GDRIVE_CI_DRIVE_ID")
         if not drive_id:
             raise DriveConfigError(
                 "GDRIVE_CI_DRIVE_ID is not set (a Shared Drive id, or a folder "

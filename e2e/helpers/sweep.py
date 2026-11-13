@@ -1,7 +1,7 @@
 """Delete stale per-run scratch folders.
 
 Crashed runs leak their ``/scratch/run-<uuid>`` folder: teardown never ran.
-Left alone these accumulate until the Shared Drive fills up and every test
+Left alone these accumulate until the CI drive fills up and every test
 starts failing for a reason that has nothing to do with the code.
 
 Run by ``make sweep_orphans`` and by a nightly CI job.
@@ -105,8 +105,9 @@ def sweep(drive: Drive, max_age_hours: int = DEFAULT_MAX_AGE_HOURS, dry_run: boo
         print(f"FAILED to delete {len(failed)} folder(s):")
         for name, err in failed:
             print(f"  {name}: {err}")
-        print("  Usually a Shared Drive role: permanent deletion needs Manager")
-        print("  on a folder the other CI identity created.")
+        print("  Usually ownership: in a My Drive only the owner may delete, so")
+        print("  sweep as the identity that created the folders (the delegated")
+        print("  user). In a Shared Drive it is the membership role instead.")
     if unswept:
         print(f"NOTE: {len(unswept)} folder(s) under /{fx.SCRATCH_ROOT} do not use the "
               f"run-<uuid> convention and will NEVER be swept:")
@@ -124,24 +125,33 @@ def main() -> int:
         #
         # Scratch folders are created by writes, and writes run as the user
         # (a service account has no Drive storage quota). The user therefore
-        # OWNS them, and a service account cannot permanently delete a file it
-        # does not own in a Shared Drive. Running this as the SA fails with
-        # 403 insufficientFilePermissions on every folder -- measured
-        # 2026-08-02: 0 of 58 deletable as the SA, 58 of 58 as the user.
-        drive = Drive.from_env(prefer_user=True)
+        # OWNS them. The CI root is a folder in the user's My Drive, shared
+        # with the SA as writer, and in a My Drive only the owner may trash or
+        # delete: the SA's capabilities there are canEdit/canAddChildren true,
+        # canTrash/canDelete false (checked 2026-11-13). Running this as the SA
+        # fails with 403 insufficientFilePermissions on every folder --
+        # measured 2026-08-02: 0 of 58 deletable as the SA, 58 of 58 as the user.
+        drives = [Drive.from_env(prefer_user=True)]
+        # The optional CI Shared Drive (DRIVE_ID tests) leaks scratch the same way.
+        shared = os.environ.get("GDRIVE_CI_SHARED_DRIVE_ID")
+        if shared:
+            drives.append(Drive.from_env(prefer_user=True, root_id=shared))
     except DriveConfigError as e:
         print(f"cannot sweep: {e}", file=sys.stderr)
         return 2
     max_age = int(os.environ.get("GDRIVE_SWEEP_MAX_AGE_HOURS", DEFAULT_MAX_AGE_HOURS))
     dry = os.environ.get("GDRIVE_SWEEP_DRY_RUN") == "1"
-    try:
-        sweep(drive, max_age_hours=max_age, dry_run=dry)
-    except SweepIncomplete as e:
-        # Non-zero: a sweep that silently leaves folders behind is how the
-        # Shared Drive fills up while the job reports success every night.
-        print(f"sweep incomplete: {e}", file=sys.stderr)
-        return 1
-    return 0
+    status = 0
+    for drive in drives:
+        print(f"sweeping {drive.drive_id}")
+        try:
+            sweep(drive, max_age_hours=max_age, dry_run=dry)
+        except SweepIncomplete as e:
+            # Non-zero: a sweep that silently leaves folders behind is how the
+            # CI drive fills up while the job reports success every night.
+            print(f"sweep incomplete: {e}", file=sys.stderr)
+            status = 1
+    return status
 
 
 if __name__ == "__main__":

@@ -45,7 +45,8 @@ test_live: release
 	@./scripts/run_live_tests.sh
 
 # ---------------------------------------------------------------------------
-# Fixture management against the CI Shared Drive.
+# Fixture management against the CI root (GDRIVE_CI_DRIVE_ID: a My Drive folder
+# of the delegated user, shared with the service account).
 #   seed_fixtures  -- idempotent upload of the permanent read-only fixtures
 #   sweep_orphans  -- delete /scratch/run-* folders older than 24h (crashed
 #                     runs leak them)
