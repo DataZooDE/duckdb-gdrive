@@ -29,6 +29,7 @@ the code that cites it.
 | **D-12** | The `erpl-web` migration gate runs that repo's **live** OAuth suites, not just its offline Catch2 binaries. | Needs real SAP Datasphere / Entra / Business Central credentials. Consistent with D-1: a suite that only proves the code compiles is not a gate. |
 | **D-13** | **CalVer, `vYYYY.MM.DD`**, matching the other DataZoo extensions. | The community descriptor carries the CalVer string as `version:` (e.g. `2026.10.18`), as duckdb-sharepoint's does, and the tagged commit as `ref`/`variegata` -- the `ref` is what builds. (An earlier reading held that `version:` must be omitted as not valid semver; the v2026.10.18 submission carried it and merged and built fine, so it stays.) `src/gdrive_version.cpp` is a hardcoded string and `make check_stamp` fails if it does not match the tag; nothing compared them before v2026.08.01. |
 | **D-14** | **`gdrive_immutable_prefixes` is opt-in and empty by default.** | It skips the per-open metadata refresh for paths the user declares are never modified in place. The extension cannot verify the claim: Drive keeps a file id across an overwrite, returns no `ETag`, and *silently ignores* `If-Match` (verified 2026-08-01 — a bogus precondition returns `206` and the data, not `412`). So it is a user assertion, and the promise is stronger than "not overwritten": not modified, not replaced, and not deleted-and-recreated while the process runs. |
+| **D-15** | **Sheets are read and written by range through the Sheets API v4** (`sheets.googleapis.com`), not by exporting and re-uploading CSV. `read_sheet_range` / `COPY … (FORMAT sheet_range, RANGE 'Tab!A1' [, HEADER] [, OVERWRITE \| APPEND])`, parallel to duckdb-sharepoint's `excel_range`. The name `gsheet` is not used anywhere (the `gsheets` community extension owns `read_gsheet` / `FORMAT gsheet`). | A CSV re-upload (`files.update` with `text/csv` onto the Sheet) was rejected: it replaces EVERY tab with one, drops formulas, formats, charts and named ranges, and can change values it never meant to (a converted CSV is re-parsed as if typed, so text such as `00123` or `=1+1` need not stay text). It is also exactly what `RefuseReplacing` exists to stop. The Sheets API changes only the cells it is told to, keeps the file id, and can do a new tab + clear + write in one atomic `batchUpdate`. The cost: a second API host (`HostRequest`), the Sheets API enabled on the billed project (a new `SERVICE_DISABLED` error kind), and the full `drive` scope to write. |
 
 Target name: **`gdrive`** — `INSTALL gdrive; LOAD gdrive;`, and `TARGET_NAME`
 in `CMakeLists.txt`.
@@ -215,6 +216,8 @@ src/
   gdrive_rows.cpp             PURE: Drive API JSON -> rows for the table functions
   gdrive_change_scope.cpp     PURE: is a changed file under the folder, at what path
   gdrive_weburl.cpp           PURE: drive.google.com / docs.google.com address -> id
+  gdrive_sheets.cpp           PURE: A1 ranges, write blocks, chunking, CellData, grid parsing
+  gdrive_sheets_functions.cpp read_sheet_range, COPY ... (FORMAT sheet_range) -- Sheets API v4
   gdrive_files_functions.cpp  read_gdrive_files, search_gdrive, gdrive_drives
   gdrive_permissions_functions.cpp, gdrive_versions.cpp, gdrive_changes.cpp
                               the other metadata table functions
@@ -679,6 +682,31 @@ folder.
 
 `.crew/` holds the crew runs (git-ignored). `helpers.drop_scratch` only
 accepts `run-*` names -- exploratory testers need their own cleanup.
+
+**Sheets by range (2026-11-13) -- what the Sheets API taught.** (1) A CSV
+uploaded with a Sheet as target mime gets ONE tab named after the FILE, not
+`Sheet1` -- `Drive.upload_sheet` renames it, so tests can say `Sheet1!A1`.
+(2) The Sheets API is a OnePlatform API: error bodies have `status` and
+`details[]` but NO `errors[]`, so `errors[0].reason` is empty for every Sheets
+error and classification must go by `details[].reason` or the status. A tab
+that does not exist is `400 "Unable to parse range: 'X'!A1"`, not 404. (3) A
+spreadsheet's first tab has `sheetId` 0, and proto3 OMITS it from the JSON;
+read a missing `sheetId` as 0. (4) **A failed COPY on v1.5.6 TRASHED the
+Sheet it was writing into** -- verified red: `CopyToFunctionGlobalState`'s
+destructor calls `TryRemoveFile` on `op.file_path`, pushed into
+`created_files` before `copy_to_initialize_global` ever runs, so an in-place
+writer's target counts as "created". `TryRemoveFile` now never removes a native
+Google file (nothing this filesystem writes can create one). 2.0's
+`CopyOutputLifecycle` preserves a target that existed before the COPY, so it
+was 1.5.6 only -- but `duckdb-sharepoint`'s `excel_range` has the same shape
+and no guard: check it there. (5) `updateCells` with a `range` and NO `rows`
+clears exactly the fields its mask names -- `userEnteredValue` clears values
+and formulas and leaves formats, which is what OVERWRITE wants, inside the same
+atomic batch as the write. (6) `stringValue` in `userEnteredValue` is never
+parsed, which is RAW semantics without `values.update`; dates therefore go as
+`numberValue` serials plus a `repeatCell` number format, or they read back as
+numbers. (7) Grid growth uses `updateSheetProperties` (set rowCount), not
+`appendDimension`: it is idempotent, so an OVERWRITE batch can be retried.
 
 **The community v1.5.6 binary lagged a whole release and every check said
 fine (found 2026-11-08).** community-extensions builds only DuckDB 2.0 on

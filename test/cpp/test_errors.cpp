@@ -860,3 +860,123 @@ TEST_CASE("INVALID_REQUEST does not call a user's over-long input an internal er
 	REQUIRE(msg.find("internal error") == std::string::npos);
 	REQUIRE(msg.find("The query is too complex.") != std::string::npos);
 }
+
+// ---------------------------------------------------------------------------
+// Sheets API (sheets.googleapis.com) errors -- read_sheet_range and
+// COPY ... (FORMAT sheet_range). The Sheets API is a OnePlatform API: its
+// error bodies carry `status` and `details[]` but no `errors[]` array, so
+// nothing may depend on errors[0].reason for them.
+// ---------------------------------------------------------------------------
+namespace {
+
+// CAPTURED 2026-11-13 (testdata: sheets_not_found): a spreadsheet id that
+// does not exist, as either CI identity, with the Sheets API enabled.
+const char *kSheetsNotFound = R"({
+  "error": {
+    "code": 404,
+    "message": "Requested entity was not found.",
+    "status": "NOT_FOUND"
+  }
+})";
+
+// CAPTURED 2026-11-13 (testdata: scope_insufficient_oneplatform): the same
+// OnePlatform shape for a scope the token lacks.
+const char *kOnePlatformScope = R"({
+  "error": {
+    "code": 403,
+    "message": "Request had insufficient authentication scopes.",
+    "status": "PERMISSION_DENIED",
+    "details": [
+      {
+        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+        "reason": "ACCESS_TOKEN_SCOPE_INSUFFICIENT",
+        "domain": "googleapis.com",
+        "metadata": {
+          "method": "google.apps.script.management.v1.ProjectsService.GetProject",
+          "service": "script.googleapis.com"
+        }
+      }
+    ]
+  }
+})";
+
+// DOCUMENTATION-DERIVED (could not be provoked: the Sheets API is enabled on
+// the project every CI identity is billed to). The google.rpc.ErrorInfo shape
+// Google documents for a disabled API: reason SERVICE_DISABLED with
+// metadata.service and metadata.consumer, next to LocalizedMessage and Help
+// entries. Swap in a captured body when one is seen.
+const char *kSheetsServiceDisabled = R"({
+  "error": {
+    "code": 403,
+    "message": "Google Sheets API has not been used in project 123456789012 before or it is disabled. Enable it by visiting https://console.developers.google.com/apis/api/sheets.googleapis.com/overview?project=123456789012 then retry. If you enabled this API recently, wait a few minutes for the action to propagate to our systems and retry.",
+    "status": "PERMISSION_DENIED",
+    "details": [
+      {
+        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+        "reason": "SERVICE_DISABLED",
+        "domain": "googleapis.com",
+        "metadata": {
+          "consumer": "projects/123456789012",
+          "service": "sheets.googleapis.com",
+          "serviceTitle": "Google Sheets API",
+          "containerInfo": "123456789012",
+          "activationUrl": "https://console.developers.google.com/apis/api/sheets.googleapis.com/overview?project=123456789012"
+        }
+      },
+      {
+        "@type": "type.googleapis.com/google.rpc.LocalizedMessage",
+        "locale": "en-US",
+        "message": "Google Sheets API has not been used in project 123456789012 before or it is disabled."
+      },
+      {
+        "@type": "type.googleapis.com/google.rpc.Help",
+        "links": [
+          {
+            "description": "Google developers console API activation",
+            "url": "https://console.developers.google.com/apis/api/sheets.googleapis.com/overview?project=123456789012"
+          }
+        ]
+      }
+    ]
+  }
+})";
+
+} // namespace
+
+TEST_CASE("Sheets 404 with no errors[] is NOT_FOUND by status", "[errors][sheets]") {
+	auto err = ClassifyDriveError(404, kSheetsNotFound);
+	REQUIRE(err.kind == GDriveErrorKind::NOT_FOUND);
+	REQUIRE(err.reason.empty());
+	REQUIRE(err.message == "Requested entity was not found.");
+}
+
+TEST_CASE("OnePlatform scope error is INSUFFICIENT_SCOPE and the hint covers Sheets writes", "[errors][sheets]") {
+	auto err = ClassifyDriveError(403, kOnePlatformScope);
+	REQUIRE(err.kind == GDriveErrorKind::INSUFFICIENT_SCOPE);
+	auto msg = FormatUserMessage(err, "Sheet 'gdrive://Finance/sales'");
+	REQUIRE(msg.find("sheet_range") != std::string::npos);
+	REQUIRE(msg.find("drive.readonly") != std::string::npos);
+}
+
+TEST_CASE("SERVICE_DISABLED is its own kind, naming the API and the project", "[errors][sheets]") {
+	auto err = ClassifyDriveError(403, kSheetsServiceDisabled);
+	REQUIRE(err.kind == GDriveErrorKind::SERVICE_DISABLED);
+	REQUIRE(err.service == "sheets.googleapis.com");
+	REQUIRE(err.consumer == "projects/123456789012");
+	REQUIRE_FALSE(err.IsRetryable());
+	REQUIRE(ExceptionTypeFor(err.kind) == GDriveExceptionType::PERMISSION);
+	auto msg = FormatUserMessage(err, "Sheet 'gdrive://Finance/sales'");
+	REQUIRE(msg.find("gcloud services enable sheets.googleapis.com --project 123456789012") != std::string::npos);
+	// Not sent to audit sharing or the token.
+	REQUIRE(msg.find("not a file-sharing") != std::string::npos);
+}
+
+TEST_CASE("Drive v3's accessNotConfigured is SERVICE_DISABLED too", "[errors][sheets]") {
+	// DOCUMENTATION-DERIVED: a legacy API (Drive v3) says errors[0].reason
+	// accessNotConfigured. Without ErrorInfo metadata the hint still gives the
+	// command, with a placeholder project.
+	const char *body = R"({"error":{"code":403,"message":"Access Not Configured.","errors":[{"domain":"usageLimits","reason":"accessNotConfigured","message":"Access Not Configured."}]}})";
+	auto err = ClassifyDriveError(403, body);
+	REQUIRE(err.kind == GDriveErrorKind::SERVICE_DISABLED);
+	REQUIRE(FormatUserMessage(err, "x").find("--project <project>") != std::string::npos);
+}

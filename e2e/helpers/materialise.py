@@ -13,6 +13,10 @@ Placeholders are ``${NAME}``. Available names:
     ${OAUTH_CLIENT_SECRET}   delegated-user OAuth client secret (GDRIVE_OAUTH_CLIENT_SECRET)
     ${USER_REFRESH_TOKEN}    delegated-user refresh token (GDRIVE_USER_REFRESH_TOKEN)
     ${ID:some/path}      id of that path under /fixtures, resolved live
+    ${SHEET:name}        id of a fresh native Google Sheet called `name`, created
+                         in this run's scratch folder (tab "Sheet1" holding
+                         a,b / 1,2). For the sheet_range tests, which write
+                         INTO a Sheet and so cannot share a fixture.
 
 Note on ${OAUTH_CLIENT_ID} / ${OAUTH_CLIENT_SECRET} / ${USER_REFRESH_TOKEN}: these
 carry real credential material, unlike the other placeholders. They are read
@@ -107,6 +111,16 @@ def render(text: str, subs: dict, drive: Drive, fixtures_id: str, source: str) -
             if not arg:
                 raise RuntimeError(f"{source}: ${{ID:...}} needs a path")
             return drive.resolve_path(arg, root_id=fixtures_id)
+        if name == "SHEET":
+            if not arg:
+                raise RuntimeError(f"{source}: ${{SHEET:...}} needs a name")
+            sheets = subs.setdefault("_sheets", {})
+            if arg not in sheets:
+                # A text/csv source (Drive picks the native type from the
+                # SOURCE content type -- CLAUDE.md pitfall), tab renamed to
+                # Sheet1: a conversion names it after the file.
+                sheets[arg] = drive.upload_sheet(arg, b"a,b\n1,2\n", subs["SCRATCH_ID"])
+            return sheets[arg]
         if name in subs:
             value = subs[name]
             if not value:

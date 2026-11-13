@@ -18,12 +18,13 @@ SELECT * FROM 'gdrive://Finance/2026/actuals.parquet';                          
 SELECT * FROM read_csv('https://docs.google.com/spreadsheets/d/1x2y3z/edit');       -- a Sheet, by its address
 SELECT name, modified_by, web_url FROM read_gdrive_files('gdrive://Finance/**');    -- Drive's metadata
 COPY results TO 'gdrive://Finance/forecast.parquet' (FORMAT parquet);               -- and back
+COPY results TO 'gdrive://Finance/sales' (FORMAT sheet_range, RANGE 'Forecast!A1');  -- or into a Sheet's tab
 ```
 
 | | read | write |
 |---|---|---|
 | **Files** in My Drive and Shared Drives | `read_parquet`, `read_csv`, `read_json`, `glob`, `ATTACH`, DuckLake: anything on a `gdrive://` path or a Drive address | `COPY … TO 'gdrive://…'`, streamed |
-| **Sheets and Docs** | the same readers: exported as CSV / text | — |
+| **Sheets and Docs** | the same readers: exported as CSV / text; `read_sheet_range` for any tab or A1 range, typed | `COPY … (FORMAT sheet_range, RANGE 'Tab!A1')`, in place |
 | **Drive's metadata** | `read_gdrive_files`, `search_gdrive`, `gdrive_versions`, `gdrive_changes`, `gdrive_permissions`, `gdrive_drives` | — |
 
 One install, one secret -- `CREATE SECRET (TYPE gdrive);` reuses your `gcloud`
@@ -33,7 +34,7 @@ login. Built for DuckDB **v1.5.6** and **2.0**, by
 Microsoft 365.
 
 > **🤖 Built for AI pair-programming.** The repository ships a
-> **[Claude Code plugin](#claude-code-plugin)**: three skills that teach Claude
+> **[Claude Code plugin](#claude-code-plugin)**: four skills that teach Claude
 > Code this extension's SQL API, from `CREATE SECRET` to change feeds and
 > sharing audits. Install with `/plugin marketplace add DataZooDE/duckdb-gdrive`
 > → `/plugin install duckdb-gdrive@duckdb-gdrive`.
@@ -93,7 +94,7 @@ CREATE SECRET gdrive (
 ## Claude Code plugin
 
 The repository ships a [Claude Code](https://claude.com/claude-code) plugin
-with three skills that document this extension's SQL API, so Claude Code can
+with four skills that document this extension's SQL API, so Claude Code can
 write queries against Drive from a plain request such as *"list everything
 under Finance that anyone with the link can open, and write the list to an
 Audit folder"*.
@@ -119,6 +120,7 @@ skills of a newer release, run `/plugin marketplace update duckdb-gdrive`.
 |---|---|
 | `gdrive-setup` | INSTALL/LOAD, `CREATE SECRET` for every provider (gcloud ADC, service account, workload identity, OAuth, token), `DRIVE_ID` vs `ROOT_FOLDER_ID`, `DRIVE_SCOPE`, settings, and what each sign-in or permission error means |
 | `gdrive-files` | the `gdrive://` filesystem and globs, the `id:` form, browser addresses, Sheets and Docs, COPY/ATTACH/DuckLake, `write_blob` and friends, the concurrency limits |
+| `gdrive-sheets` | `read_sheet_range` and `COPY … (FORMAT sheet_range)`: tabs and A1 ranges, `OVERWRITE` / `APPEND`, typed values, atomicity, the scope and API-enablement errors |
 | `gdrive-metadata` | `read_gdrive_files`, `search_gdrive`, `gdrive_drives`, `gdrive_versions` and `?version=`, `gdrive_changes` and the mirror pattern, `gdrive_permissions` |
 
 The skills live in [`plugins/duckdb-gdrive/`](plugins/duckdb-gdrive/). To use
@@ -132,18 +134,19 @@ back to Drive.
 
 | example | from Drive | with | back to Drive |
 |---|---|---|---|
-| [**Sheet forecast**](examples/sheet-forecast/) | a Google Sheet of monthly sales | [anofox_forecast](https://github.com/DataZooDE/anofox-forecast): AutoETS, 12 months ahead per product | `sales-forecast.csv` next to it |
+| [**Sheet forecast**](examples/sheet-forecast/) | a Google Sheet of monthly sales | [anofox_forecast](https://github.com/DataZooDE/anofox-forecast): AutoETS, 12 months ahead per product | a `Forecast` tab in the same Sheet |
 | [**Sharing audit**](examples/sharing-audit/) | every permission under a folder | `gdrive_permissions` joined with `read_gdrive_files` | link-shared, external and stale-but-shared reports |
 
 The forecast, end to end:
 
 ```sql
 CREATE TABLE sales AS                                                                    -- live from the Sheet
-SELECT product, month::DATE AS month, revenue FROM read_csv('https://docs.google.com/spreadsheets/d/1x2y3z/edit');
+SELECT product, month::DATE AS month, revenue FROM read_sheet_range('https://docs.google.com/spreadsheets/d/1x2y3z/edit', 'sales');
 CREATE TABLE forecast AS                                                                 -- anofox_forecast
 SELECT product, ds AS month, yhat AS forecast, yhat_lower AS low, yhat_upper AS high
 FROM ts_forecast_by('sales', product, month, revenue, 'AutoETS', 12, '1mo');
-COPY forecast TO 'gdrive://Finance/sales-forecast.csv' (FORMAT csv, HEADER);            -- back, next to it
+COPY forecast TO 'https://docs.google.com/spreadsheets/d/1x2y3z/edit'                  -- back, as a Forecast tab
+    (FORMAT sheet_range, RANGE 'Forecast!A1', OVERWRITE);
 ```
 
 ## Files: `gdrive://`
@@ -246,6 +249,76 @@ served from a buffer for the rest of that read. It is **not** cached between
 queries: querying the same Sheet twice costs two exports. That matters for
 quota -- a dashboard polling a Sheet pays the full export every time.
 Materialise it into a table if you are going to query it repeatedly.
+
+### A tab or a range of a Sheet: `read_sheet_range` and `FORMAT sheet_range`
+
+The export above sees the first tab only, as text. To read any tab, or a range
+of one, and to **write into a Sheet** -- a forecast into a `Forecast` tab,
+results where people already look -- go through the Sheets API instead:
+
+```sql
+SELECT * FROM read_sheet_range('gdrive://Finance/sales', 'Actuals!A1:F');      -- A..F, to the last row
+SELECT * FROM read_sheet_range('gdrive://Finance/sales', 'Actuals');           -- the whole tab
+SELECT * FROM read_sheet_range('gdrive://Finance/sales', '''Q3 plan''!B2:D20', header := false);
+
+COPY forecast TO 'gdrive://Finance/sales' (FORMAT sheet_range, RANGE 'Forecast!A1', OVERWRITE);
+COPY new_rows TO 'gdrive://Finance/sales' (FORMAT sheet_range, RANGE 'Log!A1', APPEND);
+```
+
+The path is any path a reader takes -- `gdrive://…`, `gdrive://id:<id>`, or the
+Sheet's browser address. The range is A1 notation with the **tab named**:
+`Tab!A1:F200`, `Tab!A1:F` (open rows), `Tab!A:F`, `Tab!2:5`, a bare `Tab`; a
+tab with spaces or quotes is quoted (`'Q3 plan'!A1`, `'It''s'!A1`).
+
+**Reading.** The first row is the header (`header := false` names the columns
+`column1`, `column2`, …); `all_varchar := true` reads everything as text.
+Formula cells read as their results. Columns are typed as
+duckdb-sharepoint's `read_excel_range` types them: only numbers → `BIGINT` or
+`DOUBLE`, cells formatted as dates / times → `DATE`, `TIMESTAMP`, `TIME`,
+booleans → `BOOLEAN`, anything mixed → `VARCHAR`; an error cell (`#DIV/0!`) is
+NULL in a typed column. Trailing empty rows are not returned. One
+`spreadsheets.get` per call.
+
+**Writing** changes the Sheet **in place**: it keeps its id, its link, its
+sharing and its other tabs, and only the cells of the range change.
+
+| option | |
+|---|---|
+| `RANGE 'Tab!A1'` | required: the tab, and the top-left cell of the block. A **missing tab is created**. With explicit bounds (`'Tab!A1:F'`) the block must fit them. |
+| `HEADER true\|false` | write the column names as the first row (default `true`) |
+| *(default)* | write the block from the anchor; nothing outside it is cleared |
+| `OVERWRITE` | first clear the anchor's extent -- from the anchor down and right to the edge of the tab, or within the explicit bounds -- then write: a shorter result leaves no stale rows |
+| `APPEND` | add the rows below the data already at the anchor (`values.append`); the header is written only when the tab is new or `HEADER true` is given |
+
+- Values are written **typed** and as data, never as formulas: numbers and
+  booleans natively, `DATE` / `TIMESTAMP` / `TIME` as Sheets dates with a date
+  format (so they read back as dates), text as text -- `'=1+1'` stays the
+  string `=1+1`. `NULL` is an empty cell. `DECIMAL` and `HUGEINT` go through
+  `DOUBLE` (about 15 significant digits); `LIST`, `STRUCT` and `MAP` columns
+  are refused -- convert them first (`to_json(col)`).
+- Only cell **values** are touched: formats inside the range, and formulas
+  and everything else outside it, stay as they are.
+- A write that fits one request (about 2 MB of cell data -- tens of thousands
+  of cells) is **one atomic `batchUpdate`**: the new tab, a larger grid, the
+  `OVERWRITE` clear and the cells land together or not at all. A larger one is
+  split into several requests and is **not atomic**: if one fails, the error
+  says the Sheet was partially written and to re-run with `OVERWRITE`. Rows are
+  buffered until the query has finished, so a query that fails part-way writes
+  nothing.
+- A Sheet holds at most 10 million cells across its tabs; a larger write is
+  refused before anything is sent.
+- The target must already be a native Google Sheet: a CSV or Excel file in
+  Drive is refused (write a file with `FORMAT csv` instead), and a plain
+  `COPY … (FORMAT csv)` onto a Sheet is still refused -- it would destroy it.
+- Writing needs the full `drive` scope (`DRIVE_SCOPE
+  'https://www.googleapis.com/auth/drive'`); `drive.readonly` reads a Sheet
+  but its writes fail with an insufficient-scope error that says so. The
+  Sheets API must be enabled in the Google Cloud project your credential bills
+  to -- if it is not, the error names the project and the command:
+  `gcloud services enable sheets.googleapis.com --project <project>`.
+- Costs one `spreadsheets.get` (the tab list) plus one `batchUpdate` per
+  ~2 MB; `gdrive_stats()` counts them as `sheets_get`, `sheets_update` and
+  `sheets_append`.
 
 ## Writing
 
@@ -890,9 +963,15 @@ discovered later.
 - **`ATTACH` of a DuckDB database file is read-only** and uses global settings
   only. Writable attachment is impossible: Drive has neither atomic renames nor
   byte-offset writes.
-- **Native Sheets and Docs are re-exported per open**, and a Sheet exports its
-  first tab only. Earlier versions of native files cannot be read.
-- **Writing into a Sheet is not supported.** Write CSV or Parquet next to it.
+- **Native Sheets and Docs are re-exported per open**, and a Sheet *exported*
+  through `read_csv` gives its first tab only -- `read_sheet_range` reads any
+  tab. Earlier versions of native files cannot be read.
+- **A `sheet_range` write larger than one request is not atomic.** About 2 MB
+  of cell data per `batchUpdate`; a larger write is split, and a failure
+  part-way leaves the range partially written (re-run with `OVERWRITE`). An
+  `APPEND` is never retried automatically, because a repeated append appends
+  twice. `FORMAT sheet_range` writes into an existing Sheet; it does not create
+  a new spreadsheet, and there is no keyed upsert (yet).
 - **Search and the changes feed lag** writes, by seconds to minutes.
 
 ## When you should NOT use this
@@ -914,9 +993,11 @@ Being direct, because the alternatives are often better:
   against ~1 ms for S3/GCS, and Drive enforces per-user API quotas that object
   storage does not. This is the right tool when Drive is the *system of record*
   and you want to stop maintaining a copy -- not when you want a fast warehouse.
-- **Live editing of Sheets from SQL?** The `gsheets` community extension reads
-  and writes cell ranges through the Sheets API; this one reads a Sheet as a
-  file.
+- **Only Sheets, nothing else in Drive?** The `gsheets` community extension
+  reads and writes cell ranges through the Sheets API too, with a one-line
+  secret. This one does the same for Sheets in Drive (`read_sheet_range`,
+  `FORMAT sheet_range`) next to the files and Drive's metadata, over one
+  secret.
 
 ## Network and privacy
 
@@ -925,6 +1006,7 @@ Your data goes only between DuckDB and Google:
 | what | where | opt out |
 |---|---|---|
 | Files, metadata, exports, uploads | the Drive API (`www.googleapis.com`) | — |
+| Sheet ranges (`read_sheet_range`, `FORMAT sheet_range`) | the Sheets API (`sheets.googleapis.com`) | — |
 | Sign-in and token refresh | Google's token endpoint (`oauth2.googleapis.com`); for workload identity also `sts.googleapis.com` and `iamcredentials.googleapis.com` | — |
 | Browser consent (`authorization_code`) | your browser and a loopback redirect on `localhost` | — |
 | Telemetry | one anonymous `extension_loaded` event to PostHog EU (`eu.i.posthog.com`): the extension's name and version, DuckDB's version, OS and architecture, whether it runs in CI or a container, and a salted SHA-256 hash of the machine id (never the id itself) | `SET gdrive_telemetry_enabled = false`, or `DATAZOO_DISABLE_TELEMETRY=1` to stop the load event too |

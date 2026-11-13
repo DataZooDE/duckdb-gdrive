@@ -1463,7 +1463,27 @@ bool GDriveFileSystem::TryRemoveFile(const string &filename, optional_ptr<FileOp
 	if (IsDriveWebUrl(filename) || IsCopyStagingAlias(filename)) {
 		return false;
 	}
-	return FileSystem::TryRemoveFile(filename, opener);
+	// Never a native Google file (a Sheet, a Doc). TryRemoveFile is DuckDB's
+	// cleanup primitive -- a failed COPY calls it on every file it "created"
+	// (v1.5.6: the global state's destructor), and for FORMAT sheet_range that
+	// is the Sheet the COPY was writing INTO. Nothing this filesystem writes can
+	// create a native file (RefuseReplacing refuses to write one, and an upload
+	// is never converted), so no cleanup has a native file to remove. Removing
+	// one on purpose stays possible through RemoveFile / remove_file().
+	if (FileExists(filename, opener)) {
+		auto context = RequireOpener(opener, filename);
+		const string path = ToGDrivePath(filename);
+		auto parsed = ParseGDriveUri(path);
+		auto auth = GetAuthContext(context, path);
+		auto client = CreateGDriveClient(auth);
+		DriveFileMeta meta;
+		if (parsed.ok && TryResolvePath(cache, *client, auth, parsed.uri, meta) && meta.IsNativeGoogleFormat()) {
+			return false;
+		}
+		RemoveFile(filename, opener);
+		return true;
+	}
+	return false;
 }
 
 vector<OpenFileInfo> GDriveFileSystem::Glob(const string &path, FileOpener *opener) {

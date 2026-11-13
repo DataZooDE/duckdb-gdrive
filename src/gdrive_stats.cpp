@@ -78,6 +78,10 @@ unique_ptr<FunctionData> GDriveStatsBind(ClientContext &, TableFunctionBindInput
 	    {"revisions_media", stats.revisions_media},
 	    {"changes_list", stats.changes_list},
 	    {"drives_list", stats.drives_list},
+	    // Sheets API v4: read_sheet_range and COPY ... (FORMAT sheet_range).
+	    {"sheets_get", stats.sheets_get},
+	    {"sheets_update", stats.sheets_update},
+	    {"sheets_append", stats.sheets_append},
 	    // A GAUGE, not a counter: the live size of the path cache, which S-2.11
 	    // requires to be bounded. Asserting the bound needs a way to see it.
 	    {"path_cache_entries", static_cast<int64_t>(GetGlobalPathCacheEntries())},
@@ -184,7 +188,8 @@ void RegisterGDriveStats(ExtensionLoader &loader) {
 	    "(empty status PUTs before a resume), upload_aborts (sessions cancelled, nothing "
 	    "published), upload_buffer_peak_bytes (a HIGH-WATER MARK: most bytes one write handle held), permissions_list, "
 	    "revisions_list, revisions_media (ranged reads of an earlier version), changes_list, drives_list (the "
-	    "metadata table functions' calls), total (sum of every Drive API call counter), and path_cache_entries (a GAUGE: the live size of the "
+	    "metadata table functions' calls), sheets_get, sheets_update, sheets_append (Sheets API calls behind "
+	    "read_sheet_range and FORMAT sheet_range), total (sum of every Drive API call counter), and path_cache_entries (a GAUGE: the live size of the "
 	    "path->id cache, bounded by gdrive_path_cache_entries). Process-wide, not reset between queries -- call it before and "
 	    "after an operation and diff the two snapshots to measure that operation's amplification.";
 	desc.parameter_names = {};

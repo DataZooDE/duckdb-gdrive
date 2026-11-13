@@ -50,7 +50,8 @@ functions only, and nothing may follow the folder id. Writes need `/file/d/<id>/
 `web_url` from `read_gdrive_files` reads back.
 
 ## Native Sheets and Docs
-They have no bytes, so they are exported once per open: Sheets as CSV (the **first tab**),
+They have no bytes, so they are exported once per open: Sheets as CSV (the **first tab**;
+any tab or range, typed, and writing into a Sheet: the `gdrive-sheets` skill),
 Docs as `text/plain` (`SET gdrive_docs_export_mime = 'text/markdown'`). Not cached across
 queries -- materialise a Sheet you query repeatedly:
 ```sql

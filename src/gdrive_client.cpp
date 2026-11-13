@@ -75,7 +75,7 @@ int64_t DriveCallStats::Total() const {
 	// peak is a gauge and is not.
 	return files_get + files_list + files_media + files_export + files_create + files_update + files_delete +
 	       generate_ids + upload_chunks + upload_status_queries + upload_aborts + permissions_list + revisions_list +
-	       revisions_media + changes_list + drives_list;
+	       revisions_media + changes_list + drives_list + sheets_get + sheets_update + sheets_append;
 }
 
 // ---------------------------------------------------------------------------
@@ -675,6 +675,30 @@ public:
 		return ExecuteWithRetry(HttpMethod::GET, path_and_query, {}, "", "", counter, {200});
 	}
 
+	DriveResponse HostRequest(const std::string &host, const std::string &method, const std::string &path_and_query,
+	                          const std::string &body, int64_t DriveCallStats::*counter,
+	                          bool retry_ambiguous) override {
+		HttpMethod m;
+		if (method == "GET") {
+			m = HttpMethod::GET;
+		} else if (method == "POST") {
+			m = HttpMethod::POST;
+		} else if (method == "PUT") {
+			m = HttpMethod::PUT;
+		} else if (method == "PATCH") {
+			m = HttpMethod::PATCH;
+		} else if (method == "DELETE") {
+			m = HttpMethod::DELETE_;
+		} else {
+			DriveResponse bad;
+			bad.error.kind = GDriveErrorKind::INVALID_REQUEST;
+			bad.error.message = "unsupported HTTP method " + method;
+			return bad;
+		}
+		return ExecuteWithRetry(m, path_and_query, {}, body, body.empty() ? "" : "application/json", counter,
+		                        {200, 201, 202, 204}, retry_ambiguous, -1, -1, host);
+	}
+
 	DriveResponse Download(const std::string &file_id, int64_t start, int64_t end) override {
 		// GDRIVE_TRACE_RANGES predates the span tracer and is kept working:
 		// it is quoted in docs/benchmark.md and in shell one-liners. For a
@@ -1178,13 +1202,22 @@ private:
 		if (counter == &DriveCallStats::drives_list) {
 			return "drives.list";
 		}
+		if (counter == &DriveCallStats::sheets_get) {
+			return "sheets.get";
+		}
+		if (counter == &DriveCallStats::sheets_update) {
+			return "sheets.batchUpdate";
+		}
+		if (counter == &DriveCallStats::sheets_append) {
+			return "sheets.values.append";
+		}
 		return "unknown";
 	}
 
 	RawResult DoHttp(HttpMethod method, const std::string &access_token, const std::string &path_and_query,
 	                 const std::vector<std::pair<std::string, std::string>> &extra_headers, const std::string &body,
 	                 const std::string &content_type, bool with_auth = true, const char *put_body = nullptr,
-	                 size_t put_body_len = 0) {
+	                 size_t put_body_len = 0, const std::string &host = kDriveHost) {
 		// ---------------------------------------------------------------
 		// One TLS connection PER THREAD, reused for every request that
 		// thread makes.
@@ -1206,8 +1239,30 @@ private:
 		// connection, so reusing one across secrets leaks nothing -- the
 		// same reason ordinary HTTP connection pools are safe.
 		// ---------------------------------------------------------------
-		static thread_local duckdb_httplib_openssl::SSLClient client(kDriveHost, kDrivePort);
-		static thread_local bool configured = false;
+		//
+		// One connection per thread PER HOST: the Drive host, and any other
+		// Google API a caller reaches through HostRequest (sheets.googleapis.com).
+		// A handful of hosts at most, so a small list beats a map.
+		struct HostConnection {
+			std::string host;
+			std::unique_ptr<duckdb_httplib_openssl::SSLClient> client;
+			bool configured = false;
+		};
+		static thread_local std::vector<HostConnection> connections;
+		HostConnection *conn = nullptr;
+		for (auto &c : connections) {
+			if (c.host == host) {
+				conn = &c;
+			}
+		}
+		if (!conn) {
+			connections.push_back(HostConnection {host, std::unique_ptr<duckdb_httplib_openssl::SSLClient>(
+			                                                new duckdb_httplib_openssl::SSLClient(host, kDrivePort)),
+			                                      false});
+			conn = &connections.back();
+		}
+		auto &client = *conn->client;
+		bool &configured = conn->configured;
 		// Captured before the request: the FIRST call on this thread is the one
 		// that pays DNS + TCP + TLS, and a timeline that cannot distinguish it
 		// from a warm call misattributes the cost of a cold scan.
@@ -1322,7 +1377,7 @@ private:
 	                               const std::string &body, const std::string &content_type,
 	                               int64_t DriveCallStats::*counter, const std::vector<int> &success_statuses,
 	                               bool retry_non_idempotent = false, int64_t trace_range_off = -1,
-	                               int64_t trace_range_len = -1) {
+	                               int64_t trace_range_len = -1, const std::string &host = kDriveHost) {
 		int attempt = 0;
 		// Asked of the SOURCE, per logical call: a handle opened an hour ago
 		// gets a token that is valid now, not the one it was opened with.
@@ -1339,7 +1394,8 @@ private:
 			const bool tracing = trace::Enabled();
 			const uint64_t t_start = tracing ? trace::NowMicros() : 0;
 
-			RawResult raw = DoHttp(method, access_token, path_and_query, extra_headers, body, content_type);
+			RawResult raw = DoHttp(method, access_token, path_and_query, extra_headers, body, content_type,
+			                       /*with_auth=*/true, nullptr, 0, host);
 
 			if (tracing) {
 				trace::Span span;

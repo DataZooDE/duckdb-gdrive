@@ -40,14 +40,18 @@ if ! gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/nu
 fi
 echo "active: $(gcloud auth list --filter=status:ACTIVE --format='value(account)')"
 
-step "2/5  Project + Drive API"
+step "2/5  Project + Drive and Sheets APIs"
 if ! gcloud projects describe "$PROJECT" >/dev/null 2>&1; then
     echo "Project '$PROJECT' not found."
     echo "Create it, or point at an existing one with GDRIVE_CI_PROJECT=<id>."
     exit 1
 fi
-gcloud services enable drive.googleapis.com --project="$PROJECT"
-echo "drive.googleapis.com enabled on $PROJECT"
+# The Sheets API backs read_sheet_range and COPY ... (FORMAT sheet_range);
+# without it those tests fail with 403 SERVICE_DISABLED. Both identities bill
+# to this project: the service account it owns, and the delegated user's
+# OAuth client, which should be created here too.
+gcloud services enable drive.googleapis.com sheets.googleapis.com --project="$PROJECT"
+echo "drive.googleapis.com and sheets.googleapis.com enabled on $PROJECT"
 
 step "3/5  Service account"
 if ! gcloud iam service-accounts describe "$SA_EMAIL" --project="$PROJECT" >/dev/null 2>&1; then

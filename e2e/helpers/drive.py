@@ -24,6 +24,7 @@ from google.oauth2 import service_account
 
 DRIVE_V3 = "https://www.googleapis.com/drive/v3"
 UPLOAD_V3 = "https://www.googleapis.com/upload/drive/v3"
+SHEETS_V4 = "https://sheets.googleapis.com/v4"
 FOLDER_MIME = "application/vnd.google-apps.folder"
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 
@@ -554,6 +555,29 @@ class Drive:
             params={"uploadType": "multipart"}, files=files,
         )
         return self._ok(resp, "upload_native")["id"]
+
+    def sheets(self, method: str, path: str, body: dict | None = None, params: dict | None = None) -> dict:
+        """One call to the Sheets API v4 (``/v4/spreadsheets/<path>``), as this
+        session's identity. Raw like everything here; no Drive query params
+        (the Sheets API rejects ones it does not know). For the sheet_range
+        tests: rename a tab, plant a formula, read cells back independently
+        of the extension under test."""
+        kind = f"sheets.{method.lower()}"
+        self.calls[kind] = self.calls.get(kind, 0) + 1
+        resp = requests.request(method, f"{SHEETS_V4}/spreadsheets/{path}", headers=self._headers(),
+                                params=params or {}, json=body, timeout=60)
+        return self._ok(resp, f"sheets {method} {path}")
+
+    def upload_sheet(self, name: str, csv: bytes, parent_id: str, tab: str = "Sheet1") -> str:
+        """A native Sheet from CSV, its one tab renamed to `tab`. A CSV
+        conversion names the tab after the FILE, not "Sheet1"."""
+        sheet_id = self.upload_native(name, csv, parent_id, "application/vnd.google-apps.spreadsheet")
+        props = self.sheets("GET", sheet_id, params={"fields": "sheets.properties(sheetId,title)"})
+        first = props["sheets"][0]["properties"]
+        if first["title"] != tab:
+            self.sheets("POST", f"{sheet_id}:batchUpdate", {"requests": [{"updateSheetProperties": {
+                "properties": {"sheetId": first.get("sheetId", 0), "title": tab}, "fields": "title"}}]})
+        return sheet_id
 
     def set_lock(self, file_id: str, locked: bool, reason: str = "",
                  copy_requires_writer_permission: bool | None = None) -> dict:

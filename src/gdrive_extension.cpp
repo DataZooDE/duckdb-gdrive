@@ -7,6 +7,7 @@
 #include "gdrive_internal.hpp"
 #include "gdrive_permissions_functions.hpp"
 #include "gdrive_versions.hpp"
+#include "gdrive_sheets_functions.hpp"
 #include "gdrive_changes.hpp"
 #include "gdrive_stats.hpp"
 #include "gdrive_version.hpp"
@@ -225,6 +226,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	gdrive::RegisterFileFunctions(loader);
 	gdrive::RegisterPermissionFunctions(loader);
 	gdrive::RegisterVersionFunctions(loader);
+	gdrive::RegisterSheetsFunctions(loader);
 	gdrive::RegisterChangeFunctions(loader);
 
 	// remove_file()/move_file(): the two FileSystem operations SQL never got.

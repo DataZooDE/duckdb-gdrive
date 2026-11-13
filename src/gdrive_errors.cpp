@@ -32,6 +32,10 @@ struct ParsedBody {
 	//! (ACCESS_TOKEN_SCOPE_INSUFFICIENT) from "you cannot read this file":
 	//! both carry errors[0].reason "insufficientPermissions".
 	std::string detail_reason;
+	//! The ErrorInfo's metadata.service / metadata.consumer (SERVICE_DISABLED
+	//! names the API and the project to enable it in).
+	std::string detail_service;
+	std::string detail_consumer;
 	bool ok = false;
 };
 
@@ -85,6 +89,18 @@ ParsedBody ParseErrorBody(const std::string &body) {
 			auto reason_it = detail_obj.find("reason");
 			if (reason_it != detail_obj.end() && reason_it->second.is<std::string>()) {
 				out.detail_reason = reason_it->second.get<std::string>();
+				auto meta_it = detail_obj.find("metadata");
+				if (meta_it != detail_obj.end() && meta_it->second.is<picojson::object>()) {
+					const auto &meta = meta_it->second.get<picojson::object>();
+					auto service_it = meta.find("service");
+					if (service_it != meta.end() && service_it->second.is<std::string>()) {
+						out.detail_service = service_it->second.get<std::string>();
+					}
+					auto consumer_it = meta.find("consumer");
+					if (consumer_it != meta.end() && consumer_it->second.is<std::string>()) {
+						out.detail_consumer = consumer_it->second.get<std::string>();
+					}
+				}
 				break;
 			}
 		}
@@ -433,6 +449,15 @@ GDriveError ClassifyDriveError(int http_status, const std::string &body, const s
 		err.kind = GDriveErrorKind::INSUFFICIENT_SCOPE;
 		return err;
 	}
+	// An API not enabled on the billed project. Drive v3 also says
+	// errors[0].reason "accessNotConfigured"; the Sheets API (a OnePlatform
+	// API) sends no errors[] at all, so details[] is the one signal both share.
+	if (parsed.detail_reason == "SERVICE_DISABLED" || parsed.reason == "accessNotConfigured") {
+		err.kind = GDriveErrorKind::SERVICE_DISABLED;
+		err.service = parsed.detail_service;
+		err.consumer = parsed.detail_consumer;
+		return err;
+	}
 
 	// 429 is unambiguous regardless of body: rate limit. Google's documented
 	// shape puts a `reason` in the body for this case too, but a proxy/load
@@ -500,8 +525,28 @@ std::string FormatUserMessage(const GDriveError &error, const std::string &conte
 		      "If the credential came from gcloud, request the Drive scope at login:\n"
 		      "  gcloud auth application-default login \\\n"
 		      "    --scopes=openid,https://www.googleapis.com/auth/drive\n"
-		      "(gcloud's default scope, cloud-platform, does not include Drive.)";
+		      "(gcloud's default scope, cloud-platform, does not include Drive.)\n"
+		      "Writing into a Google Sheet (COPY ... FORMAT sheet_range) needs the full drive scope too; "
+		      "drive.readonly can read a Sheet but not change it.";
 		break;
+	case GDriveErrorKind::SERVICE_DISABLED: {
+		// The project, as Google names it ("projects/123456789"), minus the
+		// prefix: what `gcloud --project` takes (a number works as well as an id).
+		std::string project = error.consumer;
+		if (project.rfind("projects/", 0) == 0) {
+			project = project.substr(9);
+		}
+		const std::string service = error.service.empty() ? "sheets.googleapis.com" : error.service;
+		out = "the Google API behind " + context + " (" + service +
+		      ") is not enabled in the Google Cloud project the request is billed to. This is not a file-sharing "
+		      "or credential problem. Enable it once:\n"
+		      "  gcloud services enable " +
+		      service + " --project " + (project.empty() ? "<project>" : project) +
+		      "\n"
+		      "(for a user login that is the OAuth client's project, or the secret's quota project; for a service "
+		      "account, the project that owns it). A freshly enabled API can take a few minutes to answer.";
+		break;
+	}
 	case GDriveErrorKind::STORAGE_QUOTA:
 		out = "Drive storage quota exceeded while accessing " + context +
 		      ": the account has no storage quota available to complete this write "
@@ -544,7 +589,8 @@ GDriveExceptionType ExceptionTypeFor(GDriveErrorKind kind) {
 	switch (kind) {
 	case GDriveErrorKind::PERMISSION_DENIED:
 	case GDriveErrorKind::INSUFFICIENT_SCOPE:
-		// Both are PermissionException: DuckDB's exception taxonomy has no
+	case GDriveErrorKind::SERVICE_DISABLED:
+		// All three are PermissionException: DuckDB's exception taxonomy has no
 		// "your credential is under-scoped" type, and Permission is the
 		// closest honest fit. The distinction that matters is carried by the
 		// message, which is where the reader looks.

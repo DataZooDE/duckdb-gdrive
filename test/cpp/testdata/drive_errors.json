@@ -35,6 +35,16 @@
     "status": 403,
     "body": "{\n  \"error\": {\n    \"code\": 403,\n    \"message\": \"Request had insufficient authentication scopes.\",\n    \"errors\": [\n      {\n        \"message\": \"Insufficient Permission\",\n        \"domain\": \"global\",\n        \"reason\": \"insufficientPermissions\"\n      }\n    ],\n    \"status\": \"PERMISSION_DENIED\",\n    \"details\": [\n      {\n        \"@type\": \"type.googleapis.com/google.rpc.ErrorInfo\",\n        \"reason\": \"ACCESS_TOKEN_SCOPE_INSUFFICIENT\",\n        \"domain\": \"googleapis.com\",\n        \"metadata\": {\n          \"method\": \"google.apps.drive.v3.DriveFiles.List\",\n          \"service\": \"drive.googleapis.com\"\n        }\n      }\n    ]\n  }\n}\n\n"
   },
+  "sheets_not_found": {
+    "status": 404,
+    "captured": "2026-11-13: GET sheets.googleapis.com/v4/spreadsheets/<bogus id>, as the delegated user and as the service account (Sheets API enabled on the CI project)",
+    "body": "{\n  \"error\": {\n    \"code\": 404,\n    \"message\": \"Requested entity was not found.\",\n    \"status\": \"NOT_FOUND\"\n  }\n}\n"
+  },
+  "scope_insufficient_oneplatform": {
+    "status": 403,
+    "captured": "2026-11-13: script.googleapis.com with a drive-scoped token -- the OnePlatform error shape (no errors[] array) that sheets.googleapis.com shares",
+    "body": "{\n  \"error\": {\n    \"code\": 403,\n    \"message\": \"Request had insufficient authentication scopes.\",\n    \"status\": \"PERMISSION_DENIED\",\n    \"details\": [\n      {\n        \"@type\": \"type.googleapis.com/google.rpc.ErrorInfo\",\n        \"reason\": \"ACCESS_TOKEN_SCOPE_INSUFFICIENT\",\n        \"domain\": \"googleapis.com\",\n        \"metadata\": {\n          \"method\": \"google.apps.script.management.v1.ProjectsService.GetProject\",\n          \"service\": \"script.googleapis.com\"\n        }\n      }\n    ]\n  }\n}\n"
+  },
   "file_id_in_use": {
     "status": 409,
     "body": "{\n  \"error\": {\n    \"code\": 409,\n    \"message\": \"A file already exists with the provided ID.\",\n    \"errors\": [\n      {\n        \"message\": \"A file already exists with the provided ID.\",\n        \"domain\": \"global\",\n        \"reason\": \"fileIdInUse\"\n      }\n    ]\n  }\n}\n"

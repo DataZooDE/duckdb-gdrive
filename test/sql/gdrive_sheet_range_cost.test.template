@@ -1,0 +1,126 @@
+# name: test/sql/gdrive_sheet_range_cost.test.template
+# description: what read_sheet_range and FORMAT sheet_range cost in Sheets API calls
+# group: [live]
+#
+# IN ITS OWN FILE ON PURPOSE (CLAUDE.md: cost assertions belong in their own
+# file), against its own Sheet. Exact numbers: an inequality would still pass
+# if a write that fits one request quietly became two -- and then it would no
+# longer be atomic. The Drive side (resolving the path) is not asserted: it
+# depends on the path cache and on how DuckDB probes a COPY target.
+
+require gdrive
+
+require-env GDRIVE_CI_DRIVE_ID
+
+require-env GDRIVE_OAUTH_CLIENT_ID
+
+require-env GDRIVE_OAUTH_CLIENT_SECRET
+
+require-env GDRIVE_USER_REFRESH_TOKEN
+
+statement ok
+CREATE SECRET gdrive_sheet_cost (
+    TYPE gdrive,
+    PROVIDER config,
+    CLIENT_ID '${OAUTH_CLIENT_ID}',
+    CLIENT_SECRET '${OAUTH_CLIENT_SECRET}',
+    REFRESH_TOKEN '${USER_REFRESH_TOKEN}',
+    ROOT_FOLDER_ID '${DRIVE_ID}',
+    DRIVE_SCOPE 'https://www.googleapis.com/auth/drive'
+);
+
+statement ok
+CREATE MACRO sheet_calls() AS TABLE
+    SELECT max(value) FILTER (metric = 'sheets_get') AS get,
+           max(value) FILTER (metric = 'sheets_update') AS upd,
+           max(value) FILTER (metric = 'sheets_append') AS app
+    FROM gdrive_stats();
+
+# A read: ONE spreadsheets.get, values and formats together.
+statement ok
+CALL gdrive_reset_stats();
+
+query I
+SELECT count(*) FROM read_sheet_range('gdrive://id:${SHEET:sheet_cost}', 'Sheet1')
+----
+1
+
+query III
+SELECT * FROM sheet_calls()
+----
+1	0	0
+
+# A write into a NEW tab, dates included: the tab list, then ONE batchUpdate
+# (addSheet + cells + date formats) -- atomic.
+statement ok
+CALL gdrive_reset_stats();
+
+statement ok
+COPY (SELECT i, DATE '2026-01-01' + i::INTEGER AS d FROM range(5) t(i))
+TO 'gdrive://id:${SHEET:sheet_cost}' (FORMAT sheet_range, RANGE 'Forecast!A1');
+
+query III
+SELECT * FROM sheet_calls()
+----
+1	1	0
+
+# OVERWRITE of an existing tab: clear + write in the SAME batchUpdate.
+statement ok
+CALL gdrive_reset_stats();
+
+statement ok
+COPY (SELECT 1 AS i) TO 'gdrive://id:${SHEET:sheet_cost}' (FORMAT sheet_range, RANGE 'Forecast!A1', OVERWRITE);
+
+query III
+SELECT * FROM sheet_calls()
+----
+1	1	0
+
+# APPEND without dates: one values.append, no format batch.
+statement ok
+CALL gdrive_reset_stats();
+
+statement ok
+COPY (SELECT 2 AS i) TO 'gdrive://id:${SHEET:sheet_cost}' (FORMAT sheet_range, RANGE 'Forecast!A1', APPEND);
+
+query III
+SELECT * FROM sheet_calls()
+----
+1	0	1
+
+# APPEND with a date column: the append, then one batch for the formats.
+statement ok
+CALL gdrive_reset_stats();
+
+statement ok
+COPY (SELECT DATE '2026-05-01' AS d) TO 'gdrive://id:${SHEET:sheet_cost}' (FORMAT sheet_range, RANGE 'Days!A1', APPEND);
+
+query III
+SELECT * FROM sheet_calls()
+----
+1	2	1
+
+query I
+SELECT count(*) FROM read_sheet_range('gdrive://id:${SHEET:sheet_cost}', 'Forecast')
+----
+2
+
+# A write larger than one request (2 MB of JSON) is split. 30,000 rows of four
+# text cells are ~6.5 MB as CellData (each row ~220 bytes), so FOUR
+# batchUpdates; the first also grows the grid from 1,000 rows.
+statement ok
+CALL gdrive_reset_stats();
+
+statement ok
+COPY (SELECT 'row-' || i AS a, 'b' || i AS b, 'c' || i AS c, 'some longer text ' || i AS d FROM range(30000) t(i))
+TO 'gdrive://id:${SHEET:sheet_cost}' (FORMAT sheet_range, RANGE 'Big!A1');
+
+query III
+SELECT * FROM sheet_calls()
+----
+1	4	0
+
+query II
+SELECT count(*), max(a) FROM read_sheet_range('gdrive://id:${SHEET:sheet_cost}', 'Big!A1:A')
+----
+30000	row-9999

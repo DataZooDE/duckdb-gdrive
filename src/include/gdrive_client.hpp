@@ -100,6 +100,12 @@ struct DriveCallStats {
 	int64_t revisions_media = 0;
 	int64_t changes_list = 0;
 	int64_t drives_list = 0;
+	//! Sheets API v4 (sheets.googleapis.com), behind read_sheet_range and
+	//! COPY ... (FORMAT sheet_range): spreadsheets.get (tab properties, grid
+	//! data), spreadsheets.batchUpdate, spreadsheets.values.append.
+	int64_t sheets_get = 0;
+	int64_t sheets_update = 0;
+	int64_t sheets_append = 0;
 
 	int64_t Total() const;
 };
@@ -144,6 +150,18 @@ public:
 	//! AllDrivesQuery() where the endpoint takes it (drives.list does not).
 	//! Does not follow pages: the callers each have their own token field.
 	virtual DriveResponse ApiGet(const std::string &path_and_query, int64_t DriveCallStats::*counter) = 0;
+
+	//! One request to ANOTHER Google API host (sheets.googleapis.com, ...),
+	//! with the same bearer token source, 401 refresh, retry/backoff, quota-
+	//! project header and counting as every Drive call. `method` is "GET",
+	//! "POST", "PUT", "PATCH" or "DELETE"; `body` is sent as application/json
+	//! when non-empty. GET and DELETE retry on an ambiguous failure (transport
+	//! error, 5xx, 429); anything else only with `retry_ambiguous`, which the
+	//! caller sets only for a request whose repetition cannot change the
+	//! result. Success is any 2xx.
+	virtual DriveResponse HostRequest(const std::string &host, const std::string &method,
+	                                  const std::string &path_and_query, const std::string &body,
+	                                  int64_t DriveCallStats::*counter, bool retry_ambiguous) = 0;
 
 	//! files.get?alt=media with `Range: bytes=start-end` (inclusive, as HTTP
 	//! defines it). `end` < 0 means "to end of file".
