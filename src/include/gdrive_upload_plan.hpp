@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace duckdb {
 namespace gdrive {
@@ -160,6 +161,55 @@ constexpr int kMaxChunkAttempts = 5;
 //! I/O around it.
 UploadStep NextUploadStep(const ChunkedUploadBuffer &buf, bool final, ChunkUploadState &state,
                           const UploadReply &reply);
+
+// ---------------------------------------------------------------------------
+// Retry safety of single-request writes (pure). A failure after the request
+// was sent -- a dropped connection, a 5xx -- is AMBIGUOUS: Drive may have
+// applied it and only the answer was lost. Whether repeating it is safe
+// depends on what the request does, not on its HTTP verb:
+//
+//   * a CREATE makes a new object every time, unless it names an id reserved
+//     with files.generateIds -- then a repeat answers 409 "fileIdInUse"
+//     instead of making a second file or folder (verified live 2026-11-13,
+//     for files, folders, and a resumable session's final chunk alike);
+//   * an OVERWRITE (files.update with content, by id) puts the same bytes on
+//     the same id again: the end state is the same, at the cost of one more
+//     revision;
+//   * a MOVE (files.update by id with an explicit name, addParents and
+//     removeParents) and a TRASH ({trashed:true}) set absolute state; a
+//     repeat answers 200 with the same result (verified live 2026-11-13).
+// ---------------------------------------------------------------------------
+
+enum class WriteKind { CREATE, OVERWRITE, MOVE, TRASH };
+
+//! May a write of this kind be re-sent after an ambiguous failure?
+bool IsRetrySafe(WriteKind kind, bool has_reserved_id);
+
+//! What a create's FINAL reply -- after the transport's own retries -- means.
+enum class CreateOutcome {
+	DONE,           //!< 2xx: created, the body is the new object
+	ADOPT_RESERVED, //!< 409 fileIdInUse after an unanswered attempt: that attempt landed
+	ID_IN_USE,      //!< 409 fileIdInUse with NO unanswered attempt: someone else has our id
+	CHECK_RESERVED, //!< no usable answer (transport / 5xx): look the reserved id up
+	FAIL_CLEAN,     //!< Drive refused the request: nothing was created
+	FAIL_UNKNOWN    //!< no usable answer and no reserved id: outcome unknown
+};
+
+//! `reason` is Google's errors[0].reason (GDriveError::reason).
+//! `transport_ok` false means no HTTP response at all.
+//! `had_ambiguous_attempt`: an EARLIER attempt of this same call went
+//! unanswered (transport failure or 5xx) and so may have landed. STRICT: only
+//! then is a 409 fileIdInUse ours. Without one, the id was never used by us,
+//! so a 409 is a foreign use of a reserved id -- a bug or a concurrent writer
+//! -- and must be a loud error, never silently adopted.
+CreateOutcome InterpretCreateReply(bool transport_ok, int status, const std::string &reason,
+                                   bool has_reserved_id, bool had_ambiguous_attempt);
+
+//! Did a move whose reply was lost land? From the file's own state, read back
+//! by id: it carries the target name and sits under the target parent (and,
+//! when the move changed parents, no longer under the old one).
+bool MoveLanded(const std::string &name, const std::vector<std::string> &parents, const std::string &want_name,
+                const std::string &new_parent_id, const std::string &old_parent_id);
 
 } // namespace gdrive
 } // namespace duckdb

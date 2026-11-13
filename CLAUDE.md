@@ -16,7 +16,7 @@ the code that cites it.
 | # | Decision | Consequence |
 |---|---|---|
 | **D-1** | **Real Google Drive is the only integration target. No fake Drive server, no HTTP replay, no test doubles.** Supersedes HLD §10's "integration against a fake". | The merge gate needs the CI service-account secret. Fork PRs cannot run the live suite; they run build + pure-logic tests only. Accepted knowingly. |
-| **D-2** | `datazoo-oauth2` is built first and consumed here immediately; the `erpl-web` migration is deferred. | Time-boxed debt against REQ-A-02. Until it lands, no logic change is made to the extracted code that `erpl-web` would need to absorb. |
+| **D-2** | `datazoo-oauth2` is built first and consumed here immediately; the `erpl-web` migration is deferred. | Time-boxed debt against REQ-A-02. Until it lands, no logic change is made to the extracted code that `erpl-web` would need to absorb. **Status 2026-11-13: migration done structurally** (erpl-web is now `erpl-odata`, submodule at the same pin, no copy left), **D-12 live gate not yet run**, so the freeze still holds. |
 | **D-3** | No FUSE/rclone benchmark, no go/no-go gate. | BRD §9's strongest alternative stays formally unanswered, so the README answers it in prose ("When you should NOT use this"). The GCS comparison still ships — REQ-NF-01 requires it. |
 | **D-4** | Public `github.com/DataZooDE/duckdb-gdrive`, target name `gdrive`, scheme `gdrive://`. | `INSTALL gdrive; LOAD gdrive;` after community acceptance. |
 | **D-5** | **Shared Drives are in v1.** Not a preference: a service account has no personal Drive storage quota and cannot own files in a My Drive, so CI fixtures *must* live in a Shared Drive. | The secret carries an optional `drive_id` root binding. Personal Drive works for user-OAuth secrets. |
@@ -466,7 +466,32 @@ transport-failure path has a careful idempotency gate — a retried POST
 `files.create` manufactures an R-4 duplicate — but the HTTP-error path (5xx,
 429) had none until 2026-08-01. A 5xx is exactly as ambiguous as a dropped
 connection. It bit hardest on FOLDER creation, which unlike file creation
-reserves no id via `files.generateIds` and so cannot recognise its own retry.
+reserved no id via `files.generateIds` and so could not recognise its own retry.
+
+*2026-11-13: every write is retry-safe now, folders included.* Spiked live
+first: Drive DOES accept a supplied id on a folder `files.create` (mimeType
+folder, no media part), and the repeat answers `409` with `errors[0].reason
+"fileIdInUse"` -- byte-identical to the file case and to a resumable session's
+final chunk, whose session also accepts `id` in its initiation metadata and
+publishes under it (nothing exists under the id before the final chunk: 404).
+The same `409` comes back for the reserved id under a DIFFERENT name, so the
+409 policy is STRICT (user decision): it is adopted as "our earlier attempt
+landed" ONLY when an earlier attempt of the same call went unanswered
+(`DriveResponse::had_ambiguous_attempt`, set by `ExecuteWithRetry` on a
+re-sent transport failure or 5xx -- not a 429) AND `files.get` on the id shows
+our name and kind. A 409 `fileIdInUse` with no unanswered attempt is
+`CreateOutcome::ID_IN_USE`: a loud error naming the id, because a foreign use
+of a reserved id is a bug or a concurrent writer. A
+never-issued id is `400 fileIdNotUsable`. A repeated move PATCH (name +
+addParents + removeParents) and a repeated `{trashed:true}` both answer 200
+with the same state, and a repeated content PATCH just adds a revision. So the
+rule is `IsRetrySafe(WriteKind, has_reserved_id)` per call site, not
+`IsIdempotent(verb)`; a write into a new subtree reserves the chain AND the
+file with ONE `generateIds?count=N` (counted as `generate_ids`, no longer as
+`files_get`); and a create that cannot reserve an id is refused (fail closed)
+-- it used to be sent unreserved. No lost-reply hook exists to prove the
+recovery end to end (D-1); `e2e/tests/test_idempotent_create.py` pins Drive's
+side and Catch2 pins `InterpretCreateReply` on the captured 409 body.
 
 **Read-time stale-id recovery is not "strictly better" than validating at
 open**, whatever the old comment said. It covers more (a file deleted *after*
@@ -642,6 +667,19 @@ lessons:
   permissions audit with a typo reports "nothing shared".
 - Native Docs/Sheets report `size: 1024` whatever their content.
 
+**Drive locks guard bytes, not names (2026-11-13).** A content restriction
+(`contentRestrictions: [{readOnly: true, reason}]` via files.update -- the
+UI's *Lock*) makes Drive refuse a content write with `403
+contentRestrictionViolation`, but NOT the move-and-trash that COPY's default
+tmp-file staging ends in: a COPY over a locked file reported success. So the
+metadata mask (`FileFieldsMask`) asks for `contentRestrictions(readOnly)` and
+`RefuseReplacing` refuses a locked target. Drive drops the whole array on
+unlock rather than sending `readOnly: false`. A service account sees the
+restricting user's display name only ("jr", not the full name), no address.
+The live test's locked file is made by `materialise.py` in the run's scratch
+folder (the extension cannot set a lock); a lock does not stop deleting the
+folder.
+
 `.crew/` holds the crew runs (git-ignored). `helpers.drop_scratch` only
 accepts `run-*` names -- exploratory testers need their own cleanup.
 
@@ -669,6 +707,18 @@ parsed, which is RAW semantics without `values.update`; dates therefore go as
 `numberValue` serials plus a `repeatCell` number format, or they read back as
 numbers. (7) Grid growth uses `updateSheetProperties` (set rowCount), not
 `appendDimension`: it is idempotent, so an OVERWRITE batch can be retried.
+
+**The community v1.5.6 binary lagged a whole release and every check said
+fine (found 2026-11-08).** community-extensions builds only DuckDB 2.0 on
+merge; v1.5.6 needs a maintainer to dispatch `build.yml`. Nobody did for
+v2026.10.18, so `INSTALL gdrive` on stable DuckDB served v2026.09.26 for three
+weeks, while RELEASE.md's "done" check, an HTTP 200 on the file, passed,
+because a stale binary is still a file. Check the STAMP of both lines after a
+bump. Asking for the v1.5.6 build in the bump PR's description got it run at
+merge for v2026.11.08. Same release, second trap: the upstream descriptor
+had been edited upstream (a workload-identity paragraph), and copying our
+staged file over would have silently reverted it. Diff against upstream
+before copying.
 
 **Releasing:** follow `docs/RELEASE.md`. The community-extensions repo builds
 from a tagged commit and runs none of our live tests, so whatever is broken

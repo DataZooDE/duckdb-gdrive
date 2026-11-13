@@ -54,6 +54,15 @@ std::string EscapeDriveQueryLiteral(const std::string &value) {
 }
 
 void RefuseReplacing(const DriveFileMeta &existing, const std::string &target) {
+	if (existing.locked) {
+		// Drive refuses a content write to a locked file, but not the trash
+		// and move that COPY's tmp-file staging ends in: without this the
+		// lock would be silently bypassed (found live 2026-11-13).
+		throw PermissionException(
+		    "gdrive: cannot write to '%s': it is locked (a Drive content restriction makes it read-only). "
+		    "Unlock it in Drive first, or write under another name.",
+		    target);
+	}
 	if (existing.IsFolder()) {
 		throw IOException("gdrive: cannot write to '%s': it is a folder, not a file", target);
 	}
@@ -567,6 +576,10 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path_in, FileOpe
 		std::string parent_id;
 		std::string name;
 		std::string existing_id;
+		// Ids reserved for the missing part of the parent chain AND the file
+		// (one files.generateIds), so every create below is retry-safe.
+		std::vector<std::string> chain_ids;
+		size_t next_chain_id = 0;
 
 		if (parsed.uri.kind == GDriveUriKind::FILE_ID) {
 			// One files.get: an id names an EXISTING file, and the write must
@@ -683,7 +696,15 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path_in, FileOpe
 					// so the rest of the chain skips its probes.
 				}
 
-				auto resp = client->Upload("", parent_id, segment, "application/vnd.google-apps.folder", "");
+				if (chain_ids.empty()) {
+					// The first missing segment. Everything below it is missing
+					// too (O-2), so ONE reservation covers the rest of the chain
+					// plus the file itself. Fails closed: no ids, no create.
+					const auto missing_folders = parsed.uri.segments.size() - 1 - i;
+					chain_ids = ReserveFileIds(*client, static_cast<int>(missing_folders + 1), path);
+				}
+				auto resp = client->Upload("", parent_id, segment, "application/vnd.google-apps.folder", "",
+				                           chain_ids[next_chain_id++]);
 				if (!resp.ok) {
 					ThrowGDriveError(resp.error, path);
 				}
@@ -728,6 +749,11 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path_in, FileOpe
 		handle->is_write = true;
 		handle->write_parent_id = parent_id;
 		handle->write_name = name;
+		if (!chain_ids.empty()) {
+			// The leaf is new (its parent was just created): the last
+			// reserved id is the file's.
+			handle->reserved_id = chain_ids.back();
+		}
 		handle->upload = make_uniq<ChunkedUploadBuffer>(
 		    GetUBigIntSetting(opener, "gdrive_upload_chunk_bytes", 16ULL * 1024 * 1024));
 		return std::move(handle);

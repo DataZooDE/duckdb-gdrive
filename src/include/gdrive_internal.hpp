@@ -28,6 +28,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace duckdb {
 namespace gdrive {
@@ -113,6 +114,11 @@ public:
 	//! nothing behind.
 	unique_ptr<ChunkedUploadBuffer> upload;
 	std::string upload_session;
+	//! A CREATE's reserved file id (files.generateIds). Set at OpenFile when
+	//! the write also created the parent folders -- one reservation covers
+	//! the chain and the file -- else reserved on first use. Never set for an
+	//! overwrite, which already has `meta.id`.
+	std::string reserved_id;
 
 	//! Block-cache parameters, captured at OpenFile because Read() has no
 	//! FileOpener and therefore cannot read settings. Also means they cannot
@@ -239,6 +245,12 @@ void SendUploadChunk(GDriveFileHandleImpl &handle);
 //! Cancel the handle's resumable session, if one is open. Never throws: it
 //! runs on error paths and from the destructor.
 void AbortUpload(GDriveFileHandleImpl &handle) noexcept;
+
+//! Reserve `count` file ids (one files.generateIds call) for creates under
+//! `path`. FAILS CLOSED: if Drive cannot give us ids, the create is refused
+//! with an IOException saying nothing was written -- an unreserved create
+//! could not be retried safely, and a silent duplicate is worse than an error.
+std::vector<std::string> ReserveFileIds(GDriveClient &client, int count, const std::string &path);
 
 } // namespace gdrive
 } // namespace duckdb

@@ -74,9 +74,8 @@ int64_t DriveCallStats::Total() const {
 	// and status queries) and cancels are real round trips too; the buffer
 	// peak is a gauge and is not.
 	return files_get + files_list + files_media + files_export + files_create + files_update + files_delete +
-	       upload_chunks + upload_status_queries + upload_aborts + permissions_list + revisions_list +
-	       revisions_media + changes_list + drives_list +
-	       sheets_get + sheets_update + sheets_append;
+	       generate_ids + upload_chunks + upload_status_queries + upload_aborts + permissions_list + revisions_list +
+	       revisions_media + changes_list + drives_list + sheets_get + sheets_update + sheets_append;
 }
 
 // ---------------------------------------------------------------------------
@@ -106,7 +105,11 @@ std::string UrlEncode(const std::string &value) {
 //! The exact field mask REQ-NF-01 requires for a single file resource: no
 //! more, no less than what the extension actually consumes.
 std::string FileFieldsMask() {
-	return "id,name,mimeType,size,modifiedTime,headRevisionId,trashed";
+	// contentRestrictions(readOnly): a LOCKED file must not be replaced --
+	// COPY's tmp-file-then-move would otherwise trash it and move the new
+	// bytes in, which Drive allows (found live 2026-11-13). Drive omits the
+	// field for an unlocked file, so it costs nothing on the common path.
+	return "id,name,mimeType,size,modifiedTime,headRevisionId,trashed,contentRestrictions(readOnly)";
 }
 
 //! Same fields, nested under a files.list response's `files` array, plus
@@ -202,6 +205,22 @@ bool ParseFileMetaObject(const picojson::object &obj, DriveFileMeta &out) {
 		auto it = obj.find("trashed");
 		out.trashed = it != obj.end() && it->second.is<bool>() && it->second.get<bool>();
 	}
+	out.locked = false;
+	{
+		auto it = obj.find("contentRestrictions");
+		if (it != obj.end() && it->second.is<picojson::array>()) {
+			for (auto &r : it->second.get<picojson::array>()) {
+				if (!r.is<picojson::object>()) {
+					continue;
+				}
+				const auto &ro = r.get<picojson::object>();
+				auto f = ro.find("readOnly");
+				if (f != ro.end() && f->second.is<bool>() && f->second.get<bool>()) {
+					out.locked = true;
+				}
+			}
+		}
+	}
 	int64_t size = -1;
 	if (GetInt64FromString(obj, "size", size)) {
 		out.size = size;
@@ -213,11 +232,12 @@ bool ParseFileMetaObject(const picojson::object &obj, DriveFileMeta &out) {
 
 } // namespace
 
-//! First id out of a files.generateIds response: {"ids":["...", ...]}.
+//! The ids of a files.generateIds response: {"ids":["...", ...]}.
 //!
 //! Pure, and deliberately placed with the other parsers so test_client.cpp
 //! can exercise it without any DuckDB linkage.
-bool ParseGeneratedFileId(const std::string &json, std::string &out) {
+bool ParseGeneratedFileIds(const std::string &json, std::size_t count, std::vector<std::string> &out) {
+	out.clear();
 	picojson::value root;
 	if (!picojson::parse(root, json).empty() || !root.is<picojson::object>()) {
 		return false;
@@ -227,12 +247,40 @@ bool ParseGeneratedFileId(const std::string &json, std::string &out) {
 	if (it == obj.end() || !it->second.is<picojson::array>()) {
 		return false;
 	}
-	const auto &arr = it->second.get<picojson::array>();
-	if (arr.empty() || !arr[0].is<std::string>()) {
+	for (const auto &v : it->second.get<picojson::array>()) {
+		if (!v.is<std::string>() || v.get<std::string>().empty()) {
+			out.clear();
+			return false;
+		}
+		out.push_back(v.get<std::string>());
+	}
+	if (out.size() != count) {
+		out.clear();
 		return false;
 	}
-	out = arr[0].get<std::string>();
-	return !out.empty();
+	return true;
+}
+
+bool ParseNameAndParents(const std::string &json, std::string &name, std::vector<std::string> &parents) {
+	name.clear();
+	parents.clear();
+	picojson::value root;
+	if (!picojson::parse(root, json).empty() || !root.is<picojson::object>()) {
+		return false;
+	}
+	const auto &obj = root.get<picojson::object>();
+	if (!GetString(obj, "name", name)) {
+		return false;
+	}
+	auto it = obj.find("parents");
+	if (it != obj.end() && it->second.is<picojson::array>()) {
+		for (const auto &v : it->second.get<picojson::array>()) {
+			if (v.is<std::string>()) {
+				parents.push_back(v.get<std::string>());
+			}
+		}
+	}
+	return true;
 }
 
 bool ParseFileMeta(const std::string &json_object, DriveFileMeta &out) {
@@ -699,9 +747,10 @@ public:
 		return ExecuteWithRetry(HttpMethod::GET, path, {}, "", "", &DriveCallStats::files_export, {200});
 	}
 
-	DriveResponse GenerateFileId() override {
-		std::string path = "/drive/v3/files/generateIds?count=1&space=drive&" + AllDrivesParams();
-		return ExecuteWithRetry(HttpMethod::GET, path, {}, "", "", &DriveCallStats::files_get, {200});
+	DriveResponse GenerateFileIds(int count) override {
+		std::string path = "/drive/v3/files/generateIds?count=" + std::to_string(count) + "&space=drive&" +
+		                   AllDrivesParams();
+		return ExecuteWithRetry(HttpMethod::GET, path, {}, "", "", &DriveCallStats::generate_ids, {200});
 	}
 
 	DriveResponse Upload(const std::string &file_id, const std::string &parent_id, const std::string &name,
@@ -748,7 +797,7 @@ public:
 		if (!reserved_id.empty() && file_id.empty()) {
 			// A CREATE with a pre-reserved id. Drive rejects a second create
 			// with the same id (409), which is exactly what makes the request
-			// safe to retry -- see GenerateFileId.
+			// safe to retry -- see GenerateFileIds.
 			if (!first) {
 				metadata << ",";
 			}
@@ -756,12 +805,18 @@ public:
 		}
 		metadata << "}";
 
+		const bool retry_safe =
+		    IsRetrySafe(file_id.empty() ? WriteKind::CREATE : WriteKind::OVERWRITE, !reserved_id.empty());
 		if (is_folder_create) {
 			// Plain files.create, no /upload/ prefix and no media part --
-			// there is nothing to upload.
+			// there is nothing to upload. A reserved id works for folders
+			// exactly as for files (verified live 2026-11-13: the repeat
+			// answers 409 fileIdInUse).
 			std::string path = "/drive/v3/files?fields=" + UrlEncode(FileFieldsMask()) + "&" + AllDrivesParams();
-			return ExecuteWithRetry(HttpMethod::POST, path, {}, metadata.str(), "application/json; charset=UTF-8",
-			                        &DriveCallStats::files_create, {200});
+			auto resp = ExecuteWithRetry(HttpMethod::POST, path, {}, metadata.str(),
+			                             "application/json; charset=UTF-8", &DriveCallStats::files_create, {200},
+			                             retry_safe);
+			return FinishCreate(std::move(resp), reserved_id, name, /*is_folder=*/true);
 		}
 
 		std::string boundary = BuildMultipartBoundary();
@@ -772,30 +827,88 @@ public:
 		if (file_id.empty()) {
 			path << "/upload/drive/v3/files?uploadType=multipart&fields=" << UrlEncode(FileFieldsMask()) << "&"
 			     << AllDrivesParams();
-			if (reserved_id.empty()) {
-				return ExecuteWithRetry(HttpMethod::POST, path.str(), {}, body, content_type_header,
-				                        &DriveCallStats::files_create, {200});
-			}
 			// With a reserved id the create IS retryable: a duplicate attempt
 			// cannot make a second file, it can only collide with the first.
 			auto resp = ExecuteWithRetry(HttpMethod::POST, path.str(), {}, body, content_type_header,
-			                             &DriveCallStats::files_create, {200}, /*retry_non_idempotent=*/true);
-			if (!resp.ok && resp.http_status == 409) {
-				// 409 "A file already exists with the provided ID" means an
-				// earlier attempt DID land and we only lost its response.
-				// That is a success, not a failure -- report the file.
-				return GetMetadata(reserved_id);
-			}
-			return resp;
+			                             &DriveCallStats::files_create, {200}, retry_safe);
+			return FinishCreate(std::move(resp), reserved_id, name, /*is_folder=*/false);
 		}
+		// OVERWRITE: the same bytes on the same id. A repeat after a lost
+		// answer only adds a revision, so it is retried like a GET.
 		path << "/upload/drive/v3/files/" << UrlEncode(file_id) << "?uploadType=multipart&fields="
 		     << UrlEncode(FileFieldsMask()) << "&" << AllDrivesParams();
 		return ExecuteWithRetry(HttpMethod::PATCH, path.str(), {}, body, content_type_header,
-		                        &DriveCallStats::files_update, {200});
+		                        &DriveCallStats::files_update, {200}, retry_safe);
+	}
+
+	//! A create's final reply, after ExecuteWithRetry's own retries, made
+	//! definite where the reserved id allows (InterpretCreateReply).
+	DriveResponse FinishCreate(DriveResponse resp, const std::string &reserved_id, const std::string &name,
+	                           bool is_folder) {
+		const bool transport_ok = resp.ok || resp.http_status != 0;
+		switch (InterpretCreateReply(transport_ok, resp.http_status, resp.error.reason, !reserved_id.empty(),
+		                             resp.had_ambiguous_attempt)) {
+		case CreateOutcome::DONE:
+		case CreateOutcome::FAIL_CLEAN:
+		case CreateOutcome::FAIL_UNKNOWN:
+			return resp;
+		case CreateOutcome::ID_IN_USE:
+			resp.error.kind = GDriveErrorKind::UNKNOWN;
+			resp.error.message = ReservedIdInUseMessage(reserved_id);
+			return resp;
+		case CreateOutcome::ADOPT_RESERVED:
+		case CreateOutcome::CHECK_RESERVED:
+			break;
+		}
+		return LookUpReserved(std::move(resp), reserved_id, name, is_folder);
+	}
+
+	//! No attempt of ours went unanswered, so none can own the id: a foreign
+	//! use of a reserved id, which is never adopted.
+	static std::string ReservedIdInUseMessage(const std::string &reserved_id) {
+		return "Drive reports the id reserved for this create (" + reserved_id +
+		       ") is already in use, but no earlier attempt of this create went unanswered, so it is not ours. "
+		       "That is a bug or a concurrent writer; nothing was created by this call.";
+	}
+
+	//! Is the object under our reserved id the one we meant to create? An
+	//! earlier attempt that landed is adopted; a 404 proves nothing was
+	//! created; anything else leaves the outcome open -- but the id is
+	//! reserved, so re-running cannot duplicate it.
+	DriveResponse LookUpReserved(DriveResponse failed, const std::string &reserved_id, const std::string &name,
+	                             bool is_folder) {
+		auto meta_resp = GetMetadata(reserved_id);
+		DriveFileMeta meta;
+		if (meta_resp.ok && ParseFileMeta(meta_resp.body, meta)) {
+			if (meta.name == name && meta.IsFolder() == is_folder && !meta.trashed) {
+				return meta_resp;
+			}
+			failed.ok = false;
+			failed.error.kind = GDriveErrorKind::UNKNOWN;
+			failed.error.message = "the id reserved for this create is in use by a different object (id " +
+			                       reserved_id + "); nothing was created";
+			return failed;
+		}
+		failed.ok = false;
+		if (!meta_resp.ok && meta_resp.error.kind == GDriveErrorKind::NOT_FOUND) {
+			// Nothing exists under the reserved id: no attempt landed.
+			failed.error.kind = GDriveErrorKind::TRANSIENT;
+			failed.error.message =
+			    "Drive could not be reached on any attempt (" +
+			    (failed.http_status == 0 ? std::string("no response") : "HTTP " + std::to_string(failed.http_status)) +
+			    "). Nothing was written: the reserved id is unused. It is safe to re-run.";
+			return failed;
+		}
+		failed.error.kind = GDriveErrorKind::TRANSIENT;
+		failed.error.message = "Drive could not be reached on any attempt, so whether the create landed is not "
+		                       "known. It is safe to re-run: the create carried a reserved id, so it cannot have "
+		                       "made a second object, and a re-run finds and reuses anything it did make.";
+		return failed;
 	}
 
 	DriveResponse StartResumableUpload(const std::string &file_id, const std::string &parent_id,
-	                                   const std::string &name, const std::string &content_type) override {
+	                                   const std::string &name, const std::string &content_type,
+	                                   const std::string &reserved_id) override {
 		std::ostringstream metadata;
 		metadata << "{";
 		bool first = true;
@@ -806,6 +919,12 @@ public:
 		if (!parent_id.empty() && file_id.empty()) {
 			// Parents only on create, as in Upload().
 			metadata << (first ? "" : ",") << "\"parents\":[\"" << JsonEscape(parent_id) << "\"]";
+			first = false;
+		}
+		if (!reserved_id.empty() && file_id.empty()) {
+			// The final chunk then publishes under this id (verified live
+			// 2026-11-13), so an ambiguous final chunk can be looked up.
+			metadata << (first ? "" : ",") << "\"id\":\"" << JsonEscape(reserved_id) << "\"";
 		}
 		metadata << "}";
 		const std::vector<std::pair<std::string, std::string>> headers = {
@@ -900,13 +1019,15 @@ public:
 			response.ok = false;
 			response.http_status = raw.transport_ok ? raw.status : 0;
 			response.body = raw.body;
+			response.had_ambiguous_attempt = final && state.final_maybe_sent;
 			if (step.ambiguous) {
 				// The final chunk may have reached Drive and published the file;
 				// only its replies were lost. Same honesty as the multipart path.
 				response.error.kind = GDriveErrorKind::TRANSIENT;
 				response.error.message =
-				    "the final chunk of a resumable upload got no usable answer from Drive; the change may or "
-				    "may not have been applied. Check the destination before retrying.";
+				    "the final chunk of a resumable upload got no usable answer from Drive on any attempt, so "
+				    "whether the file was published is not known. It is safe to re-run: an overwrite replaces "
+				    "the file by id, and a create carries a reserved id, so neither can make a second file.";
 			} else if (raw.transport_ok && raw.status != 308 && (raw.status < 200 || raw.status >= 300)) {
 				response.error = err;
 			} else {
@@ -962,7 +1083,8 @@ public:
 		// Drive happens to use for the trash variant.
 		std::string body = "{\"trashed\":true}";
 		return ExecuteWithRetry(HttpMethod::PATCH, path + "&fields=" + UrlEncode(FileFieldsMask()), {}, body,
-		                        "application/json", &DriveCallStats::files_delete, {200});
+		                        "application/json", &DriveCallStats::files_delete, {200},
+		                        IsRetrySafe(WriteKind::TRASH, false));
 	}
 
 	DriveResponse Move(const std::string &file_id, const std::string &new_parent_id, const std::string &new_name,
@@ -980,8 +1102,11 @@ public:
 		if (!new_name.empty()) {
 			body = "{\"name\":\"" + JsonEscape(new_name) + "\"}";
 		}
+		// Absolute state (name, addParents, removeParents): a repeat after
+		// a lost answer is a 200 with the same result (verified live
+		// 2026-11-13), so it is retried.
 		return ExecuteWithRetry(HttpMethod::PATCH, path.str(), {}, body, "application/json",
-		                        &DriveCallStats::files_update, {200});
+		                        &DriveCallStats::files_update, {200}, IsRetrySafe(WriteKind::MOVE, false));
 	}
 
 	const DriveCallStats &Stats() const override {
@@ -998,15 +1123,14 @@ public:
 private:
 	enum class HttpMethod { GET, POST, PATCH, DELETE_, PUT };
 
-	//! Is retrying this method after an AMBIGUOUS failure safe?
+	//! Is retrying this method after an AMBIGUOUS failure safe, absent the
+	//! caller saying more?
 	//!
 	//! RFC 9110 idempotency: GET and DELETE may be repeated with the same
 	//! end state. POST may not -- a repeated files.create makes a second
-	//! file. PATCH is idempotent in principle, but Drive's files.update is
-	//! used here both to move a file and to trash it, and a retry that races
-	//! another writer can reapply a stale intent, so it is excluded too.
-	//! Conservative on purpose: the cost of being wrong is a duplicate file
-	//! that R-4 then reports as an ambiguous path forever.
+	//! file. PATCH is decided per call, not per verb: every write call site
+	//! passes IsRetrySafe(WriteKind, ...) (gdrive_upload_plan.hpp) as
+	//! `retry_non_idempotent`, which is where that reasoning lives.
 	static bool IsIdempotent(HttpMethod method) {
 		return method == HttpMethod::GET || method == HttpMethod::DELETE_;
 	}
@@ -1050,6 +1174,9 @@ private:
 		}
 		if (counter == &DriveCallStats::files_delete) {
 			return "files.delete";
+		}
+		if (counter == &DriveCallStats::generate_ids) {
+			return "files.generateIds";
 		}
 		if (counter == &DriveCallStats::upload_chunks) {
 			return "upload.chunk";
@@ -1256,6 +1383,7 @@ private:
 		// gets a token that is valid now, not the one it was opened with.
 		std::string access_token = tokens_->Token();
 		bool refreshed = false;
+		bool had_ambiguous_attempt = false;
 		for (;;) {
 			++attempt;
 			stats_.*counter += 1;
@@ -1301,23 +1429,32 @@ private:
 				// the user sees "ambiguous" on a path they wrote exactly once
 				// -- with no way to tell which copy is theirs.
 				//
-				// A clear failure the caller can retry deliberately beats a
-				// silent duplicate. The real fix is Drive's resumable upload
-				// protocol, whose session URI makes a retry idempotent; that
-				// is tracked in docs/reviews/2026-07-26-codex-review-2-read-
-				// path.md, finding 1, and is a piece of work rather than a
-				// patch.
+				// So a write is retried only when its caller says repeating it
+				// is safe (`retry_non_idempotent`, from IsRetrySafe): a create
+				// carrying a reserved id, an overwrite by id, a move, a trash.
+				// Every write this extension sends is one of those now; an
+				// unreserved POST would still get the honest "may or may not"
+				// below.
 				if ((retry_non_idempotent || IsIdempotent(method)) && attempt < kMaxAttempts) {
 					stats_.retries += 1;
 					RecordGlobalRetry();
+					had_ambiguous_attempt = true;
 					SleepBackoff(attempt, 0);
 					continue;
 				}
 				DriveResponse response;
+				response.had_ambiguous_attempt = had_ambiguous_attempt;
 				response.ok = false;
 				response.http_status = 0;
 				response.error.kind = GDriveErrorKind::TRANSIENT;
-				if (retry_non_idempotent || IsIdempotent(method)) {
+				if (retry_non_idempotent) {
+					// A write its caller declared safe to repeat (IsRetrySafe).
+					response.error.message =
+					    "network transport failure: Drive could not be reached on any of " +
+					    std::to_string(kMaxAttempts) +
+					    " attempts. This write is safe to repeat, which is why it was retried, so it is safe "
+					    "to re-run.";
+				} else if (IsIdempotent(method)) {
 					response.error.message = "network transport failure (no response from Drive)";
 				} else {
 					// Say plainly that the outcome is unknown. "Failed" would
@@ -1343,6 +1480,7 @@ private:
 				response.http_status = raw.status;
 				response.body = std::move(raw.body);
 				response.location = std::move(raw.location);
+				response.had_ambiguous_attempt = had_ambiguous_attempt;
 				return response;
 			}
 
@@ -1377,18 +1515,23 @@ private:
 			// SECOND file -- and because duplicate names in one folder are a
 			// hard error here (R-4), that permanently poisons the path.
 			//
-			// It matters most for FOLDER creation, which (unlike file creation)
-			// does not reserve an id first and so has no way to recognise its
-			// own retry. Found in review; the asymmetry between the two retry
-			// branches was not deliberate.
+			// It mattered most for FOLDER creation, which until 2026-11-13 did
+			// not reserve an id and so could not recognise its own retry. Found
+			// in review; the asymmetry between the two retry branches was not
+			// deliberate.
 			if (retryable && attempt < kMaxAttempts && (retry_non_idempotent || IsIdempotent(method))) {
 				stats_.retries += 1;
 				RecordGlobalRetry();
+				// A 5xx may have been applied; a 429 was refused before anything.
+				if (err.kind == GDriveErrorKind::TRANSIENT) {
+					had_ambiguous_attempt = true;
+				}
 				SleepBackoff(attempt, err.retry_after_seconds);
 				continue;
 			}
 
 			DriveResponse response;
+			response.had_ambiguous_attempt = had_ambiguous_attempt;
 			response.ok = false;
 			response.http_status = raw.status;
 			response.body = raw.body;

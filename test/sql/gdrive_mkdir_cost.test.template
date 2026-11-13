@@ -59,6 +59,13 @@ COPY (SELECT 7 AS a) TO 'gdrive://scratch/${SCRATCH}/mk1/f.csv' (FORMAT csv, HEA
 statement ok
 CREATE TEMP TABLE mk_shallow AS SELECT value AS n FROM gdrive_stats() WHERE metric = 'files_list';
 
+# Every create carries a reserved id (retry safety), and ONE files.generateIds
+# reserves the missing folder and the file together.
+query I
+SELECT value FROM gdrive_stats() WHERE metric = 'generate_ids'
+----
+1
+
 statement ok
 SELECT * FROM gdrive_reset_stats();
 
@@ -77,6 +84,13 @@ SELECT value FROM gdrive_stats() WHERE metric = 'files_create'
 ----
 5
 
+# ...all five reserved in ONE generateIds?count=5: the reservation is per new
+# subtree, not per folder, so it too is independent of depth.
+query I
+SELECT value FROM gdrive_stats() WHERE metric = 'generate_ids'
+----
+1
+
 query I
 SELECT a FROM read_csv('gdrive://scratch/${SCRATCH}/mk2/a/b/c/f.csv')
 ----
@@ -92,6 +106,12 @@ COPY (SELECT 8 AS a) TO 'gdrive://scratch/${SCRATCH}/mk2/a/b/c/g.csv' (FORMAT cs
 
 query I
 SELECT value FROM gdrive_stats() WHERE metric = 'files_create'
+----
+1
+
+# A file created in an EXISTING folder reserves its own id at close.
+query I
+SELECT value FROM gdrive_stats() WHERE metric = 'generate_ids'
 ----
 1
 

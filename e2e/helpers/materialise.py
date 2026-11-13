@@ -84,6 +84,13 @@ def build_substitutions(drive: Drive) -> dict:
     drive.upload(fx.HEARTBEAT_NAME, b"alive\n", scratch_id, "text/plain")
     print(f"  scratch: /{fx.SCRATCH_ROOT}/{scratch_name} ({scratch_id})")
 
+    # A LOCKED file for gdrive_locks.test: the extension reads locks but
+    # cannot set one, so the lock is made here, as the delegated user, in
+    # this run's scratch folder. Unlocked again only by the scratch teardown,
+    # which deletes the folder (a lock does not stop a delete).
+    locked_id = drive.upload(fx.LOCKED_NAME, fx.LOCKED_CONTENT, scratch_id, "text/csv")
+    drive.set_lock(locked_id, True, reason=fx.LOCK_REASON, copy_requires_writer_permission=True)
+
     return {
         "DRIVE_ID": drive.drive_id,
         "FIXTURES_ID": found[0]["id"],
@@ -93,6 +100,7 @@ def build_substitutions(drive: Drive) -> dict:
         "USER_REFRESH_TOKEN": user_refresh_token,
         "SCRATCH": scratch_name,
         "SCRATCH_ID": scratch_id,
+        "LOCKED_ID": locked_id,
     }
 
 
