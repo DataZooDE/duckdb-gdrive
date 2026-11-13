@@ -3,6 +3,7 @@
 #include "gdrive_errors.hpp"
 #include "gdrive_upload_plan.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -57,6 +58,9 @@ struct DriveCallStats {
 	int64_t files_create = 0;
 	int64_t files_update = 0;
 	int64_t files_delete = 0;
+	//! files.generateIds: id reservations that make creates retry-safe. Not a
+	//! files_get, though it is a GET.
+	int64_t generate_ids = 0;
 	int64_t cache_hits = 0;
 	int64_t cache_misses = 0;
 	int64_t retries = 0;
@@ -157,10 +161,19 @@ public:
 	//! back 409 "A file already exists with the provided ID", which proves
 	//! the first attempt landed. Verified against the live API.
 	//!
-	//! Costs one round trip per create. Worth it: the alternative was
-	//! refusing to retry writes at all.
-	virtual DriveResponse GenerateFileId() = 0;
+	//! Costs one round trip per create -- or per CHAIN: a write into a new
+	//! subtree reserves every missing folder and the file in one call.
+	//! Counted as generate_ids. A create that cannot reserve an id is
+	//! refused (fail closed), never sent unreserved.
+	virtual DriveResponse GenerateFileIds(int count) = 0;
 
+	//! Creates when `file_id` is empty, overwrites its content otherwise. A
+	//! create must carry `reserved_id`; with one, it is retried freely and its
+	//! final reply is interpreted by InterpretCreateReply: a 409 fileIdInUse,
+	//! or no usable answer at all, is resolved by looking the id up, so the
+	//! caller sees either the created object or an error that means nothing
+	//! was created (or, when even that lookup fails, that re-running is safe).
+	//! An overwrite is retried too: the same bytes on the same id.
 	virtual DriveResponse Upload(const std::string &file_id, const std::string &parent_id,
 	                             const std::string &name, const std::string &content_type,
 	                             const std::string &data,
@@ -179,8 +192,11 @@ public:
 	//! -- the session URI is the credential -- so once the session is open, a
 	//! long upload cannot fail on token expiry. (Initiation itself uses the
 	//! token captured at OpenFile.)
+	//! A create's session carries `reserved_id`, so its final chunk publishes
+	//! under that id and an ambiguous final chunk can be looked up by it.
 	virtual DriveResponse StartResumableUpload(const std::string &file_id, const std::string &parent_id,
-	                                           const std::string &name, const std::string &content_type) = 0;
+	                                           const std::string &name, const std::string &content_type,
+	                                           const std::string &reserved_id = "") = 0;
 	virtual DriveResponse UploadChunk(const std::string &session_uri, const ChunkedUploadBuffer &buf,
 	                                  bool final) = 0;
 	virtual void CancelUpload(const std::string &session_uri) = 0;
@@ -188,7 +204,9 @@ public:
 	//! Trash (default) or permanently delete -- see decision D-6.
 	virtual DriveResponse Delete(const std::string &file_id, bool permanent) = 0;
 
-	//! files.update changing name and/or parents.
+	//! files.update changing name and/or parents. Retried after an ambiguous
+	//! failure (it sets absolute state); see MutateMoveFile for the
+	//! reconcile-by-id when every attempt went unanswered.
 	virtual DriveResponse Move(const std::string &file_id, const std::string &new_parent_id,
 	                           const std::string &new_name, const std::string &old_parent_id) = 0;
 
@@ -206,9 +224,13 @@ std::string QueryEncode(const std::string &value);
 //! kept here because it is meaningless without the transport.
 bool ParseFileMeta(const std::string &json_object, DriveFileMeta &out);
 
-//! First id from a files.generateIds response. See GDriveClient::GenerateFileId
-//! for why a create reserves its id before making the file.
-bool ParseGeneratedFileId(const std::string &json, std::string &out);
+//! Every id from a files.generateIds response, in order; false unless there
+//! are exactly `count` non-empty ones. See GDriveClient::GenerateFileIds for
+//! why a create reserves its id before making the file.
+bool ParseGeneratedFileIds(const std::string &json, std::size_t count, std::vector<std::string> &out);
+//! `name` and `parents` of a files.get?fields=id,name,parents reply -- what a
+//! move is reconciled against (MoveLanded).
+bool ParseNameAndParents(const std::string &json, std::string &name, std::vector<std::string> &parents);
 bool ParseFileList(const std::string &json_body, std::vector<DriveFileMeta> &out,
                    std::string &next_page_token);
 

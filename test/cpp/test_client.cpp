@@ -199,13 +199,14 @@ TEST_CASE("DriveCallStats::Total sums the per-kind call counters only", "[client
 	stats.files_create = 5;
 	stats.files_update = 6;
 	stats.files_delete = 7;
+	stats.generate_ids = 8;
 	// Neither of these should count toward Total(): cache hits/misses are not
 	// Drive API calls, and a retry is already reflected once in whichever kind
 	// counter it belongs to.
 	stats.cache_hits = 100;
 	stats.cache_misses = 200;
 	stats.retries = 300;
-	REQUIRE(stats.Total() == 1 + 2 + 3 + 4 + 5 + 6 + 7);
+	REQUIRE(stats.Total() == 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8);
 }
 
 // ---------------------------------------------------------------------------
@@ -215,23 +216,52 @@ TEST_CASE("DriveCallStats::Total sums the per-kind call counters only", "[client
 // succeeds once and returns 409 "A file already exists with the provided ID"
 // on a repeat, with exactly ONE file present. That 409 is what lets an
 // ambiguous transport failure be retried without risking the duplicate that
-// R-4 turns into a permanently unaddressable path.
+// R-4 turns into a permanently unaddressable path. 2026-11-13: the same holds
+// for folders, so a write into a new subtree reserves the whole chain (and
+// the file) in one generateIds?count=N.
 // ---------------------------------------------------------------------------
-TEST_CASE("ParseGeneratedFileId takes the first id", "[client]") {
-	std::string id;
-	REQUIRE(duckdb::gdrive::ParseGeneratedFileId(R"({"ids":["1AbC","2DeF"]})", id));
-	REQUIRE(id == "1AbC");
+TEST_CASE("ParseGeneratedFileIds takes exactly the ids asked for", "[client]") {
+	using duckdb::gdrive::ParseGeneratedFileIds;
+	std::vector<std::string> ids;
+	// A real generateIds?count=3 reply, captured 2026-11-13.
+	const char *reply = R"({
+ "kind": "drive#generatedIds",
+ "space": "drive",
+ "ids": ["1WiIcNJfCo48kJM_zmqsVom6rtjoIK8hQ", "1NVUSS75Mh4OvAVXgbNNEMwKvhTsepTrj", "1Np3XIfyZ-OVpH_F4CyUGDLdr8uZavEhG"]
+})";
+	REQUIRE(ParseGeneratedFileIds(reply, 3, ids));
+	REQUIRE(ids.size() == 3);
+	REQUIRE(ids[0] == "1WiIcNJfCo48kJM_zmqsVom6rtjoIK8hQ");
+	REQUIRE(ids[2] == "1Np3XIfyZ-OVpH_F4CyUGDLdr8uZavEhG");
+	// Fewer (or more) than asked would leave a create in the chain without an
+	// id. Refused, not truncated.
+	REQUIRE_FALSE(ParseGeneratedFileIds(reply, 4, ids));
+	REQUIRE(ids.empty());
+	REQUIRE_FALSE(ParseGeneratedFileIds(reply, 2, ids));
 }
 
-TEST_CASE("ParseGeneratedFileId rejects responses that carry no usable id", "[client]") {
-	std::string id;
-	// An empty array is a well-formed response with nothing in it. Returning
-	// true here would hand the caller an empty id, which Drive would treat as
-	// "no reservation" -- silently losing the idempotency this exists for.
-	REQUIRE_FALSE(duckdb::gdrive::ParseGeneratedFileId(R"({"ids":[]})", id));
-	REQUIRE_FALSE(duckdb::gdrive::ParseGeneratedFileId(R"({"ids":[""]})", id));
-	REQUIRE_FALSE(duckdb::gdrive::ParseGeneratedFileId(R"({})", id));
-	REQUIRE_FALSE(duckdb::gdrive::ParseGeneratedFileId("not json at all", id));
+TEST_CASE("ParseGeneratedFileIds rejects responses that carry no usable id", "[client]") {
+	using duckdb::gdrive::ParseGeneratedFileIds;
+	std::vector<std::string> ids;
+	// An empty id would be sent as "no reservation" -- silently losing the
+	// idempotency this exists for.
+	REQUIRE_FALSE(ParseGeneratedFileIds(R"({"ids":[]})", 1, ids));
+	REQUIRE_FALSE(ParseGeneratedFileIds(R"({"ids":[""]})", 1, ids));
+	REQUIRE_FALSE(ParseGeneratedFileIds(R"({"ids":["a",""]})", 2, ids));
+	REQUIRE_FALSE(ParseGeneratedFileIds(R"({})", 1, ids));
+	REQUIRE_FALSE(ParseGeneratedFileIds("not json at all", 1, ids));
 	// An error body must never look like a reservation.
-	REQUIRE_FALSE(duckdb::gdrive::ParseGeneratedFileId(R"({"error":{"code":403}})", id));
+	REQUIRE_FALSE(ParseGeneratedFileIds(R"({"error":{"code":403}})", 1, ids));
+}
+
+TEST_CASE("ParseNameAndParents reads a moved file's state back", "[client]") {
+	std::string name;
+	std::vector<std::string> parents;
+	REQUIRE(duckdb::gdrive::ParseNameAndParents(
+	    R"({"id": "1vV0", "name": "y.csv", "parents": ["113J5RrPURM_GPZgYvZt2Mk0-uFUg0rkl"]})", name, parents));
+	REQUIRE(name == "y.csv");
+	REQUIRE(parents == std::vector<std::string> {"113J5RrPURM_GPZgYvZt2Mk0-uFUg0rkl"});
+	REQUIRE(duckdb::gdrive::ParseNameAndParents(R"({"id": "1", "name": "n"})", name, parents));
+	REQUIRE(parents.empty());
+	REQUIRE_FALSE(duckdb::gdrive::ParseNameAndParents(R"({"error":{"code":404}})", name, parents));
 }

@@ -10,8 +10,11 @@
 // publishes the file. Until then nothing is visible in the folder, and an
 // overwritten file keeps its old content (verified live 2026-10-14), so a
 // failure anywhere mid-stream leaves nothing behind once AbortUpload cancels
-// the session -- except a final chunk whose every answer was lost, which
-// fails with the "may or may not have been applied" error instead.
+// the session. A final chunk whose every answer was lost is looked up by the
+// create's reserved id: published (adopt it) or not (nothing was written).
+//
+// Every create carries a reserved id (files.generateIds), so every write here
+// is safe to retry -- see IsRetrySafe in gdrive_upload_plan.hpp.
 //
 // files.create when there was no existing file id, files.update (overwrite)
 // when OpenFile found one (S-3.9), never a second file sharing the name (which
@@ -52,16 +55,47 @@ std::string ParentPathOf(const std::string &path) {
 	ThrowGDriveError(error, handle.path);
 }
 
+//! The handle's reserved id for a CREATE, reserving one now if OpenFile did
+//! not. Empty for an overwrite.
+const std::string &CreateIdFor(GDriveClient &client, GDriveFileHandleImpl &handle) {
+	if (handle.meta.id.empty() && handle.reserved_id.empty()) {
+		handle.reserved_id = ReserveFileIds(client, 1, handle.path)[0];
+	}
+	return handle.reserved_id;
+}
+
 } // namespace
+
+std::vector<std::string> ReserveFileIds(GDriveClient &client, int count, const std::string &path) {
+	// generateIds is a GET and was already retried with backoff.
+	auto resp = client.GenerateFileIds(count);
+	std::vector<std::string> ids;
+	if (resp.ok && ParseGeneratedFileIds(resp.body, static_cast<std::size_t>(count), ids)) {
+		return ids;
+	}
+	if (!resp.ok && !resp.error.IsRetryable() && resp.error.kind != GDriveErrorKind::UNKNOWN) {
+		// Auth, scope, permission: the create would fail the same way, and the
+		// user needs that cause (and its exception class), not ours.
+		ThrowGDriveError(resp.error, path);
+	}
+	const std::string why = resp.ok ? std::string("Drive's files.generateIds reply carried no usable ids")
+	                                : FormatUserMessage(resp.error, "files.generateIds");
+	throw IOException("gdrive: cannot create '%s': could not reserve a file id (%s). Every create carries a "
+	                  "reserved id so that a retry cannot make a second file, and it is refused without one. "
+	                  "Nothing was written; it is safe to re-run.",
+	                  path, why);
+}
 
 void SendUploadChunk(GDriveFileHandleImpl &handle) {
 	auto client = CreateGDriveClient(handle.auth_context);
 	if (handle.upload_session.empty()) {
 		// Initiation creates no file (Drive publishes on the final chunk), so
-		// it needs no reserved id to be retry-safe -- unlike a multipart
-		// create, a repeated initiation only orphans a session.
+		// a repeated initiation only orphans a session. A create's session
+		// still carries a reserved id: that is what lets an ambiguous FINAL
+		// chunk be resolved by looking the id up.
+		const std::string reserved = CreateIdFor(*client, handle);
 		auto start = client->StartResumableUpload(handle.meta.id, handle.write_parent_id, handle.write_name,
-		                                          "application/octet-stream");
+		                                          "application/octet-stream", reserved);
 		if (!start.ok) {
 			ThrowUploadError(start.error, handle);
 		}
@@ -102,6 +136,22 @@ void UploadHandleContents(GDriveClient &client, GDriveFileHandleImpl &handle) {
 		// its body the file's metadata. A lost reply is recovered inside
 		// UploadChunk by asking the session, which then answers 200 + file.
 		resp = client.UploadChunk(handle.upload_session, buf, /*final=*/true);
+		if (!resp.ok && !handle.reserved_id.empty() &&
+		    InterpretCreateReply(resp.http_status != 0, resp.http_status, resp.error.reason, true) ==
+		        CreateOutcome::CHECK_RESERVED) {
+			// Every answer to the final chunk was lost. The session publishes
+			// under the reserved id, so the id says what happened.
+			auto meta_resp = client.GetMetadata(handle.reserved_id);
+			DriveFileMeta published;
+			if (meta_resp.ok && ParseFileMeta(meta_resp.body, published) && !published.trashed &&
+			    published.name == handle.write_name) {
+				resp = meta_resp;
+			} else if (!meta_resp.ok && meta_resp.error.kind == GDriveErrorKind::NOT_FOUND) {
+				resp.error.message = "the final chunk of a resumable upload got no usable answer from Drive on "
+				                     "any attempt, and nothing is published under the file's reserved id. "
+				                     "Nothing was written; it is safe to re-run.";
+			}
+		}
 		if (!resp.ok) {
 			ThrowUploadError(resp.error, handle);
 		}
@@ -109,21 +159,16 @@ void UploadHandleContents(GDriveClient &client, GDriveFileHandleImpl &handle) {
 	} else {
 		// Never outgrew one chunk: one multipart request, as before.
 		//
-		// A CREATE (no existing id) reserves an id first, which is what makes
+		// A CREATE (no existing id) carries a reserved id, which is what makes
 		// it safe to retry after an ambiguous transport failure. Without it, a
 		// retry can produce a SECOND file with the same name in the same
 		// folder -- and duplicate names are a hard error by design (R-4), so
 		// the path becomes unaddressable and the user sees "ambiguous" for a
-		// file they wrote once. Costs one extra round trip per created file.
-		// If the reservation itself fails we simply proceed without one: a
-		// create that cannot be retried is strictly better than no create.
-		std::string reserved_id;
-		if (handle.meta.id.empty()) {
-			auto id_resp = client.GenerateFileId();
-			if (id_resp.ok) {
-				ParseGeneratedFileId(id_resp.body, reserved_id);
-			}
-		}
+		// file they wrote once. Costs one extra round trip per created file
+		// (none when OpenFile already reserved it with the parent folders).
+		// If the reservation fails the create is REFUSED (ReserveFileIds): an
+		// unreserved create cannot be retried, and used to be sent anyway.
+		const std::string reserved_id = CreateIdFor(client, handle);
 		resp = client.Upload(handle.meta.id, handle.write_parent_id, handle.write_name, "application/octet-stream",
 		                     buf.Pending(), reserved_id);
 		if (!resp.ok) {

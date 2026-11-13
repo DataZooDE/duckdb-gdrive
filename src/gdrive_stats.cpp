@@ -56,6 +56,7 @@ unique_ptr<FunctionData> GDriveStatsBind(ClientContext &, TableFunctionBindInput
 	    {"files_create", stats.files_create},
 	    {"files_update", stats.files_update},
 	    {"files_delete", stats.files_delete},
+	    {"generate_ids", stats.generate_ids},
 	    {"cache_hits", stats.cache_hits},
 	    {"cache_misses", stats.cache_misses},
 	    {"retries", stats.retries},
@@ -173,7 +174,9 @@ void RegisterGDriveStats(ExtensionLoader &loader) {
 	FunctionDescription desc;
 	desc.description =
 	    "Drive API call counters, one row per metric: files_get, files_list, files_media, files_export, "
-	    "files_create, files_update, files_delete (calls by kind), cache_hits/cache_misses (the path-resolution "
+	    "files_create, files_update, files_delete (calls by kind), generate_ids (files.generateIds id "
+	    "reservations that make creates retry-safe: one per create, or one per new subtree), "
+	    "cache_hits/cache_misses (the path-resolution "
 	    "cache that mitigates R-1 amplification), retries (retried HTTP attempts across all kinds), auth_refresh "
 	    "(401s that triggered a token refresh attempt, at most one per call), token_request (token mint attempts, "
 	    "successful or not), upload_chunks "

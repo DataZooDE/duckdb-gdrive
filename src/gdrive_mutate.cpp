@@ -187,6 +187,27 @@ void MutateMoveFile(GDriveClient &client, GDrivePathCache &cache, const GDriveAu
 	}
 
 	auto resp = client.Move(source_meta.id, new_parent_id, new_name, old_parent_id);
+	if (!resp.ok && (resp.http_status == 0 || resp.http_status >= 500)) {
+		// The move is retried (it sets absolute state), so reaching here means
+		// no attempt got a usable answer -- and any one of them may have
+		// landed. Reconcile by id: the file itself says where it is.
+		auto state = client.ApiGet("/drive/v3/files/" + QueryEncode(source_meta.id) + "?fields=id,name,parents&" +
+		                               AllDrivesQuery(),
+		                           &DriveCallStats::files_get);
+		std::string name_now;
+		std::vector<std::string> parents_now;
+		if (state.ok && ParseNameAndParents(state.body, name_now, parents_now) &&
+		    MoveLanded(name_now, parents_now, new_name, new_parent_id, old_parent_id)) {
+			resp.ok = true;
+		} else if (state.ok) {
+			resp.error.message = "Drive could not be reached on any attempt, and the file has not moved. Nothing "
+			                     "was changed; it is safe to re-run.";
+		} else {
+			resp.error.message = "Drive could not be reached on any attempt, so whether the move landed is not "
+			                     "known. It is safe to re-run: a move sets the file's name and folder by id, so "
+			                     "repeating it cannot duplicate anything.";
+		}
+	}
 	if (!resp.ok) {
 		ThrowGDriveError(resp.error, source_uri.ToString());
 	}
@@ -261,7 +282,9 @@ void MutateCreateDirectory(GDriveClient &client, GDrivePathCache &cache, const G
 	// frozen GDriveClient interface exposes only Upload() for files.create --
 	// there is no dedicated "create folder" call -- so an empty-content
 	// upload with the folder mimeType is the closest available primitive.
-	auto resp = client.Upload("", parent_id, name, "application/vnd.google-apps.folder", "");
+	// With a reserved id, like every create, so a retry cannot make two.
+	const auto reserved = ReserveFileIds(client, 1, uri.ToString());
+	auto resp = client.Upload("", parent_id, name, "application/vnd.google-apps.folder", "", reserved[0]);
 	if (!resp.ok) {
 		ThrowGDriveError(resp.error, uri.ToString());
 	}
