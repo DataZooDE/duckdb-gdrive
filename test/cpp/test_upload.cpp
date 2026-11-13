@@ -1,6 +1,7 @@
 // Catch2: the streaming-write state machine (gdrive_upload_plan.*). Pure: no
 // duckdb.hpp, no I/O. The resumable-session PUT loop that drives it is proven
 // live (test/sql/gdrive_streaming_write.test.template, e2e).
+#include "gdrive_errors.hpp"
 #include "gdrive_upload_plan.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -333,4 +334,107 @@ TEST_CASE("drive resumable session URIs are only followed to the Drive upload ho
 	REQUIRE_FALSE(DriveSessionPath("https://evil.example.com/upload?upload_id=x", path));
 	REQUIRE_FALSE(DriveSessionPath("https://www.googleapis.com.evil.com/upload", path));
 	REQUIRE_FALSE(DriveSessionPath("", path));
+}
+
+// ---------------------------------------------------------------------------
+// Retry safety of single-request writes. The Drive side of these rules -- a
+// repeated reserved-id create answers 409 for files AND folders, a repeated
+// move or trash answers 200 with the same state -- is proven live in
+// e2e/tests/test_idempotent_create.py; these pin the decisions made on it.
+// ---------------------------------------------------------------------------
+
+// Captured verbatim from the live API 2026-11-13 (test/cpp/testdata/
+// drive_errors.json "file_id_in_use"): the answer to a repeated files.create
+// carrying a reserved id -- the same body for a folder, a multipart file and a
+// resumable session's final chunk.
+static const char *kFileIdInUse = R"({
+  "error": {
+    "code": 409,
+    "message": "A file already exists with the provided ID.",
+    "errors": [
+      {
+        "message": "A file already exists with the provided ID.",
+        "domain": "global",
+        "reason": "fileIdInUse"
+      }
+    ]
+  }
+}
+)";
+
+// "file_id_not_usable": an id generateIds never issued.
+static const char *kFileIdNotUsable = R"({
+  "error": {
+    "code": 400,
+    "message": "The provided file ID is not usable.",
+    "errors": [
+      {
+        "message": "The provided file ID is not usable.",
+        "domain": "global",
+        "reason": "fileIdNotUsable",
+        "location": "file.id",
+        "locationType": "other"
+      }
+    ]
+  }
+}
+)";
+
+TEST_CASE("a create is retry-safe only with a reserved id; overwrite, move and trash always", "[upload][retry]") {
+	REQUIRE(IsRetrySafe(WriteKind::CREATE, true));
+	REQUIRE_FALSE(IsRetrySafe(WriteKind::CREATE, false));
+	for (bool reserved : {true, false}) {
+		REQUIRE(IsRetrySafe(WriteKind::OVERWRITE, reserved));
+		REQUIRE(IsRetrySafe(WriteKind::MOVE, reserved));
+		REQUIRE(IsRetrySafe(WriteKind::TRASH, reserved));
+	}
+}
+
+TEST_CASE("the captured 409 fileIdInUse body adopts the reserved id", "[upload][retry]") {
+	auto err = ClassifyDriveError(409, kFileIdInUse);
+	REQUIRE(err.reason == "fileIdInUse");
+	REQUIRE(InterpretCreateReply(true, 409, err.reason, true) == CreateOutcome::ADOPT_RESERVED);
+	// Without a reservation of ours, the 409 proves nothing about us.
+	REQUIRE(InterpretCreateReply(true, 409, err.reason, false) == CreateOutcome::FAIL_CLEAN);
+}
+
+TEST_CASE("only fileIdInUse makes a 409 ours", "[upload][retry]") {
+	REQUIRE(InterpretCreateReply(true, 409, "", true) == CreateOutcome::FAIL_CLEAN);
+	REQUIRE(InterpretCreateReply(true, 409, "conflict", true) == CreateOutcome::FAIL_CLEAN);
+	auto err = ClassifyDriveError(400, kFileIdNotUsable);
+	REQUIRE(err.reason == "fileIdNotUsable");
+	REQUIRE(InterpretCreateReply(true, 400, err.reason, true) == CreateOutcome::FAIL_CLEAN);
+}
+
+TEST_CASE("a create's final reply: done, refused, or looked up by its reserved id", "[upload][retry]") {
+	REQUIRE(InterpretCreateReply(true, 200, "", true) == CreateOutcome::DONE);
+	REQUIRE(InterpretCreateReply(true, 201, "", false) == CreateOutcome::DONE);
+	// No usable answer: with a reserved id the id says what happened.
+	REQUIRE(InterpretCreateReply(false, 0, "", true) == CreateOutcome::CHECK_RESERVED);
+	REQUIRE(InterpretCreateReply(true, 503, "backendError", true) == CreateOutcome::CHECK_RESERVED);
+	REQUIRE(InterpretCreateReply(false, 0, "", false) == CreateOutcome::FAIL_UNKNOWN);
+	REQUIRE(InterpretCreateReply(true, 500, "", false) == CreateOutcome::FAIL_UNKNOWN);
+	// A 4xx is decided before Drive applies anything -- 429 included.
+	REQUIRE(InterpretCreateReply(true, 429, "rateLimitExceeded", true) == CreateOutcome::FAIL_CLEAN);
+	REQUIRE(InterpretCreateReply(true, 403, "insufficientFilePermissions", true) == CreateOutcome::FAIL_CLEAN);
+	REQUIRE(InterpretCreateReply(true, 404, "notFound", true) == CreateOutcome::FAIL_CLEAN);
+}
+
+TEST_CASE("a move whose reply was lost has landed only if the file says so", "[upload][retry]") {
+	using V = std::vector<std::string>;
+	// Moved into b and renamed.
+	REQUIRE(MoveLanded("y.csv", V {"b"}, "y.csv", "b", "a"));
+	// Still where it was: not landed.
+	REQUIRE_FALSE(MoveLanded("x.csv", V {"a"}, "y.csv", "b", "a"));
+	// Right folder, wrong name: not landed (a single PATCH is atomic, so this
+	// is someone else's change, not half of ours).
+	REQUIRE_FALSE(MoveLanded("x.csv", V {"b"}, "y.csv", "b", "a"));
+	// Added to b but still in a: removeParents did not happen, not landed.
+	REQUIRE_FALSE(MoveLanded("y.csv", V {"a", "b"}, "y.csv", "b", "a"));
+	// A rename in place: old == new parent.
+	REQUIRE(MoveLanded("z.csv", V {"b"}, "z.csv", "b", "b"));
+	// An id: source has no known old parent.
+	REQUIRE(MoveLanded("y.csv", V {"a", "b"}, "y.csv", "b", ""));
+	REQUIRE_FALSE(MoveLanded("y.csv", V {}, "y.csv", "b", ""));
+	REQUIRE_FALSE(MoveLanded("y.csv", V {"b"}, "y.csv", "", ""));
 }

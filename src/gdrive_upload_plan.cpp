@@ -9,6 +9,7 @@
 #include <climits>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace duckdb {
 namespace gdrive {
@@ -184,6 +185,51 @@ UploadStep NextUploadStep(const ChunkedUploadBuffer &buf, bool final, ChunkUploa
 		return fail("network transport failure uploading a chunk (no response from Drive)");
 	}
 	return fail("resumable upload chunk rejected with HTTP " + std::to_string(reply.status));
+}
+
+bool IsRetrySafe(WriteKind kind, bool has_reserved_id) {
+	switch (kind) {
+	case WriteKind::CREATE:
+		return has_reserved_id;
+	case WriteKind::OVERWRITE:
+	case WriteKind::MOVE:
+	case WriteKind::TRASH:
+		return true;
+	}
+	return false;
+}
+
+CreateOutcome InterpretCreateReply(bool transport_ok, int status, const std::string &reason,
+                                   bool has_reserved_id) {
+	if (transport_ok && status >= 200 && status < 300) {
+		return CreateOutcome::DONE;
+	}
+	// Only THIS reason proves the reserved id is taken. Any other 409 is a
+	// refusal like any other 4xx.
+	if (transport_ok && status == 409 && reason == "fileIdInUse" && has_reserved_id) {
+		return CreateOutcome::ADOPT_RESERVED;
+	}
+	if (!transport_ok || status >= 500) {
+		return has_reserved_id ? CreateOutcome::CHECK_RESERVED : CreateOutcome::FAIL_UNKNOWN;
+	}
+	// A 4xx -- 429 included -- is decided before Drive applies anything.
+	return CreateOutcome::FAIL_CLEAN;
+}
+
+bool MoveLanded(const std::string &name, const std::vector<std::string> &parents, const std::string &want_name,
+                const std::string &new_parent_id, const std::string &old_parent_id) {
+	auto has = [&](const std::string &id) {
+		for (const auto &p : parents) {
+			if (p == id) {
+				return true;
+			}
+		}
+		return false;
+	};
+	if (name != want_name || new_parent_id.empty() || !has(new_parent_id)) {
+		return false;
+	}
+	return old_parent_id.empty() || old_parent_id == new_parent_id || !has(old_parent_id);
 }
 
 } // namespace gdrive
