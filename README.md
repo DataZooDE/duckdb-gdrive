@@ -294,7 +294,7 @@ sharing and its other tabs, and only the cells of the range change.
 | `APPEND` | add the rows below the data already at the anchor (`values.append`); the header is written only when the tab is new or `HEADER true` is given |
 | `CREATE true\|false` | when the `gdrive://` path names nothing, create a new native Sheet there (default `true`); `CREATE false` makes a missing Sheet an error instead |
 
-**A path that names nothing gets a new Sheet** (not in v2026.11.13 or earlier). Missing
+**A path that names nothing gets a new Sheet** (new in v2026.11.14; not in v2026.11.13 or earlier). Missing
 folders are created on the way, as for a file write; the Sheet's one tab is
 renamed to the `RANGE`'s tab and the rows are written in the same request.
 `OVERWRITE` and `APPEND` into a new Sheet simply write the block at the anchor,

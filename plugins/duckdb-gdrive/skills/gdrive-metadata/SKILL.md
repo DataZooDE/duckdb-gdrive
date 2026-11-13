@@ -11,7 +11,7 @@ description: >
   gdrive_permissions (who can reach what: direct, inherited, anyone-with-link,
   domain). Use when listing or inventorying Drive, finding a file, reading an
   old version, syncing a folder incrementally, or auditing sharing.
-version: 2026.11.13
+version: 2026.11.14
 user-invocable: false
 ---
 
