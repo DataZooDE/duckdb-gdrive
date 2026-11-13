@@ -1,7 +1,7 @@
 {
   "name": "duckdb-gdrive",
   "description": "Skills for the gdrive DuckDB extension: Google Drive in SQL -- secrets and sign-in (gcloud ADC, service accounts, workload identity, OAuth), the gdrive:// filesystem (paths, id:, globs, browser addresses, COPY, DuckLake, native Sheets and Docs), Sheets by tab and range (read_sheet_range, COPY ... FORMAT sheet_range), and Drive's metadata as tables (files with owners and links, search, versions, change feeds, permissions).",
-  "version": "2026.11.08",
+  "version": "2026.11.13",
   "author": {
     "name": "DataZoo GmbH",
     "url": "https://github.com/DataZooDE"

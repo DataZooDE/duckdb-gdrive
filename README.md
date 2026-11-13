@@ -252,6 +252,8 @@ Materialise it into a table if you are going to query it repeatedly.
 
 ### A tab or a range of a Sheet: `read_sheet_range` and `FORMAT sheet_range`
 
+> New in v2026.11.13: not in the community build of v2026.11.08 or earlier.
+
 The export above sees the first tab only, as text. To read any tab, or a range
 of one, and to **write into a Sheet** -- a forecast into a `Forecast` tab,
 results where people already look -- go through the Sheets API instead:
@@ -423,6 +425,8 @@ makes, with no call per file. Native Docs and Sheets have no `size`, `md5` or
 
 Then the file's **lock** -- Drive's content restriction, set with *Lock* in
 the Drive UI (*File information → Lock*) or `contentRestrictions` in the API:
+
+> New in v2026.11.13 (not in v2026.11.08 or earlier).
 
 | Column | Type | |
 |---|---|---|

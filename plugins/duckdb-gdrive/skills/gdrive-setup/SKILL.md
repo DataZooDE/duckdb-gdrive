@@ -13,7 +13,7 @@ description: >
   Drive; settings and gdrive_stats(). Use when connecting DuckDB to Google
   Drive, writing a CREATE SECRET, or fixing a 401/403 or "no secret
   configured" error.
-version: 2026.11.08
+version: 2026.11.13
 user-invocable: false
 ---
 
