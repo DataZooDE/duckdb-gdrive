@@ -359,12 +359,13 @@ Deliberately restricted:
   and an overwritten file keeps its old content until then. A write that fails
   (a chunk, or the close), and a handle destroyed without a successful close
   (a `COPY` whose query errored mid-stream), cancel the session (`DELETE` on
-  the URI with a 5 s timeout, Drive answers `499`) and publish nothing --
-  **unless the final chunk's outcome is ambiguous**: if its reply and every
-  status query after it are lost, Drive may have published the file. That
-  case fails with the same "may or may not have been applied, check the
-  destination" error as the single-request path. A failed close throws -- it
-  is never reported as success;
+  the URI with a 5 s timeout, Drive answers `499`) and publish nothing. If the
+  final chunk's reply and every status query after it are lost, a **create**
+  is looked up by the id its session carries (reserved with
+  `files.generateIds`, verified live 2026-11-13 to be the id the final chunk
+  publishes under): found, it is adopted; `404`, nothing was written. An
+  overwrite in that state fails saying re-running is safe -- it replaces by
+  id. A failed close throws -- it is never reported as success;
 - observable: `gdrive_stats()` `upload_chunks`, `upload_aborts`, and the
   high-water mark `upload_buffer_peak_bytes`.
 

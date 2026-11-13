@@ -463,7 +463,32 @@ transport-failure path has a careful idempotency gate — a retried POST
 `files.create` manufactures an R-4 duplicate — but the HTTP-error path (5xx,
 429) had none until 2026-08-01. A 5xx is exactly as ambiguous as a dropped
 connection. It bit hardest on FOLDER creation, which unlike file creation
-reserves no id via `files.generateIds` and so cannot recognise its own retry.
+reserved no id via `files.generateIds` and so could not recognise its own retry.
+
+*2026-11-13: every write is retry-safe now, folders included.* Spiked live
+first: Drive DOES accept a supplied id on a folder `files.create` (mimeType
+folder, no media part), and the repeat answers `409` with `errors[0].reason
+"fileIdInUse"` -- byte-identical to the file case and to a resumable session's
+final chunk, whose session also accepts `id` in its initiation metadata and
+publishes under it (nothing exists under the id before the final chunk: 404).
+The same `409` comes back for the reserved id under a DIFFERENT name, so the
+409 policy is STRICT (user decision): it is adopted as "our earlier attempt
+landed" ONLY when an earlier attempt of the same call went unanswered
+(`DriveResponse::had_ambiguous_attempt`, set by `ExecuteWithRetry` on a
+re-sent transport failure or 5xx -- not a 429) AND `files.get` on the id shows
+our name and kind. A 409 `fileIdInUse` with no unanswered attempt is
+`CreateOutcome::ID_IN_USE`: a loud error naming the id, because a foreign use
+of a reserved id is a bug or a concurrent writer. A
+never-issued id is `400 fileIdNotUsable`. A repeated move PATCH (name +
+addParents + removeParents) and a repeated `{trashed:true}` both answer 200
+with the same state, and a repeated content PATCH just adds a revision. So the
+rule is `IsRetrySafe(WriteKind, has_reserved_id)` per call site, not
+`IsIdempotent(verb)`; a write into a new subtree reserves the chain AND the
+file with ONE `generateIds?count=N` (counted as `generate_ids`, no longer as
+`files_get`); and a create that cannot reserve an id is refused (fail closed)
+-- it used to be sent unreserved. No lost-reply hook exists to prove the
+recovery end to end (D-1); `e2e/tests/test_idempotent_create.py` pins Drive's
+side and Catch2 pins `InterpretCreateReply` on the captured 409 body.
 
 **Read-time stale-id recovery is not "strictly better" than validating at
 open**, whatever the old comment said. It covers more (a file deleted *after*

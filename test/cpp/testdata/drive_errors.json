@@ -34,5 +34,13 @@
   "insufficient_scope": {
     "status": 403,
     "body": "{\n  \"error\": {\n    \"code\": 403,\n    \"message\": \"Request had insufficient authentication scopes.\",\n    \"errors\": [\n      {\n        \"message\": \"Insufficient Permission\",\n        \"domain\": \"global\",\n        \"reason\": \"insufficientPermissions\"\n      }\n    ],\n    \"status\": \"PERMISSION_DENIED\",\n    \"details\": [\n      {\n        \"@type\": \"type.googleapis.com/google.rpc.ErrorInfo\",\n        \"reason\": \"ACCESS_TOKEN_SCOPE_INSUFFICIENT\",\n        \"domain\": \"googleapis.com\",\n        \"metadata\": {\n          \"method\": \"google.apps.drive.v3.DriveFiles.List\",\n          \"service\": \"drive.googleapis.com\"\n        }\n      }\n    ]\n  }\n}\n\n"
+  },
+  "file_id_in_use": {
+    "status": 409,
+    "body": "{\n  \"error\": {\n    \"code\": 409,\n    \"message\": \"A file already exists with the provided ID.\",\n    \"errors\": [\n      {\n        \"message\": \"A file already exists with the provided ID.\",\n        \"domain\": \"global\",\n        \"reason\": \"fileIdInUse\"\n      }\n    ]\n  }\n}\n"
+  },
+  "file_id_not_usable": {
+    "status": 400,
+    "body": "{\n  \"error\": {\n    \"code\": 400,\n    \"message\": \"The provided file ID is not usable.\",\n    \"errors\": [\n      {\n        \"message\": \"The provided file ID is not usable.\",\n        \"domain\": \"global\",\n        \"reason\": \"fileIdNotUsable\",\n        \"location\": \"file.id\",\n        \"locationType\": \"other\"\n      }\n    ]\n  }\n}\n"
   }
 }
