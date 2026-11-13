@@ -134,6 +134,18 @@ public:
 	//! Does not follow pages: the callers each have their own token field.
 	virtual DriveResponse ApiGet(const std::string &path_and_query, int64_t DriveCallStats::*counter) = 0;
 
+	//! One request to ANOTHER Google API host (sheets.googleapis.com, ...),
+	//! with the same bearer token source, 401 refresh, retry/backoff, quota-
+	//! project header and counting as every Drive call. `method` is "GET",
+	//! "POST", "PUT", "PATCH" or "DELETE"; `body` is sent as application/json
+	//! when non-empty. GET and DELETE retry on an ambiguous failure (transport
+	//! error, 5xx, 429); anything else only with `retry_ambiguous`, which the
+	//! caller sets only for a request whose repetition cannot change the
+	//! result. Success is any 2xx.
+	virtual DriveResponse HostRequest(const std::string &host, const std::string &method,
+	                                  const std::string &path_and_query, const std::string &body,
+	                                  int64_t DriveCallStats::*counter, bool retry_ambiguous) = 0;
+
 	//! files.get?alt=media with `Range: bytes=start-end` (inclusive, as HTTP
 	//! defines it). `end` < 0 means "to end of file".
 	virtual DriveResponse Download(const std::string &file_id, int64_t start, int64_t end) = 0;
