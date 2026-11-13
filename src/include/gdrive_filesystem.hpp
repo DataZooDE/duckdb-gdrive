@@ -222,10 +222,45 @@ struct GDriveItem {
 	FileRow row;
 };
 
+struct GDriveAuthContext;
+
+//! Where a write lands once its parent chain exists (PrepareWriteTarget).
+struct GDriveWriteTarget {
+	std::string parent_id;
+	std::string name;
+	//! The leaf already exists in the parent (one match; more is an R-4 error).
+	bool exists = false;
+	DriveFileMeta existing;
+	//! The leaf's reserved id when the parent was just created and the caller
+	//! asked for one; else empty (reserved on first use, or not reservable).
+	std::string leaf_reserved_id;
+	//! Folders this call created.
+	int folders_created = 0;
+};
+
+//! The outcome of CreateNativeFile.
+struct GDriveNativeCreate {
+	//! Something of that name exists at the path by now: nothing was created.
+	bool appeared = false;
+	DriveFileMeta meta; //!< the created object, or what appeared
+};
+
 class GDriveFileSystem : public FileSystem {
 public:
 	GDriveFileSystem();
 	~GDriveFileSystem() override;
+
+	//! Resolve a literal path (gdrive://, id: or browser address) through the
+	//! path cache. False for "names nothing"; ambiguity (R-4) and API errors
+	//! throw -- the probe a writer needs before deciding to create.
+	bool TryResolveLiteral(const string &path, optional_ptr<FileOpener> opener, DriveFileMeta &out);
+
+	//! Create an empty native Google file (`mime_type`) at a gdrive:// PATH,
+	//! creating missing parent folders first (one generateIds for them; the
+	//! native file itself cannot reserve an id -- GDriveClient::CreateNative).
+	//! When the leaf already exists, nothing is created and `appeared` says so.
+	GDriveNativeCreate CreateNativeFile(const string &path, optional_ptr<FileOpener> opener,
+	                                    const std::string &mime_type);
 
 	//! The instance registered for `db`. The table functions resolve paths
 	//! through it, so they share the filesystem's path cache rather than
@@ -350,6 +385,13 @@ private:
 	                              std::vector<GDriveItem> *items, bool include_folders = false);
 
 	DatabaseInstance *attached_db = nullptr;
+
+	//! The write path's mkdir -p walk: resolve (and create, mkdir -p) the
+	//! parent chain of a PATH uri and probe the leaf. Missing folders reserve
+	//! their ids in ONE generateIds, plus the leaf's when `reserve_leaf`.
+	//! Shared by OpenFile and CreateNativeFile.
+	GDriveWriteTarget PrepareWriteTarget(GDriveClient &client, const GDriveAuthContext &auth, const GDriveUri &uri,
+	                                     const std::string &path, bool reserve_leaf);
 
 	//! Resolve a gdrive:// path to metadata, consulting the cache first.
 	//!

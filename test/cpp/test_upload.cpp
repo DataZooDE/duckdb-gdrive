@@ -433,6 +433,28 @@ TEST_CASE("a create's final reply: done, refused, or looked up by its reserved i
 	REQUIRE(InterpretCreateReply(true, 404, "notFound", true, true) == CreateOutcome::FAIL_CLEAN);
 }
 
+TEST_CASE("a native create (no reservable id): done, refused, or looked up by its nonce", "[upload][retry]") {
+	REQUIRE(InterpretNonceCreateReply(true, 200) == NonceCreateOutcome::DONE);
+	// No usable answer: the create may have landed -- look the nonce up.
+	REQUIRE(InterpretNonceCreateReply(false, 0) == NonceCreateOutcome::LOOK_UP);
+	REQUIRE(InterpretNonceCreateReply(true, 500) == NonceCreateOutcome::LOOK_UP);
+	REQUIRE(InterpretNonceCreateReply(true, 503) == NonceCreateOutcome::LOOK_UP);
+	// Refused before anything was applied.
+	REQUIRE(InterpretNonceCreateReply(true, 403) == NonceCreateOutcome::FAIL_CLEAN);
+	REQUIRE(InterpretNonceCreateReply(true, 429) == NonceCreateOutcome::FAIL_CLEAN);
+	REQUIRE(InterpretNonceCreateReply(true, 404) == NonceCreateOutcome::FAIL_CLEAN);
+}
+
+TEST_CASE("a nonce lookup adopts exactly one match and fails closed otherwise", "[upload][retry]") {
+	REQUIRE(DecideNonceLookup(1) == NonceLookupOutcome::ADOPT);
+	// Fail closed: never re-sent, whatever the listing says.
+	REQUIRE(DecideNonceLookup(0) == NonceLookupOutcome::NOT_CREATED);
+	REQUIRE(DecideNonceLookup(2) == NonceLookupOutcome::DUPLICATED);
+	REQUIRE(NonceLookupQuery("folder1", "abc123") ==
+	        "'folder1' in parents and appProperties has { key='gdrive_create' and value='abc123' } and "
+	        "trashed=false");
+}
+
 TEST_CASE("a move whose reply was lost has landed only if the file says so", "[upload][retry]") {
 	using V = std::vector<std::string>;
 	// Moved into b and renamed.

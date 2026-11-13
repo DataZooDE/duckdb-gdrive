@@ -24,7 +24,7 @@ COPY results TO 'gdrive://Finance/sales' (FORMAT sheet_range, RANGE 'Forecast!A1
 | | read | write |
 |---|---|---|
 | **Files** in My Drive and Shared Drives | `read_parquet`, `read_csv`, `read_json`, `glob`, `ATTACH`, DuckLake: anything on a `gdrive://` path or a Drive address | `COPY … TO 'gdrive://…'`, streamed |
-| **Sheets and Docs** | the same readers: exported as CSV / text; `read_sheet_range` for any tab or A1 range, typed | `COPY … (FORMAT sheet_range, RANGE 'Tab!A1')`, in place |
+| **Sheets and Docs** | the same readers: exported as CSV / text; `read_sheet_range` for any tab or A1 range, typed | `COPY … (FORMAT sheet_range, RANGE 'Tab!A1')`, in place -- or into a new Sheet it creates |
 | **Drive's metadata** | `read_gdrive_files`, `search_gdrive`, `gdrive_versions`, `gdrive_changes`, `gdrive_permissions`, `gdrive_drives` | — |
 
 One install, one secret -- `CREATE SECRET (TYPE gdrive);` reuses your `gcloud`
@@ -265,6 +265,7 @@ SELECT * FROM read_sheet_range('gdrive://Finance/sales', '''Q3 plan''!B2:D20', h
 
 COPY forecast TO 'gdrive://Finance/sales' (FORMAT sheet_range, RANGE 'Forecast!A1', OVERWRITE);
 COPY new_rows TO 'gdrive://Finance/sales' (FORMAT sheet_range, RANGE 'Log!A1', APPEND);
+COPY summary  TO 'gdrive://Finance/2026/q3-summary' (FORMAT sheet_range, RANGE 'Summary!A1');  -- creates the Sheet
 ```
 
 The path is any path a reader takes -- `gdrive://…`, `gdrive://id:<id>`, or the
@@ -291,6 +292,43 @@ sharing and its other tabs, and only the cells of the range change.
 | *(default)* | write the block from the anchor; nothing outside it is cleared |
 | `OVERWRITE` | first clear the anchor's extent -- from the anchor down and right to the edge of the tab, or within the explicit bounds -- then write: a shorter result leaves no stale rows |
 | `APPEND` | add the rows below the data already at the anchor (`values.append`); the header is written only when the tab is new or `HEADER true` is given |
+| `CREATE true\|false` | when the `gdrive://` path names nothing, create a new native Sheet there (default `true`); `CREATE false` makes a missing Sheet an error instead |
+
+**A path that names nothing gets a new Sheet** (not in v2026.11.13 or earlier). Missing
+folders are created on the way, as for a file write; the Sheet's one tab is
+renamed to the `RANGE`'s tab and the rows are written in the same request.
+`OVERWRITE` and `APPEND` into a new Sheet simply write the block at the anchor,
+header included. The details that matter:
+
+- Only a **`gdrive://` path** creates. A `gdrive://id:` path or a browser
+  address must name an existing Sheet, and an existing file that is not a
+  Sheet is refused, never replaced.
+- A name ending in a data-file extension -- `.csv`, `.tsv`, `.parquet`,
+  `.json`, `.jsonl`, `.ndjson`, `.xlsx`, `.xls`, `.txt`, any case -- is **not**
+  made into a Sheet: `COPY … TO 'out.csv' (FORMAT sheet_range …)` is far
+  likelier a mistyped `FORMAT`. Drop the extension for a Sheet, or write a file
+  with `FORMAT csv` / `FORMAT parquet`. An *existing* Sheet with such a name is
+  written into as usual.
+- The Sheet is created **last**, after every row is in and the block is known
+  to fit, so a COPY whose query fails, or whose rows do not fit the `RANGE`,
+  creates nothing.
+- If the Sheets API fails **after** the Sheet was created (say a tab title
+  over 100 characters), the new Sheet is **left in place**, empty or partially
+  written. The error names its id; re-running the COPY writes into it.
+- Drive cannot reserve an id for a native Sheet (it answers
+  `generatedIdNotSupported`), so unlike every other create this one is **sent
+  once and never retried**. It carries a random marker; if Drive's answer is
+  lost, one listing looks the marker up: found, the Sheet is used; not found,
+  the COPY fails with "may not have been created; nothing was retried; it is
+  safe to re-run". The residual risk, unproven either way: if Drive's listing
+  lagged a create that *did* land, that lookup would miss it, and a re-run
+  would make a second Sheet of the same name -- which the extension then
+  refuses to address by path (use the `id:` form, delete one).
+- Two COPYs creating the same new Sheet at the same moment can both create
+  it, as with folders: Drive has no create-if-absent. A writer that finds the
+  name taken by the time it creates refuses ("appeared while the COPY ran").
+- duckdb-sharepoint's `excel_range` does **not** create a workbook: a new
+  `.xlsx` needs a file's bytes, not an API call. Parity gap, tracked there.
 
 - Values are written **typed** and as data, never as formulas: numbers and
   booleans natively, `DATE` / `TIMESTAMP` / `TIME` as Sheets dates with a date
@@ -309,9 +347,10 @@ sharing and its other tabs, and only the cells of the range change.
   nothing.
 - A Sheet holds at most 10 million cells across its tabs; a larger write is
   refused before anything is sent.
-- The target must already be a native Google Sheet: a CSV or Excel file in
-  Drive is refused (write a file with `FORMAT csv` instead), and a plain
-  `COPY … (FORMAT csv)` onto a Sheet is still refused -- it would destroy it.
+- An existing target must be a native Google Sheet: a CSV or Excel file in
+  Drive is refused, never replaced by a new Sheet (write a file with `FORMAT
+  csv` instead), and a plain `COPY … (FORMAT csv)` onto a Sheet is still
+  refused -- it would destroy it.
 - Writing needs the full `drive` scope (`DRIVE_SCOPE
   'https://www.googleapis.com/auth/drive'`); `drive.readonly` reads a Sheet
   but its writes fail with an insufficient-scope error that says so. The
@@ -320,7 +359,9 @@ sharing and its other tabs, and only the cells of the range change.
   `gcloud services enable sheets.googleapis.com --project <project>`.
 - Costs one `spreadsheets.get` (the tab list) plus one `batchUpdate` per
   ~2 MB; `gdrive_stats()` counts them as `sheets_get`, `sheets_update` and
-  `sheets_append`.
+  `sheets_append`. Creating a Sheet costs one `files_create` and no
+  `spreadsheets.get` at all; missing folders add one `generate_ids` for the
+  whole chain and one `files_create` each, as for any write.
 
 ## Writing
 
@@ -974,8 +1015,9 @@ discovered later.
   of cell data per `batchUpdate`; a larger write is split, and a failure
   part-way leaves the range partially written (re-run with `OVERWRITE`). An
   `APPEND` is never retried automatically, because a repeated append appends
-  twice. `FORMAT sheet_range` writes into an existing Sheet; it does not create
-  a new spreadsheet, and there is no keyed upsert (yet).
+  twice. There is no keyed upsert (yet). Creating a missing Sheet is sent once,
+  never retried (Drive cannot reserve an id for it); two writers creating the
+  same new Sheet at once can make two.
 - **Search and the changes feed lag** writes, by seconds to minutes.
 
 ## When you should NOT use this

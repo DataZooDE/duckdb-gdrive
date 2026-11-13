@@ -200,7 +200,8 @@ by address
 # Refusals.
 # ---------------------------------------------------------------------------
 
-# Not a Sheet: a CSV is not written by range (that would rewrite its bytes).
+# Not a Sheet: a CSV is not written by range (that would rewrite its bytes),
+# and an existing non-Sheet is never replaced by a new Sheet either.
 statement ok
 SELECT write_blob('gdrive://scratch/${SCRATCH}/sheets/plain.csv', encode(E'a\n1\n'));
 
@@ -214,10 +215,137 @@ SELECT * FROM read_sheet_range('gdrive://scratch/${SCRATCH}/sheets', 'Sheet1')
 ----
 is a folder
 
-statement error
-COPY (SELECT 1 AS a) TO 'gdrive://scratch/${SCRATCH}/no-such-sheet' (FORMAT sheet_range, RANGE 'Sheet1!A1');
+# ---------------------------------------------------------------------------
+# A gdrive:// PATH that names nothing: the COPY creates a native Sheet there
+# (one files.create, after every row is in), renames its one tab to the
+# RANGE's tab and writes the block -- whatever the mode. Costs are asserted in
+# gdrive_sheet_range_cost.test.template; a query that fails, and a Sheets
+# error after the create, in e2e/tests/test_sheet_range.py.
+# ---------------------------------------------------------------------------
+statement ok
+COPY (SELECT * FROM (VALUES (1, 'one', DATE '2026-04-01'), (2, 'two', DATE '2026-04-02')) t(n, s, d) ORDER BY n)
+TO 'gdrive://scratch/${SCRATCH}/created_sheet' (FORMAT sheet_range, RANGE 'Data!A1');
+
+query ITT
+SELECT n, s, d FROM read_sheet_range('gdrive://scratch/${SCRATCH}/created_sheet', 'Data') ORDER BY n
 ----
-no such file or folder
+1	one	2026-04-01
+2	two	2026-04-02
+
+query T
+SELECT mime_type FROM read_gdrive_files('gdrive://scratch/${SCRATCH}/created_sheet')
+----
+application/vnd.google-apps.spreadsheet
+
+# Its one tab was renamed, not joined by a second: the locale's "Sheet1" /
+# "Tabelle1" is gone.
+statement error
+SELECT * FROM read_sheet_range('gdrive://scratch/${SCRATCH}/created_sheet', 'Sheet1')
+----
+has no tab 'Sheet1'
+
+# Now it exists, so the next COPY writes INTO it, beside the first tab.
+statement ok
+COPY (SELECT 'again' AS w) TO 'gdrive://scratch/${SCRATCH}/created_sheet' (FORMAT sheet_range, RANGE 'More!A1');
+
+query TT
+SELECT (SELECT w FROM read_sheet_range('gdrive://scratch/${SCRATCH}/created_sheet', 'More')),
+       (SELECT s FROM read_sheet_range('gdrive://scratch/${SCRATCH}/created_sheet', 'Data') WHERE n = 2)
+----
+again	two
+
+# Missing folders are created on the way (mkdir -p, as for a file write), and
+# a non-A1 anchor lands where it says.
+statement ok
+COPY (SELECT 7 AS x) TO 'gdrive://scratch/${SCRATCH}/made/deeper/nested_sheet' (FORMAT sheet_range, RANGE 'T!B3');
+
+query TI
+SELECT column1, column2 FROM read_sheet_range('gdrive://scratch/${SCRATCH}/made/deeper/nested_sheet', 'T!A3:B4', header := false)
+----
+NULL	x
+NULL	7
+
+# APPEND and OVERWRITE into a new Sheet: a block at the anchor, header kept.
+statement ok
+COPY (SELECT 'north' AS region, DATE '2026-03-01' AS day) TO 'gdrive://scratch/${SCRATCH}/appended_sheet' (FORMAT sheet_range, RANGE 'Log!A1', APPEND);
+
+statement ok
+COPY (SELECT 'south' AS region, DATE '2026-03-02' AS day) TO 'gdrive://scratch/${SCRATCH}/appended_sheet' (FORMAT sheet_range, RANGE 'Log!A1', APPEND);
+
+query TT
+SELECT region, day FROM read_sheet_range('gdrive://scratch/${SCRATCH}/appended_sheet', 'Log') ORDER BY day
+----
+north	2026-03-01
+south	2026-03-02
+
+statement ok
+COPY (SELECT 1 AS k) TO 'gdrive://scratch/${SCRATCH}/overwritten_sheet' (FORMAT sheet_range, RANGE 'X!A1', OVERWRITE);
+
+query I
+SELECT k FROM read_sheet_range('gdrive://scratch/${SCRATCH}/overwritten_sheet', 'X')
+----
+1
+
+# Rows that do not fit the RANGE are refused BEFORE the create: no empty
+# Sheet is left behind.
+statement error
+COPY (SELECT 1 AS a, 2 AS b, 3 AS c) TO 'gdrive://scratch/${SCRATCH}/too_wide_sheet' (FORMAT sheet_range, RANGE 'T!A1:B');
+----
+3 columns do not fit
+
+query I
+SELECT count(*) FROM glob('gdrive://scratch/${SCRATCH}/too_wide_sheet')
+----
+0
+
+# CREATE false: the Sheet must exist, as before.
+statement error
+COPY (SELECT 1 AS a) TO 'gdrive://scratch/${SCRATCH}/not_created' (FORMAT sheet_range, RANGE 'T!A1', CREATE false);
+----
+no such Sheet
+
+query I
+SELECT count(*) FROM glob('gdrive://scratch/${SCRATCH}/not_created')
+----
+0
+
+# ...and an existing one is written into all the same.
+statement ok
+COPY (SELECT 2 AS k) TO 'gdrive://scratch/${SCRATCH}/overwritten_sheet' (FORMAT sheet_range, RANGE 'X!A1', OVERWRITE, CREATE false);
+
+query I
+SELECT k FROM read_sheet_range('gdrive://scratch/${SCRATCH}/overwritten_sheet', 'X')
+----
+2
+
+statement error
+COPY (SELECT 1 AS a) TO 'gdrive://scratch/${SCRATCH}/not_created' (FORMAT sheet_range, RANGE 'T!A1', CREATE 'perhaps');
+----
+CREATE takes true or false
+
+# CREATE is a COPY ... TO option; the reader has no such parameter.
+statement error
+SELECT * FROM read_sheet_range('gdrive://scratch/${SCRATCH}/not_created', 'T', create := true)
+----
+create
+
+# Only a PATH creates: an id (or a browser address) must name an existing Sheet.
+statement error
+COPY (SELECT 1 AS a) TO 'gdrive://id:1AbCdEfGhIjKlMnOpQrStUvWxYz012345' (FORMAT sheet_range, RANGE 'T!A1');
+----
+only a gdrive:// path can create a new Sheet
+
+# A name that reads as a data file is not made into a Sheet: far likelier a
+# mistyped FORMAT. The hint says both ways out.
+statement error
+COPY (SELECT 1 AS a) TO 'gdrive://scratch/${SCRATCH}/out.CSV' (FORMAT sheet_range, RANGE 'T!A1');
+----
+Drop the extension for a Sheet, or use FORMAT csv / FORMAT parquet
+
+query I
+SELECT count(*) FROM glob('gdrive://scratch/${SCRATCH}/out.CSV')
+----
+0
 
 # A plain file write onto a Sheet is still refused -- it would destroy it.
 statement error
