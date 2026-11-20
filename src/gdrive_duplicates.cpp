@@ -1,6 +1,7 @@
 #include "gdrive_duplicates.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <iterator>
 
 namespace duckdb {
