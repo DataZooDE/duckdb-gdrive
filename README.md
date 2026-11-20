@@ -195,7 +195,7 @@ name in one folder, so a path is not a unique identifier. Rather than pick one
 extension fails and names both file ids so you can use the `id:` form. A glob
 returns such files as `gdrive://id:` paths.
 
-One exception, on the write path only: when every file sharing the name has
+One exception, on the write path only (new in v2026.11.20): when every file sharing the name has
 the same bytes (same `md5Checksum` and size), a write keeps the oldest, moves
 the others to the trash, and goes ahead. Nothing is lost, and the path is
 usable again. Copies that differ, folders and native Google files are never
