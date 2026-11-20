@@ -129,6 +129,8 @@ void UploadHandleContents(GDriveClient &client, GDriveFileHandleImpl &handle) {
 		return;
 	}
 	auto &buf = *handle.upload;
+	// No id yet means this write CREATES the file (OpenFile found no match).
+	const bool creates = handle.meta.id.empty();
 
 	DriveResponse resp;
 	if (buf.OnClose() == ChunkedUploadBuffer::CloseAction::FINAL_CHUNK) {
@@ -188,6 +190,12 @@ void UploadHandleContents(GDriveClient &client, GDriveFileHandleImpl &handle) {
 	DriveFileMeta uploaded;
 	if (ParseFileMeta(resp.body, uploaded)) {
 		handle.meta = uploaded;
+		if (creates) {
+			// The next write of this name must not trust the name listing to
+			// show it yet (gdrive_duplicates.hpp).
+			handle.file_system.Cast<GDriveFileSystem>().RememberCreate(handle.auth_context, handle.write_parent_id,
+			                                                          handle.write_name, uploaded.id);
+		}
 	}
 	// No path-cache invalidation here -- see the header comment on this
 	// function in gdrive_internal.hpp for why that is safe rather than a

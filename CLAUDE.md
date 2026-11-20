@@ -835,6 +835,25 @@ before copying.
 from a tagged commit and runs none of our live tests, so whatever is broken
 at tag time ships.
 
+### A name listing that lags makes duplicates (2026-11-20)
+
+`ListByName` (`files.list` with `name=`) is eventually consistent: a file
+created seconds ago can be missing from it. A write that looks a name up,
+finds nothing and creates will then make a SECOND file if the same name was
+created moments earlier -- reserved ids do not help, they protect one create's
+retries, not two creates. heron-escurel (a Shared Drive) wrote a new
+`skills/agent.md` twice ~3 s apart and got two identical files; the path was
+ambiguous and the gateway stopped booting. CI's My Drive folder did not lag in
+12/12 back-to-back pairs, so the race is real but not reproducible on demand.
+
+Two defences (`gdrive_duplicates.*`): `RecentCreates` remembers what this
+process created, and `PrepareWriteTarget` asks for that file by id (files.get,
+strongly consistent) instead of listing -- cost-neutral, one call replaces
+another; and a WRITE to a name shared only by byte-identical files (md5 + size)
+keeps the oldest and trashes the rest (`gdrive_heal_identical_duplicates`,
+default on; always trash, never delete). Reads never heal. Live tests:
+`e2e/tests/test_duplicate_names.py`.
+
 ## Credential hygiene
 
 `make check_credentials` (also a CI job) fails on tracked files matching

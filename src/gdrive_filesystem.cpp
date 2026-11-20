@@ -11,6 +11,7 @@
 #include "duckdb/main/client_context.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <unordered_map>
 #include <unordered_set>
@@ -168,10 +169,13 @@ std::string RootFolderFor(const GDriveAuthContext &auth) {
 //! One files.list call for children of `parent_id` named exactly `name`,
 //! following pagination to exhaustion (a caller must never see a partial
 //! listing -- that is how "the glob silently dropped files" bugs happen).
+std::string NameQuery(const std::string &parent_id, const std::string &name) {
+	return "'" + parent_id + "' in parents and name='" + EscapeDriveQueryLiteral(name) + "' and trashed=false";
+}
+
 std::vector<DriveFileMeta> ListByName(GDriveClient &client, const std::string &parent_id, const std::string &name,
                                      bool require_folder, const std::string &context_path) {
-	std::string query =
-	    "'" + parent_id + "' in parents and name='" + EscapeDriveQueryLiteral(name) + "' and trashed=false";
+	std::string query = NameQuery(parent_id, name);
 	if (require_folder) {
 		query += " and mimeType='application/vnd.google-apps.folder'";
 	}
@@ -257,7 +261,138 @@ std::vector<DriveFileMeta> ListChildren(GDriveClient &client, const std::string 
 	                  context_path, static_cast<int>(matches.size()), ids);
 }
 
+//! files.get on a file THIS process created moments ago (RecentCreates):
+//! strongly consistent where the name listing is not. True, with `out`, when
+//! it is still a live file named `name` in `parent_id`; false when it is gone,
+//! trashed, renamed or moved -- the listing then decides, as before.
+bool LookUpOwnCreate(GDriveClient &client, const std::string &file_id, const std::string &parent_id,
+                     const std::string &name, DriveFileMeta &out) {
+	// DriveFileMeta's own fields plus `parents`, which it does not hold.
+	static const std::string kFields =
+	    "id,name,mimeType,size,modifiedTime,headRevisionId,trashed,contentRestrictions(readOnly),parents";
+	auto resp = client.ApiGet("/drive/v3/files/" + QueryEncode(file_id) + "?fields=" + QueryEncode(kFields) + "&" +
+	                              AllDrivesQuery(),
+	                          &DriveCallStats::files_get);
+	if (!resp.ok) {
+		return false;
+	}
+	FileRow row;
+	std::string error;
+	if (!ParseFileMeta(resp.body, out) || !ParseFileRow(resp.body, row, error)) {
+		return false;
+	}
+	const bool in_parent = std::find(row.parents.begin(), row.parents.end(), parent_id) != row.parents.end();
+	return !out.trashed && out.name == name && in_parent;
+}
+
+//! R-4 repair on the write path. `matches` (more than one) share `name` in
+//! `parent_id`. When every copy has the same bytes (md5Checksum + size), the
+//! oldest is kept and the others are trashed -- never deleted (D-6), whatever
+//! gdrive_permanent_delete says, so a wrong call is recoverable. Anything else
+//! is the R-4 error it always was. Only writes heal: a read must not change
+//! the Drive it reads.
+DriveFileMeta HealIdenticalOrThrow(GDriveClient &client, const std::string &parent_id, const std::string &name,
+                                   const std::vector<DriveFileMeta> &matches, bool heal,
+                                   const std::string &context_path) {
+	if (!heal) {
+		ThrowAmbiguous(matches, context_path);
+	}
+	std::vector<DuplicateCopy> copies;
+	std::string page_token;
+	do {
+		auto resp = client.List(NameQuery(parent_id, name), page_token,
+		                        "id,name,mimeType,size,md5Checksum,createdTime,trashed");
+		if (!resp.ok) {
+			ThrowGDriveError(resp.error, context_path);
+		}
+		std::vector<FileRow> rows;
+		std::string next, error;
+		if (!ParseFileRowList(resp.body, rows, next, error)) {
+			throw IOException("gdrive: malformed listing response resolving '%s': %s", context_path, error);
+		}
+		for (const auto &row : rows) {
+			if (row.name != name) {
+				continue; // `name=` matches case-insensitively; see ListByName
+			}
+			DuplicateCopy c;
+			c.id = row.id;
+			c.mime_type = row.mime_type;
+			c.md5 = row.md5;
+			c.size = row.size;
+			c.created_time = row.created;
+			copies.push_back(c);
+		}
+		page_token = next;
+	} while (!page_token.empty());
+	// The listing above is a second look and may lag too; heal only what it
+	// can vouch for, and only when it sees every copy the first look saw.
+	for (const auto &m : matches) {
+		bool seen = std::any_of(copies.begin(), copies.end(), [&](const DuplicateCopy &c) { return c.id == m.id; });
+		if (!seen) {
+			ThrowAmbiguous(matches, context_path);
+		}
+	}
+	auto plan = PlanIdenticalDuplicateHeal(copies);
+	if (!plan.healable) {
+		ThrowAmbiguous(matches, context_path);
+	}
+	for (const auto &id : plan.trash_ids) {
+		auto resp = client.Delete(id, /*permanent=*/false);
+		if (!resp.ok && resp.error.kind != GDriveErrorKind::NOT_FOUND) {
+			ThrowGDriveError(resp.error, context_path);
+		}
+	}
+	for (const auto &m : matches) {
+		if (m.id == plan.keep_id) {
+			return m;
+		}
+	}
+	// The survivor came from the second listing only (a copy the first
+	// missed): ask for it by id rather than guess its metadata.
+	auto resp = client.GetMetadata(plan.keep_id);
+	DriveFileMeta keep;
+	if (!resp.ok || !ParseFileMeta(resp.body, keep)) {
+		ThrowAmbiguous(matches, context_path);
+	}
+	return keep;
+}
+
+std::string RecentCreateKey(const GDriveAuthContext &auth, const std::string &parent_id, const std::string &name) {
+	std::string out;
+	for (const auto *part : {&auth.identity, &auth.drive_id, &auth.root_folder_id, &parent_id, &name}) {
+		out += *part;
+		out += '\x1f';
+	}
+	return out;
+}
+
+int64_t SteadyNowMs() {
+	return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+	    .count();
+}
+
 } // namespace
+
+void GDriveFileSystem::RememberCreate(const GDriveAuthContext &auth, const std::string &parent_id,
+                                      const std::string &name, const std::string &file_id) {
+	if (parent_id.empty() || name.empty() || file_id.empty()) {
+		return;
+	}
+	lock_guard<mutex> guard(recent_creates_lock);
+	recent_creates.Remember(RecentCreateKey(auth, parent_id, name), file_id, SteadyNowMs());
+}
+
+std::string GDriveFileSystem::RecallCreate(const GDriveAuthContext &auth, const std::string &parent_id,
+                                           const std::string &name) {
+	lock_guard<mutex> guard(recent_creates_lock);
+	return recent_creates.Recall(RecentCreateKey(auth, parent_id, name), SteadyNowMs());
+}
+
+void GDriveFileSystem::ForgetCreate(const GDriveAuthContext &auth, const std::string &parent_id,
+                                    const std::string &name) {
+	lock_guard<mutex> guard(recent_creates_lock);
+	recent_creates.Forget(RecentCreateKey(auth, parent_id, name));
+}
 
 namespace {
 //! Defined below, next to the code they belong with; declared here because
@@ -533,7 +668,7 @@ std::string GDriveFileSystem::DisambiguatePath(const std::string &parent_path, c
 
 GDriveWriteTarget GDriveFileSystem::PrepareWriteTarget(GDriveClient &client, const GDriveAuthContext &auth,
                                                        const GDriveUri &uri, const std::string &path,
-                                                       bool reserve_leaf) {
+                                                       bool reserve_leaf, bool heal_identical) {
 	GDriveWriteTarget t;
 	// Ids reserved for the missing part of the parent chain (AND the leaf,
 	// when `reserve_leaf`) in one files.generateIds, so every folder create
@@ -675,12 +810,29 @@ GDriveWriteTarget GDriveFileSystem::PrepareWriteTarget(GDriveClient &client, con
 	// be skipped on any other basis -- getting it wrong manufactures
 	// the R-4 duplicate the probe exists to prevent.
 	if (!parent_is_new) {
-		auto existing_matches = ListByName(client, t.parent_id, t.name, /*require_folder=*/false, path);
-		if (existing_matches.size() > 1) {
-			ThrowAmbiguous(existing_matches, path);
-		} else if (existing_matches.size() == 1) {
+		// A name THIS process created moments ago is asked for by id: the
+		// name listing is eventually consistent and can still answer "no such
+		// file", and creating then is how one file became two (heron-escurel,
+		// 2026-11-18). files.get by id is strongly consistent, and it replaces
+		// the listing rather than adding to it, so a rewrite costs no extra
+		// call.
+		const auto mine_id = RecallCreate(auth, t.parent_id, t.name);
+		DriveFileMeta mine;
+		if (!mine_id.empty() && LookUpOwnCreate(client, mine_id, t.parent_id, t.name, mine)) {
 			t.exists = true;
-			t.existing = existing_matches[0];
+			t.existing = mine;
+		} else {
+			if (!mine_id.empty()) {
+				ForgetCreate(auth, t.parent_id, t.name);
+			}
+			auto existing_matches = ListByName(client, t.parent_id, t.name, /*require_folder=*/false, path);
+			if (existing_matches.size() > 1) {
+				t.exists = true;
+				t.existing = HealIdenticalOrThrow(client, t.parent_id, t.name, existing_matches, heal_identical, path);
+			} else if (existing_matches.size() == 1) {
+				t.exists = true;
+				t.existing = existing_matches[0];
+			}
 		}
 	}
 	if (reserve_leaf && !chain_ids.empty()) {
@@ -759,7 +911,8 @@ unique_ptr<FileHandle> GDriveFileSystem::OpenFile(const string &path_in, FileOpe
 			RefuseReplacing(existing, path);
 			existing_id = parsed.uri.file_id;
 		} else {
-			auto target = PrepareWriteTarget(*client, auth, parsed.uri, path, /*reserve_leaf=*/true);
+			auto target = PrepareWriteTarget(*client, auth, parsed.uri, path, /*reserve_leaf=*/true,
+			                                 GetBoolSetting(opener, "gdrive_heal_identical_duplicates", true));
 			parent_id = target.parent_id;
 			name = target.name;
 			if (target.exists) {
@@ -1994,7 +2147,8 @@ GDriveNativeCreate GDriveFileSystem::CreateNativeFile(const string &path, option
 	auto client = CreateGDriveClient(auth);
 	// Missing folders are created (mkdir -p, reserved ids, retry-safe); the
 	// native file itself cannot reserve one, so no id is asked for it.
-	auto target = PrepareWriteTarget(*client, auth, parsed.uri, path, /*reserve_leaf=*/false);
+	auto target = PrepareWriteTarget(*client, auth, parsed.uri, path, /*reserve_leaf=*/false,
+	                                 GetBoolSetting(opener, "gdrive_heal_identical_duplicates", true));
 	GDriveNativeCreate out;
 	if (target.exists) {
 		out.appeared = true;
