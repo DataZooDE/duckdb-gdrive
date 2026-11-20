@@ -396,13 +396,13 @@ class Drive:
             if not page_token:
                 return out
 
-    def get_metadata(self, file_id: str) -> dict:
+    def get_metadata(self, file_id: str, fields: str | None = None) -> dict:
         return self._ok(
             self._request(
                 "GET",
                 f"{DRIVE_V3}/files/{file_id}",
                 "files.get",
-                params={"fields": "id, name, mimeType, size, modifiedTime, headRevisionId, md5Checksum"},
+                params={"fields": fields or "id, name, mimeType, size, modifiedTime, headRevisionId, md5Checksum"},
             ),
             "files.get",
         )

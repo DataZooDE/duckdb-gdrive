@@ -195,6 +195,18 @@ name in one folder, so a path is not a unique identifier. Rather than pick one
 extension fails and names both file ids so you can use the `id:` form. A glob
 returns such files as `gdrive://id:` paths.
 
+One exception, on the write path only: when every file sharing the name has
+the same bytes (same `md5Checksum` and size), a write keeps the oldest, moves
+the others to the trash, and goes ahead. Nothing is lost, and the path is
+usable again. Copies that differ, folders and native Google files are never
+touched, and a read never changes anything. `SET
+gdrive_heal_identical_duplicates = false` turns it off.
+
+A write never makes such a pair on its own: a name this process created is
+looked up by id on its next write, because Drive's name search can lag a fresh
+create by seconds and answer "no such file". (That lag once turned two writes
+of one new file, 3 s apart, into two identical files.)
+
 **Browser addresses.** A file's or folder's address as the browser shows it,
 or a *Copy link*, works wherever a path does. Every Drive address names its
 file by id, so it costs no resolution:
@@ -891,6 +903,7 @@ and nothing registered that is not here.
 |---|---|---|
 | `gdrive_docs_export_mime` | `text/plain` | Export format for a Google **Doc**: `text/plain`, `text/markdown` (keeps structure), `text/html`, `application/pdf`, `application/rtf`, the docx, ODT and EPUB types, or `application/zip` (zipped HTML); anything else is refused when set. Text exports lose Drive's byte-order mark. Sheets are always `text/csv`. |
 | `gdrive_permanent_delete` | `false` | `false` moves a deleted file to the Drive trash (recoverable); `true` deletes it outright. |
+| `gdrive_heal_identical_duplicates` | `true` | A write to a name that several files with the same bytes share keeps the oldest and moves the rest to the trash (always the trash, whatever `gdrive_permanent_delete` says). `false` makes it the duplicate-name error like any other. |
 | `gdrive_telemetry_enabled` | `true` | Anonymous usage telemetry shared with the other DataZoo extensions. `false` turns it off for the rest of the session; the environment variable `DATAZOO_DISABLE_TELEMETRY=1` turns it off entirely, including the load event. |
 | `gdrive_block_size_bytes` | 16 MiB | Read granularity. Drive charges ~1.3 s per ranged request regardless of size, so larger blocks mean fewer, faster requests -- but a `count(*)` over a Parquet footer then pays for a whole block it does not need. 16 MiB is the compromise; see `docs/benchmark.md` for the sweep. |
 | `gdrive_block_cache_bytes` | 256 MiB | Total cap on the shared block cache, across all files and handles. Blocks are keyed by identity + file id + revision, so a file changing on Drive cannot be served stale. |
