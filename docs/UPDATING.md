@@ -5,9 +5,11 @@ repository must be rebuilt for every DuckDB release. REQ-NF-06 records this as
 a standing cost for the life of the project, not a one-off — it is written
 down here so it is a routine rather than a rediscovery.
 
-Current targets: **stable v1.5.6** and the **DuckDB 2.0** line. DuckDB 1.4.x
-LTS is no longer supported. Local development builds against stable only; CI
-builds both.
+Current targets: **v2.0.1** (latest stable, the local development target) and
+**v1.5.6** (the last 1.x release). Both are built, smoke-tested in a stock CLI
+and deployed. DuckDB 1.4.x LTS is no longer supported. Local development builds
+against v2.0.1 only; CI builds both. The single source for the local target is
+`scripts/duckdb_version.env`.
 
 ## The routine
 

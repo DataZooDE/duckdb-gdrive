@@ -39,8 +39,8 @@ stray=$(mktemp -d)
 tu=$(mktemp -d)
 trap 'rm -rf "$stray" "$tu"' EXIT
 
-# (a) Headers of DuckDB 2.0 that the bundled v1.5.6 lacks and that duckdb-compat
-#     or this extension once probed for.
+# (a) Headers of DuckDB 2.0 that v1.5.6 lacks and that duckdb-compat or this
+#     extension once probed for (CI runs this against both DuckDB trees).
 known="duckdb/common/types/size.hpp duckdb/planner/table_filter_set.hpp duckdb/common/identifier.hpp"
 # (b) Every header the sources or the duckdb-compat submodule probe for.
 probed=$(grep -rhoE '__has_include[[:space:]]*\([[:space:]]*["<]duckdb[^">]*[">]' "$root/src" "$compat_include" |

@@ -11,16 +11,16 @@
 # That failure mode is silent and expensive: a local green looks exactly as
 # convincing as a real one. The only fix is to make the drift itself loud.
 #
-# Local development builds against the LATEST STABLE. CI additionally builds
-# the DuckDB 2.0 line (see .github/workflows/MainDistributionPipeline.yml) --
-# the API differs between the lines, so stable-only local coverage is not
-# proof the 2.0 job will pass.
+# Local development builds against the LATEST STABLE (v2.0.1). CI additionally
+# builds v1.5.6 (see .github/workflows/MainDistributionPipeline.yml) -- the API
+# differs between the lines, so local coverage is not proof the 1.5.6 job
+# will pass.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
 # Latest stable. Keep WANT_SHA in step with CLAUDE.md and the `duckdb_version`
-# of the stable job in .github/workflows/MainDistributionPipeline.yml.
+# of the v2 jobs in .github/workflows/MainDistributionPipeline.yml.
 #
 # Pinned by SHA, not by tag name. CI checks submodules out WITHOUT tags, so
 # `git rev-parse v1.5.6^{commit}` fails there and the tag-based check failed

@@ -12,11 +12,13 @@
 #     artifact that builds green and then fails to LOAD (symbol resolution in
 #     a side-module is deferred to load time, so CI would not catch it).
 #
-# Build matrix: current stable (v1.5.6), built, smoke-tested and deployed,
-# plus the DuckDB 2.0 pre-release line (built and tested only; see
-# duckdb-next-build). Both are built, because a community extension is
-# installed against whichever DuckDB the user is running and the C++ API
-# differs between the lines. DuckDB 1.4.x LTS is no longer supported.
+# Build matrix: two shipped DuckDB lines, each built, smoke-tested in a stock
+# CLI and deployed to get.erpl.io:
+#   v2.0.1 -- latest stable, the local development target (scripts/duckdb_version.env)
+#   v1.5.6 -- the last 1.x release, still served by community-extensions
+# Both are built because a community extension is installed against whichever
+# DuckDB the user is running and the C++ API differs between the lines (one
+# source tree, duckdb-compat). DuckDB 1.4.x LTS is no longer supported.
 #
 # The ci-tools refs are the ROLLING branches -- v1.5-variegata and
 # v2.0-cyanoptera -- not per-patch tags, matching the sibling extensions
@@ -50,18 +52,11 @@ jobs:
       extension_name: gdrive
       exclude_archs: 'osx_amd64;windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'
 
-  # DuckDB 2.0 (pre-release): the line community-extensions now builds
-  # `repo.ref` against (DUCKDB_LATEST_STABLE in its build.yml, with
-  # extension-ci-tools v2.0-cyanoptera). Build + test on every platform so a
-  # 2.0-only break shows up here before it shows up in their CI. No smoke test
-  # (there is no stock 2.0 CLI to load into) and no deploy (an alpha binary
-  # loads only into that exact alpha build). When community-extensions moves
-  # its 2.0 commit, move this one with it.
-  duckdb-next-build:
-    name: Build extension binaries (v2.0 pre-release)
+  duckdb-v2-build:
+    name: Build extension binaries (v2.0.1)
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v2.0-cyanoptera
     with:
-      duckdb_version: b15358c371daf10dad799a43b6167f6ccdce84d8
+      duckdb_version: v2.0.1
       ci_tools_version: v2.0-cyanoptera
       extension_name: gdrive
       exclude_archs: 'osx_amd64;windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'
@@ -72,8 +67,7 @@ jobs:
   # channel (D-4), not a replacement -- it lets erpl.io ship a build the moment
   # a tag lands, without waiting on the community build queue.
   #
-  # Only the v1.5.6 line is deployed (a 2.0 pre-release binary loads only into
-  # that exact build). The S3 key carries the DuckDB version (see
+  # Both lines are deployed. The S3 key carries the DuckDB version (see
   # scripts/extension-upload.sh), so each DuckDB line lands on its own path and
   # DuckDB resolves whichever matches the client it runs.
   #
@@ -114,4 +108,36 @@ jobs:
       # push of the same commit builds before the tag exists (stamp vX-N-gSHA), and
       # its deploy resolves the tag at upload time: when it ran after the tag run it
       # overwrote the release with that pre-tag build (v2026.10.17, gdrive v1.5.6).
+      deploy_versioned: ${{ startsWith(github.ref, 'refs/tags/v') }}
+
+  duckdb-v2-smoke-test:
+    name: Smoke test (v2.0.1)
+    needs: duckdb-v2-build
+    uses: ./.github/workflows/_extension_smoke_test.yml
+    with:
+      duckdb_version: v2.0.1
+      extension_name: gdrive
+      exclude_archs: 'osx_amd64;windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'
+
+  duckdb-v2-deploy:
+    name: Deploy extension binaries (v2.0.1)
+    needs: [duckdb-v2-build, duckdb-v2-smoke-test]
+    # Never past a failed smoke test. `!cancelled()` alone overrides the
+    # implicit success() check on `needs`, which let an artifact that fails to
+    # load in a stock CLI ship. Note the consequence, intended: an arch whose
+    # BUILD fails has no artifact, so its smoke test -- and with it the whole
+    # deploy of that line -- fails too. Nothing ships half a matrix.
+    permissions:
+      id-token: write
+      contents: read
+    if: ${{ !cancelled() && needs.duckdb-v2-smoke-test.result == 'success' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
+    uses: ./.github/workflows/_extension_deploy.yml
+    secrets: inherit
+    with:
+      extension_name: gdrive
+      duckdb_version: v2.0.1
+      ci_tools_version: v2.0-cyanoptera
+      exclude_archs: 'osx_amd64;windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'
+      deploy_latest: ${{ startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main' }}
+      # Tag-only versioned paths: see duckdb-stable-deploy.
       deploy_versioned: ${{ startsWith(github.ref, 'refs/tags/v') }}

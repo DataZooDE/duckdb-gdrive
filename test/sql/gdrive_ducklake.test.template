@@ -24,6 +24,14 @@ require parquet
 # SKIPS the whole file -- which sqllogictest then reports as success. An
 # explicit LOAD fails loudly instead. scripts/run_live_tests.sh installs it
 # beforehand, and also fails the run if any file reports as skipped.
+#
+# Explicit INSTALL as well: since DuckDB 2.0 the unittest runner gives each
+# test its own HOME (duckdb_unittest_tempdir/<uuid>-home), so the copy the
+# shell installed into ~/.duckdb is not found. An explicit INSTALL is not
+# affected by autoinstall_known_extensions=false.
+statement ok
+INSTALL ducklake;
+
 statement ok
 LOAD ducklake;
 
