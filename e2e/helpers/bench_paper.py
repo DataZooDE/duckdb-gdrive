@@ -36,7 +36,7 @@ import uuid
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-DUCKDB = REPO / "build" / "release" / "duckdb"
+DUCKDB = REPO / "scripts" / "duckdb_shell.sh"  # loads the extension on 2.0
 
 REQUIRED = ("GDRIVE_CI_DRIVE_ID", "GDRIVE_OAUTH_CLIENT_ID",
             "GDRIVE_OAUTH_CLIENT_SECRET", "GDRIVE_USER_REFRESH_TOKEN")

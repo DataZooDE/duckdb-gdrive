@@ -58,6 +58,10 @@ jobs:
     with:
       duckdb_version: v2.0.1
       ci_tools_version: v2.0-cyanoptera
+      # v2.0-cyanoptera defaults to reduced CI on pull_request: it builds only
+      # linux_amd64 + windows_amd64, so the arm64/macOS smoke tests had no
+      # artifact and the PR never proved those platforms. Build all of them.
+      reduced_ci_mode: disabled
       extension_name: gdrive
       exclude_archs: 'osx_amd64;windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads'
 

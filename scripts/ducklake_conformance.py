@@ -140,7 +140,7 @@ def make_secret_dir() -> str:
         f"ROOT_FOLDER_ID '{os.environ['GDRIVE_CI_DRIVE_ID']}', "
         "DRIVE_SCOPE 'https://www.googleapis.com/auth/drive');"
     )
-    cli = REPO / "build" / "release" / "duckdb"
+    cli = REPO / "scripts" / "duckdb_shell.sh"  # loads the extension on 2.0
     r = subprocess.run([str(cli), "-c", sql], capture_output=True, text=True, timeout=120)
     if r.returncode != 0:
         raise SystemExit("could not create the persistent secret")
@@ -192,7 +192,7 @@ def main() -> int:
                   file=sys.stderr)
             return 2
 
-    cli = REPO / "build" / "release" / "duckdb"
+    cli = REPO / "scripts" / "duckdb_shell.sh"  # loads the extension on 2.0
     if subprocess.run([str(cli), "-c", "INSTALL ducklake; LOAD ducklake;"],
                       capture_output=True, text=True, timeout=180).returncode != 0:
         print("FAIL: could not install ducklake", file=sys.stderr)

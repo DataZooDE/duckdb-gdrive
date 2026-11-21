@@ -173,11 +173,14 @@ def gdrive_secret_sql() -> str:
 
 @pytest.fixture(scope="session")
 def duckdb_cli() -> Path:
-    """The built duckdb shell with the extension statically linked."""
-    exe = REPO_ROOT / "build" / "release" / "duckdb"
-    if not exe.exists():
-        pytest.skip(f"{exe} not built -- run `make` first")
-    return exe
+    """The built duckdb shell with the extension loaded.
+
+    scripts/duckdb_shell.sh, not build/release/duckdb itself: the DuckDB 2.0
+    shell no longer links the extension statically, so the wrapper LOADs the
+    built artifact (and adds nothing on a 1.x build that still links it)."""
+    if not (REPO_ROOT / "build" / "release" / "duckdb").exists():
+        pytest.skip("build/release/duckdb not built -- run `make` first")
+    return REPO_ROOT / "scripts" / "duckdb_shell.sh"
 
 
 @pytest.fixture(scope="session")
