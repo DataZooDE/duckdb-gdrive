@@ -14,7 +14,7 @@ description: >
   range of a Sheet, writing query results or a forecast into a Sheet, or
   appending rows to one. (The separate gsheets community extension is a
   different product with its own functions.)
-version: 2026.11.20
+version: 2026.11.21
 user-invocable: false
 ---
 

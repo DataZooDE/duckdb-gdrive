@@ -18,7 +18,7 @@
 
 extension:
   name: gdrive
-  version: 2026.11.20
+  version: 2026.11.21
   description: Google Drive in SQL -- files and Sheets (gdrive://, browser links; read and write a Sheet by tab or range), Drive's metadata, locks, versions, change feeds and permissions
   language: C++
   build: cmake
@@ -39,7 +39,8 @@ extension:
 repo:
   github: DataZooDE/duckdb-gdrive
   ref: PLACEHOLDER_SET_AT_RELEASE
-  # ref builds against DuckDB 2.0 and variegata against v1.5.6
+  # ref builds against DuckDB 2.0 (v2.0.0 by default, v2.0.1 on dispatch) and
+  # variegata against v1.5.6
   # (community-extensions scripts/build.py); a missing key falls back to ref.
   # One commit serves both lines (duckdb-compat), so at release both are the
   # same tagged SHA. No andium key: DuckDB 1.4.x is not supported.

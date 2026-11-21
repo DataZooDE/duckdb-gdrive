@@ -28,7 +28,7 @@ COPY results TO 'gdrive://Finance/sales' (FORMAT sheet_range, RANGE 'Forecast!A1
 | **Drive's metadata** | `read_gdrive_files`, `search_gdrive`, `gdrive_versions`, `gdrive_changes`, `gdrive_permissions`, `gdrive_drives` | — |
 
 One install, one secret -- `CREATE SECRET (TYPE gdrive);` reuses your `gcloud`
-login. Built for DuckDB **v1.5.6** and **2.0**, by
+login. Built for DuckDB **v2.0.1** and **v1.5.6**, by
 [DataZoo](https://data-zoo.de), and the sibling of
 [duckdb-sharepoint](https://github.com/DataZooDE/duckdb-sharepoint) for
 Microsoft 365.
@@ -195,7 +195,7 @@ name in one folder, so a path is not a unique identifier. Rather than pick one
 extension fails and names both file ids so you can use the `id:` form. A glob
 returns such files as `gdrive://id:` paths.
 
-One exception, on the write path only (new in v2026.11.20): when every file sharing the name has
+One exception, on the write path only (new in v2026.11.21): when every file sharing the name has
 the same bytes (same `md5Checksum` and size), a write keeps the oldest, moves
 the others to the trash, and goes ahead. Nothing is lost, and the path is
 usable again. Copies that differ, folders and native Google files are never
