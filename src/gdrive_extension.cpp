@@ -104,6 +104,14 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "RemoveFile permanently deletes instead of moving to trash (default: false, trash).",
 	    LogicalType::BOOLEAN, Value::BOOLEAN(false));
 
+	// R-4 repair (gdrive_duplicates.hpp): a WRITE to a name that several
+	// byte-identical files share keeps the oldest and trashes the rest, instead
+	// of refusing the path forever. Copies that differ are never touched.
+	loader.GetDatabaseInstance().config.AddExtensionOption(
+	    "gdrive_heal_identical_duplicates",
+	    "A write to a name shared by byte-identical files keeps the oldest and trashes the others (default: true).",
+	    LogicalType::BOOLEAN, Value::BOOLEAN(true));
+
 	// B-1 / D-10: an explicit override for Application Default Credentials
 	// discovery, used by PROVIDER credential_chain.
 	//

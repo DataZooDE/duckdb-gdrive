@@ -2,6 +2,7 @@
 
 #include "gdrive_blockcache.hpp"
 #include "gdrive_client.hpp"
+#include "gdrive_duplicates.hpp"
 #include "gdrive_rows.hpp"
 #include "gdrive_uri.hpp"
 
@@ -375,6 +376,14 @@ public:
 	void Truncate(FileHandle &handle, int64_t new_size) override;
 	bool Trim(FileHandle &handle, idx_t offset_bytes, idx_t length_bytes) override;
 
+	//! R-4 prevention (gdrive_duplicates.hpp): `file_id` was just created by
+	//! THIS process as `name` in folder `parent_id`. The next write of that
+	//! name looks the file up by id instead of trusting Drive's name listing,
+	//! which can lag a fresh create by seconds -- the lag that once made a
+	//! second write of a new name create a second file.
+	void RememberCreate(const GDriveAuthContext &auth, const std::string &parent_id, const std::string &name,
+	                    const std::string &file_id);
+
 private:
 	//! Glob's engine. `file_fields` non-empty asks every listing for those
 	//! fields too; `items`, when non-null, receives each match with its
@@ -390,8 +399,16 @@ private:
 	//! parent chain of a PATH uri and probe the leaf. Missing folders reserve
 	//! their ids in ONE generateIds, plus the leaf's when `reserve_leaf`.
 	//! Shared by OpenFile and CreateNativeFile.
+	//! `heal_identical` (gdrive_heal_identical_duplicates): a leaf name shared
+	//! by byte-identical files is reduced to the oldest, the rest trashed;
+	//! any other duplicate stays an R-4 error.
 	GDriveWriteTarget PrepareWriteTarget(GDriveClient &client, const GDriveAuthContext &auth, const GDriveUri &uri,
-	                                     const std::string &path, bool reserve_leaf);
+	                                     const std::string &path, bool reserve_leaf, bool heal_identical);
+
+	//! The id this process created for (parent_id, name) within the recall
+	//! window, or empty.
+	std::string RecallCreate(const GDriveAuthContext &auth, const std::string &parent_id, const std::string &name);
+	void ForgetCreate(const GDriveAuthContext &auth, const std::string &parent_id, const std::string &name);
 
 	//! Resolve a gdrive:// path to metadata, consulting the cache first.
 	//!
@@ -417,6 +434,9 @@ private:
 
 	GDrivePathCache cache;
 	GDriveBlockCache blocks;
+
+	mutex recent_creates_lock;
+	RecentCreates recent_creates;
 
 	//! Re-resolve a handle whose cached file id has gone dead. See the .cpp.
 	//! Takes the base handle: GDriveFileHandleImpl lives in the private
