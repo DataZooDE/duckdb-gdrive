@@ -65,8 +65,7 @@ gh run list --repo DataZooDE/duckdb-gdrive --limit 4
 
 `Checks` covers hygiene, musl, the artifact, and the live suite.
 `Main Extension Distribution Pipeline` is the one that matters for
-publishing: it builds v1.5.6 (smoke-tested and deployed) and the DuckDB 2.0
-line (build and test only) across Linux amd64/arm64, Windows and Apple Silicon
+publishing: it builds, smoke-tests and deploys both v2.0.1 and v1.5.6 across Linux amd64/arm64, Windows and Apple Silicon
 macOS.
 
 ## Tagging
@@ -132,12 +131,12 @@ copy for a long time after a re-upload:
 
 ```bash
 T=vYYYY.MM.DD; N=gdrive; B=https://s3.eu-west-1.amazonaws.com/get.erpl.io
-for v in v1.5.6; do for a in linux_amd64 linux_arm64 osx_arm64 windows_amd64; do
+for v in v2.0.1 v1.5.6; do for a in linux_amd64 linux_arm64 osx_arm64 windows_amd64; do
   echo "$v $a: $(curl -sf $B/$N/$T/$v/$a/$N.duckdb_extension.gz | gunzip 2>/dev/null | tail -c 512 | strings -n 4 | grep -m1 -E '^v20')"
 done; done
 ```
 
-Every binary must print the tag (only v1.5.6 is deployed; it has no musl
+Every binary must print the tag (both lines are deployed; neither has a musl
 build). On 2026-10-17 a `main` push of the release commit, built before
 the tag existed, deployed after the tag run and overwrote gdrive v1.5.6 in the
 `vYYYY.MM.DD` path with a binary stamped `v2026.10.16-5-gfccfa44`. Versioned
@@ -180,22 +179,24 @@ commit lands on a merged PR and changes nothing.
    the placeholder was duly replaced with nothing, and `ref:` parsed as valid
    YAML with a null value. Require 40 hex characters.
    Set `repo.variegata` to the same SHA and check `extension.version` matches
-   the tag. `ref` builds against DuckDB 2.0 (the community default since
-   2026-10-15) and `variegata` against v1.5.6; a missing key falls back to
+   the tag. `ref` builds against DuckDB 2.0 (the community default, `v2.0.0`
+   in its `build.yml` as of 2026-11-21) and `variegata` against v1.5.6; a missing key falls back to
    `ref`. One commit builds on both (duckdb-compat). There is no `andium`
    key: DuckDB 1.4.x is not supported.
-3. Open the PR, and **ask for the v1.5.6 build in its description** (wording
+3. Open the PR, and **ask for the v2.0.1 and v1.5.6 builds in its description** (wording
    below). For v2026.11.08 (#3566) that alone was enough: the maintainer who
    merged also ran the v1.5.6 build, with no comment needed.
-4. **After the merge, make sure the v1.5.6 build ran. Nothing builds it on its own.**
-   A merge (push to main) runs community-extensions' `build.yml` for DuckDB 2.0
-   only; `scripts/build.py` reads `variegata` only when a maintainer dispatches
+4. **After the merge, make sure the v2.0.1 and v1.5.6 builds ran. Nothing builds
+   them on its own.** A merge (push to main) runs community-extensions'
+   `build.yml` for its default DuckDB (v2.0.0) only; v2.0.1 needs a dispatch
+   with `duckdb_version: v2.0.1` (their #3672, 2026-11-19), and `scripts/build.py` reads `variegata` only when a maintainer dispatches
    `build.yml` with `duckdb_version: v1.5.6`. duckdb-sharepoint's v2026.10.18
    merged without that request and v1.5.6 had no binary (its #48). Comment on
    the merged PR if the description's request was not acted on:
 
-   > Thanks for merging! Could someone run the **DuckDB v1.5.6** build for
-   > `gdrive` (`build.yml` with `duckdb_version: v1.5.6`, `deploy: true`)?
+   > Thanks for merging! Could someone run the **DuckDB v2.0.1** and **v1.5.6**
+   > builds for `gdrive` (`build.yml` with `duckdb_version: v2.0.1` and
+   > `v1.5.6`, `deploy: true`)?
    > The descriptor sets `variegata` to the same SHA as `ref`.
 
    Done when **both** lines carry the release's stamp on every platform. Check
@@ -206,7 +207,7 @@ commit lands on a merged PR and changes nothing.
 
    ```bash
    T=vYYYY.MM.DD
-   for v in v1.5.6 v2.0.0; do for a in linux_amd64 linux_arm64 osx_arm64 windows_amd64; do
+   for v in v1.5.6 v2.0.0 v2.0.1; do for a in linux_amd64 linux_arm64 osx_arm64 windows_amd64; do
      s=$(curl -sf https://community-extensions.duckdb.org/$v/$a/gdrive.duckdb_extension.gz \
          | gunzip 2>/dev/null | tail -c 512 | strings -n 4 | grep -m1 -E '^v20')
      echo "$v $a ${s:-MISSING} $([ "$s" = "$T" ] && echo ok || echo STALE)"

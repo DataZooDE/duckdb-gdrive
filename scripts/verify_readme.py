@@ -43,7 +43,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 README = REPO_ROOT / "README.md"
-DUCKDB = REPO_ROOT / "build" / "release" / "duckdb"
+# The release shell with the extension loaded (2.0 no longer links it statically).
+DUCKDB = REPO_ROOT / "scripts" / "duckdb_shell.sh"
 
 SQL_BLOCK = re.compile(r"```sql\n(.*?)```", re.DOTALL)
 

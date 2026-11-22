@@ -4,6 +4,18 @@ PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 EXT_NAME=gdrive
 EXT_CONFIG=${PROJ_DIR}extension_config.cmake
 
+# DuckDB 2.0 no longer versions itself from `git describe`: unless the
+# DUCKDB_VERSION env var (or OVERRIDE_GIT_DESCRIBE) names the release, it
+# builds as `v2.0.0-devN` and stamps the artifact with the commit hash, which
+# no stock DuckDB loads. extension-ci-tools' distribution workflow sets
+# DUCKDB_VERSION; a plain `make` (local, Checks.yml) did not. Take it from the
+# submodule's EXACT tag, so a checkout off a tag still stamps a hash and
+# `make check_stamp` still fails on it. v1.5.6 ignores the variable.
+ifeq ($(strip $(DUCKDB_VERSION)),)
+DUCKDB_VERSION := $(shell git -C $(PROJ_DIR)duckdb describe --tags --exact-match HEAD 2>/dev/null)
+export DUCKDB_VERSION
+endif
+
 # Include the Makefile from extension-ci-tools
 include extension-ci-tools/makefiles/duckdb_extension.Makefile
 

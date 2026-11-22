@@ -94,8 +94,9 @@ off the shipped tag. This is not bookkeeping: the submodule once sat ~9,600
 commits past its tag on DuckDB main, every local build was green, and every
 release build was red -- `BaseSecret::GetName()` returns `const string &` on
 all released 1.x versions and `const Identifier &` on main. Local builds
-target **latest stable** (v1.5.6); CI additionally builds the **DuckDB 2.0**
-line, so a local green is necessary but not sufficient. DuckDB 1.4.x LTS is
+target **latest stable** (v2.0.1, `scripts/duckdb_version.env`); CI
+additionally builds **v1.5.6**, so a local green is necessary but not
+sufficient. DuckDB 1.4.x LTS is
 no longer supported.
 
 Artifacts:
@@ -266,8 +267,8 @@ e2e/                          uv + pytest harness: fixture provisioning,
 examples/                     one SQL file each, run against live Drive
 plugins/duckdb-gdrive/        Claude Code plugin: skills documenting the SQL API
                               (.claude-plugin/marketplace.json at the root)
-duckdb/                       submodule, v1.5.6 (latest stable)
-extension-ci-tools/           submodule, v1.5-variegata (rolling 1.5 branch)
+duckdb/                       submodule, v2.0.1 (latest stable)
+extension-ci-tools/           submodule, v2.0-cyanoptera (rolling 2.0 branch)
 ```
 
 ## SQL surface conventions (shared with duckdb-sharepoint)
@@ -427,9 +428,9 @@ internal ordering.
 sat ~9,600 commits past its tag on DuckDB main; every local build passed and
 every release build failed, because `BaseSecret::GetName()` returns
 `const string &` on all released 1.x versions and `const Identifier &` on
-main. `make check_pin` now enforces the tag. Local builds cover **stable
-only** — CI also builds the DuckDB 2.0 line, so a local pass is necessary but
-not sufficient.
+main. `make check_pin` now enforces the tag. Local builds cover **v2.0.1
+only** — CI also builds v1.5.6, so a local pass is necessary but not
+sufficient.
 
 **Drive picks the native type from the SOURCE content type, not the target.**
 `files.create` with `mimeType: application/vnd.google-apps.document` and a
@@ -484,6 +485,36 @@ without tags: fatal: No names found, cannot describe anything.
 
 The Checks workflow now fetches them. Release artifacts were never affected —
 the distribution pipeline checks DuckDB out properly.
+
+**DuckDB 2.0 does NOT version itself from `git describe` (found 2026-11-21).**
+Its CMake reads `DUCKDB_VERSION` (env) or `OVERRIDE_GIT_DESCRIBE`; with
+neither it builds `v2.0.0-devN` and stamps the artifact with the commit hash
+(`8d78114e90` instead of `v2.0.1`), even with the submodule exactly on the
+tag. `make check_stamp` caught it on the first local 2.0.1 build.
+extension-ci-tools' distribution workflow sets `DUCKDB_VERSION`; a plain
+`make` did not, so the Makefile now derives it from `git describe --tags
+--exact-match` in `duckdb/` -- which is why the tag fetch above still matters.
+
+**DuckDB 2.0's async COPY writer does not bound memory for a slow sink
+(found 2026-11-21).** 2.0 routes COPY output through `AsyncFileWriter`
+(`async_threads`, default 128). Against Drive/Graph, where a write is an HTTP
+round trip, peak RSS grows with the file: 124 MiB -> ~240 MiB, 373 MiB ->
+470-840 MiB, while `upload_buffer_peak_bytes` stays one chunk -- the queue is
+in core. Its backpressure (`ManagedAsyncMemoryGovernor`, nominally 64 MiB per
+thread) did not hold it in measurement; `threads=1`,
+`preserve_insertion_order=false` and `memory_limit='512MB'` changed nothing,
+`SET async_threads = 0` restored ~70 MiB. No 2.0 FileSystem hook opts a
+filesystem out (`GetWriteMode` only chooses SEQUENTIAL/POSITIONAL). Decision:
+document the workaround in the README, run the memory e2e tests with
+`async_threads = 0` (they test the extension, not core), report upstream. A
+consequence for failure-path tests: a COPY that errors early may have handed
+the extension NOTHING yet -- the failing-query test now produces ~108 MB first.
+Not caught for weeks because e2e had only ever run on the 1.5.6 shell.
+
+**DuckDB 2.0 renamed its CLI release assets.** `duckdb_cli-linux-amd64.zip`
+(1.x) is `duckdb-cli-linux-amd64.tar.gz` from 2.0 on (Windows: `.zip`; macOS
+per-arch, no universal), and the old names 404. `scripts/smoke_test.py`
+picks the table by major version; Checks.yml downloads the tarball.
 
 **A new .cpp must include `<cstdint>` itself, even if its header does.** The
 musl gate caught `gdrive_trace.cpp` in 3 seconds of CI: the TU named `uint64_t`

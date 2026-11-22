@@ -35,7 +35,7 @@ import uuid
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
-DUCKDB = REPO / "build" / "release" / "duckdb"
+DUCKDB = REPO / "scripts" / "duckdb_shell.sh"  # loads the extension on 2.0
 
 STEPS = [
     ("CREATE TABLE AS", "CREATE TABLE t AS SELECT i AS id, i%7 AS grp, "

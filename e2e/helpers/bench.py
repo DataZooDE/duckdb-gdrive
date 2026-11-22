@@ -46,7 +46,7 @@ from pathlib import Path
 from .drive import Drive, DriveConfigError
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DUCKDB = REPO_ROOT / "build" / "release" / "duckdb"
+DUCKDB = REPO_ROOT / "scripts" / "duckdb_shell.sh"  # loads the extension on 2.0
 
 #: Timed runs per leg. Three is enough for a minimum to be stable and keeps a
 #: 100 MB cold scan over Drive inside a sane wall-clock.
