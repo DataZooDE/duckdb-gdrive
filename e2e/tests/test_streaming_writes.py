@@ -60,6 +60,13 @@ def _files_named(drive, name: str) -> list[dict]:
 
 def _copy_measured(duckdb_cli, secret_sql: str, uri: str, rows: int) -> tuple[dict, int]:
     code, out, rss = _run_measured(duckdb_cli, f"""{secret_sql}
+        -- DuckDB 2.0's async COPY writer queues output faster than an upload
+        -- drains it, so with async I/O on, peak RSS grows with the file
+        -- whatever this extension does (README: "Memory on DuckDB 2.0").
+        -- async_threads = 0 is the documented workaround and isolates what
+        -- this test is about: the extension holds one chunk, not the file.
+        -- (2.0 only: e2e runs the bundled shell, which is 2.0.1.)
+        SET async_threads = 0;
         SET threads = 4;
         CALL gdrive_reset_stats();
         COPY (SELECT i, repeat('x', 100) AS pad FROM range({rows}) t(i)) TO '{uri}' (HEADER);
@@ -220,14 +227,19 @@ def test_streamed_overwrite_keeps_old_content_until_done(writer, scratch, duckdb
 
 def test_failed_query_cancels_the_session(writer, scratch, duckdb_cli, gdrive_secret_sql, tmp_path):
     """A query error mid-COPY drops the handle; the session is cancelled and
-    Drive confirms it (499 on the upload.cancel span)."""
+    Drive confirms it (499 on the upload.cancel span).
+
+    The COPY must produce more than DuckDB 2.0's async write backlog (64 MiB
+    for one thread) before it fails: with 3.6 MB of output, as before, every
+    byte was still queued in DuckDB when the error hit and no chunk had
+    reached the extension. ~108 MB here, in 1 MiB chunks."""
     trace = str(tmp_path / "trace.jsonl")
     uri = f"{_base(writer, scratch)}/boom.csv"
     proc, output = _spawn_traced(duckdb_cli, f"""{gdrive_secret_sql}
         SET threads = 1;
-        SET gdrive_upload_chunk_bytes = 262144;
-        COPY (SELECT i, CASE WHEN i < 90000 THEN md5(i::VARCHAR) ELSE error('boom mid-stream') END AS h
-              FROM range(100000) t(i)) TO '{uri}' (HEADER);
+        SET gdrive_upload_chunk_bytes = 1048576;
+        COPY (SELECT i, CASE WHEN i < 2700000 THEN md5(i::VARCHAR) ELSE error('boom mid-stream') END AS h
+              FROM range(3000000) t(i)) TO '{uri}' (HEADER);
     """, trace)
     text = _finish(proc, output)
     assert "boom mid-stream" in text, text

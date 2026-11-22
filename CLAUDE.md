@@ -495,6 +495,22 @@ extension-ci-tools' distribution workflow sets `DUCKDB_VERSION`; a plain
 `make` did not, so the Makefile now derives it from `git describe --tags
 --exact-match` in `duckdb/` -- which is why the tag fetch above still matters.
 
+**DuckDB 2.0's async COPY writer does not bound memory for a slow sink
+(found 2026-11-21).** 2.0 routes COPY output through `AsyncFileWriter`
+(`async_threads`, default 128). Against Drive/Graph, where a write is an HTTP
+round trip, peak RSS grows with the file: 124 MiB -> ~240 MiB, 373 MiB ->
+470-840 MiB, while `upload_buffer_peak_bytes` stays one chunk -- the queue is
+in core. Its backpressure (`ManagedAsyncMemoryGovernor`, nominally 64 MiB per
+thread) did not hold it in measurement; `threads=1`,
+`preserve_insertion_order=false` and `memory_limit='512MB'` changed nothing,
+`SET async_threads = 0` restored ~70 MiB. No 2.0 FileSystem hook opts a
+filesystem out (`GetWriteMode` only chooses SEQUENTIAL/POSITIONAL). Decision:
+document the workaround in the README, run the memory e2e tests with
+`async_threads = 0` (they test the extension, not core), report upstream. A
+consequence for failure-path tests: a COPY that errors early may have handed
+the extension NOTHING yet -- the failing-query test now produces ~108 MB first.
+Not caught for weeks because e2e had only ever run on the 1.5.6 shell.
+
 **DuckDB 2.0 renamed its CLI release assets.** `duckdb_cli-linux-amd64.zip`
 (1.x) is `duckdb-cli-linux-amd64.tar.gz` from 2.0 on (Windows: `.zip`; macOS
 per-arch, no universal), and the old names 404. `scripts/smoke_test.py`

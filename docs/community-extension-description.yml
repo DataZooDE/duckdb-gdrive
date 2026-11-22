@@ -18,7 +18,7 @@
 
 extension:
   name: gdrive
-  version: 2026.11.21
+  version: 2026.11.22
   description: Google Drive in SQL -- files and Sheets (gdrive://, browser links; read and write a Sheet by tab or range), Drive's metadata, locks, versions, change feeds and permissions
   language: C++
   build: cmake

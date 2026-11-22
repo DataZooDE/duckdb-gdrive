@@ -195,7 +195,7 @@ name in one folder, so a path is not a unique identifier. Rather than pick one
 extension fails and names both file ids so you can use the `id:` form. A glob
 returns such files as `gdrive://id:` paths.
 
-One exception, on the write path only (new in v2026.11.21): when every file sharing the name has
+One exception, on the write path only (new in v2026.11.22): when every file sharing the name has
 the same bytes (same `md5Checksum` and size), a write keeps the oldest, moves
 the others to the trash, and goes ahead. Nothing is lost, and the path is
 usable again. Copies that differ, folders and native Google files are never
@@ -396,6 +396,20 @@ answer to it is lost, a new file is looked up by its reserved id -- see below
 is open, chunks carry no token, so a long upload cannot fail on token expiry.
 Drive cannot write at a byte offset, so a positional write raises an error
 rather than silently corrupting the file.
+
+**Memory on DuckDB 2.0.** The figures above are for DuckDB v1.5.6. DuckDB 2.0
+writes `COPY` output through a new asynchronous writer that queues data faster
+than an upload drains it, so peak memory grows with the file: a 124 MiB `COPY`
+to `gdrive://` peaks at ~240 MiB, a 373 MiB one at ~470-840 MiB. The extension
+itself still holds one chunk; the queue is in DuckDB. To stream in bounded
+memory on 2.0, turn the asynchronous writer off for the session:
+
+```sql
+SET async_threads = 0;   -- DuckDB 2.0: bounded-memory COPY to gdrive:// (~70 MiB)
+```
+
+It affects asynchronous I/O for every query in that session, so set it where
+large uploads run rather than globally.
 
 Names are **case-sensitive**, as Drive stores them: `report.csv` and
 `Report.csv` are two files, and writing one never replaces the other. A write
