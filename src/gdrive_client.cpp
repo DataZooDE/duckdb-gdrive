@@ -1378,12 +1378,26 @@ private:
 		case HttpMethod::DELETE_:
 			res = client.Delete(path_and_query.c_str(), headers);
 			break;
-		case HttpMethod::PUT:
-			// (pointer, length): an upload chunk is sent from the caller's
-			// buffer, never copied into a request body string.
-			res = client.Put(path_and_query.c_str(), headers, put_body ? put_body : body.data(),
-			                 put_body ? put_body_len : body.size(), content_type);
+		case HttpMethod::PUT: {
+			// An upload chunk is streamed from the caller's buffer by a content
+			// provider. The (pointer, length) overload looks copy-free but is
+			// not: httplib assigns it into req.body, a second full chunk (16 MiB
+			// by default) that upload_buffer_peak_bytes never saw. An empty body
+			// (a resumable status query) has nothing to copy and keeps that call.
+			const char *data = put_body ? put_body : body.data();
+			const size_t len = put_body ? put_body_len : body.size();
+			if (len == 0) {
+				res = client.Put(path_and_query.c_str(), headers, data, len, content_type);
+			} else {
+				res = client.Put(
+				    path_and_query.c_str(), headers, len,
+				    [data](size_t offset, size_t length, duckdb_httplib_openssl::DataSink &sink) {
+					    return sink.write(data + offset, length);
+				    },
+				    content_type);
+			}
 			break;
+		}
 		}
 
 		RawResult out;
