@@ -496,20 +496,48 @@ extension-ci-tools' distribution workflow sets `DUCKDB_VERSION`; a plain
 --exact-match` in `duckdb/` -- which is why the tag fetch above still matters.
 
 **DuckDB 2.0's async COPY writer does not bound memory for a slow sink
-(found 2026-11-21).** 2.0 routes COPY output through `AsyncFileWriter`
-(`async_threads`, default 128). Against Drive/Graph, where a write is an HTTP
-round trip, peak RSS grows with the file: 124 MiB -> ~240 MiB, 373 MiB ->
-470-840 MiB, while `upload_buffer_peak_bytes` stays one chunk -- the queue is
-in core. Its backpressure (`ManagedAsyncMemoryGovernor`, nominally 64 MiB per
-thread) did not hold it in measurement; `threads=1`,
-`preserve_insertion_order=false` and `memory_limit='512MB'` changed nothing,
-`SET async_threads = 0` restored ~70 MiB. No 2.0 FileSystem hook opts a
-filesystem out (`GetWriteMode` only chooses SEQUENTIAL/POSITIONAL). Decision:
-document the workaround in the README, run the memory e2e tests with
-`async_threads = 0` (they test the extension, not core), report upstream. A
-consequence for failure-path tests: a COPY that errors early may have handed
-the extension NOTHING yet -- the failing-query test now produces ~108 MB first.
-Not caught for weeks because e2e had only ever run on the 1.5.6 shell.
+(found 2026-11-21, root-caused 2026-11-22).** 2.0 routes COPY output through
+`AsyncFileWriter` (`async_threads`, default 128). Against Drive/Graph, where a
+write is an HTTP round trip, peak RSS grows with the file: 124 MiB -> ~240 MiB,
+373 MiB -> 470-840 MiB, while `upload_buffer_peak_bytes` stays one chunk.
+
+It is core, not us -- proven, not inferred:
+- **No extension needed.** Stock v2.0.1 CLI, `COPY ... TO '/dev/stdout'`
+  drained by a reader that sleeps 5 ms per 256 KiB: 373 MiB of output peaks at
+  433 MiB RSS (379 MiB with `threads=1`, 42 MiB with `async_threads=0`; v1.5.6:
+  29 MiB). The script is in the upstream-issue draft (`.crew/`).
+- **Our heap is flat.** heaptrack sees every allocation the extension makes
+  (system malloc): 34 MB peak while RSS was 310 MB.
+- **The growth is DuckDB's own allocator.** The binary statically links its
+  bundled jemalloc (`duckdb_je_malloc`), which heaptrack and `LD_PRELOAD`
+  cannot see. So `LD_PRELOAD` jemalloc/tcmalloc, `MALLOC_ARENA_MAX=1` and
+  `MALLOC_MMAP_THRESHOLD_` change nothing, and that is not evidence about us.
+  It is live, not retained: `allocator_background_threads` and
+  `allocator_flush_threshold='8MB'` move it by <15%. Thread stacks: ~1 MiB.
+- **Why it is unbounded.** The backlog budget (`ManagedAsyncMemoryGovernor`,
+  async_memory_governor.cpp:16) is `min(64 MiB * threads, memory_limit / 8)`
+  per writer -- ~1.5 GiB at 24 threads, more than the file -- and a SEQUENTIAL
+  target drains one request at a time, so the queue fills at producer speed.
+  Even at `threads=1` RSS exceeds the nominal 64 MiB, so core's accounting
+  understates what the queue holds; not pinned down further.
+- **Our API use is right.** `GetWriteMode` (SEQUENTIAL), `OnDiskFile`,
+  `CanSeek` are truthful; changing them cannot move the bound. No 2.0 FileSystem
+  hook opts a filesystem out; `TryGetNetworkThroughput` is read-side only.
+
+Decision: document `SET async_threads = 0` in the README, run the memory e2e
+tests with it (they test the extension, not core), report upstream (draft in
+`.crew/upstream-duckdb-async-copy-memory.md`). For failure-path tests: a COPY
+that errors early may have handed the extension NOTHING yet (non-local targets
+wait for 8 MiB before the first drain) -- the failing-query test produces
+~108 MB first. Not caught for weeks because e2e had only ever run on 1.5.6.
+
+The investigation also found one real defect of ours, separate from the
+growth: the upload PUT used httplib's (pointer, length) overload, which copies
+the whole chunk into `req.body` -- a second 16 MiB per chunk that
+`upload_buffer_peak_bytes` never saw, under a comment claiming the opposite. It
+now streams from the buffer through a content provider. Transient (one chunk at
+peak), so it never explained the growth. duckdb-sharepoint's upload path
+writes from its buffer directly and had no such copy.
 
 **DuckDB 2.0 renamed its CLI release assets.** `duckdb_cli-linux-amd64.zip`
 (1.x) is `duckdb-cli-linux-amd64.tar.gz` from 2.0 on (Windows: `.zip`; macOS
